@@ -1,0 +1,192 @@
+name: Windows storage observer fresh-consumer checks
+
+on:
+  push:
+    branches: [codex/windows-descriptor-observer]
+    paths:
+      - .github/workflows/windows-storage-observer-cold.yml
+      - scripts/ci/windows_storage_packet.mjs
+      - scripts/ci/windows_storage_packet.test.mjs
+      - scripts/windows_storage_workflow.test.mjs
+  workflow_dispatch:
+    inputs:
+      expected_source_revision:
+        description: Exact reviewed source commit, not a tag or branch
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-storage-observer-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  host-contracts:
+    if: >-
+      github.repository == 'Tgk-30/YAWF-Stream' && github.repository_owner == 'Tgk-30' &&
+      github.actor == 'Tgk-30' && github.ref_type == 'branch' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/windows-descriptor-observer')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.2'
+      - name: Require exact reviewed source
+        env:
+          EXPECTED_SOURCE: ${{ inputs.expected_source_revision }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            test "$EXPECTED_SOURCE" = "$GITHUB_SHA"
+          fi
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Validate source and artifact contracts without native execution
+        run: node --test scripts/prepare_windows_storage_observer.test.mjs scripts/prepare_tauri_server_resources.test.mjs scripts/ci/windows_storage_packet.test.mjs scripts/windows_storage_workflow.test.mjs scripts/generate_windows_signing_config.test.mjs
+
+  producer:
+    name: Compile unsigned observer and server on producer only
+    needs: host-contracts
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    outputs:
+      packet_sha256: ${{ steps.packet.outputs.packet_sha256 }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.2'
+      - name: Install build dependencies
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund --prefix web
+          if ($LASTEXITCODE -ne 0) { throw 'Web dependency setup failed.' }
+          npm ci --ignore-scripts --no-audit --no-fund --prefix server
+          if ($LASTEXITCODE -ne 0) { throw 'Server dependency setup failed.' }
+      - name: Compile and explicitly bind unsigned test helper
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node scripts/prepare_windows_storage_observer.mjs compile
+          if ($LASTEXITCODE -ne 0) { throw 'Storage observer compilation failed.' }
+          $compiled = Get-Content server/.build/windows-storage-observer/compile.json -Raw | ConvertFrom-Json
+          $helper = 'server/.build/windows-storage-observer/unsigned/StorageDescriptorObserver.exe'
+          $pin = (Get-FileHash $helper -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($pin -cne $compiled.unsignedHelperSha256) { throw 'Unsigned storage observer identity failed.' }
+          node scripts/prepare_windows_storage_observer.mjs bind --sha256 $pin
+          if ($LASTEXITCODE -ne 0) { throw 'Storage observer binding failed.' }
+      - name: Build server with immutable helper binding
+        working-directory: server
+        run: npm run build
+      - name: Build current web assets
+        working-directory: web
+        run: npm run build
+      - name: Create source-bound generated-file packet without running it
+        id: packet
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packet = Join-Path $env:RUNNER_TEMP 'yawf-windows-storage-packet'
+          $receipt = node scripts/ci/windows_storage_packet.mjs create --repo $env:GITHUB_WORKSPACE --packet $packet --source $env:GITHUB_SHA | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $receipt.packetSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'Packet creation failed.' }
+          "packet_sha256=$($receipt.packetSha256)" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Retain immutable unsigned test packet
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-storage-source-packet
+          path: ${{ runner.temp }}/yawf-windows-storage-packet/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+  consumer:
+    name: Fresh ${{ matrix.os }} full suite before other native probes
+    needs: [host-contracts, producer]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DS_SERVER_SECRET_KEY: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.2'
+      - name: Install source-test dependencies without compiler or helper warmup
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund --prefix web
+          if ($LASTEXITCODE -ne 0) { throw 'Web dependency setup failed.' }
+          npm ci --ignore-scripts --no-audit --no-fund --prefix server
+          if ($LASTEXITCODE -ne 0) { throw 'Server dependency setup failed.' }
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.producer.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/yawf-windows-storage-packet
+      - name: Admit exact producer bytes before any payload execution or copy
+        id: admit
+        env:
+          EXPECTED_PACKET_SHA256: ${{ needs.producer.outputs.packet_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packet = Join-Path $env:RUNNER_TEMP 'yawf-windows-storage-packet'
+          node scripts/ci/windows_storage_packet.mjs admit --repo $env:GITHUB_WORKSPACE --packet $packet --source $env:GITHUB_SHA --sha256 $env:EXPECTED_PACKET_SHA256
+          if ($LASTEXITCODE -ne 0) { throw 'Source packet admission failed.' }
+      - name: Full source suite first, unchanged native and test deadlines
+        id: source-tests
+        working-directory: server
+        run: node node_modules/vitest/vitest.mjs run --maxWorkers=1 --no-file-parallelism
+      - name: Typecheck and verify prepared identity without recompilation
+        if: ${{ !cancelled() && steps.admit.outcome == 'success' }}
+        run: |
+          node scripts/prepare_windows_storage_observer.mjs verify
+          if ($LASTEXITCODE -ne 0) { throw 'Prepared observer identity failed.' }
+          npm run typecheck --prefix server
+          if ($LASTEXITCODE -ne 0) { throw 'Server typecheck failed.' }
+      - name: Prepare and smoke actual packaged layout with relocated Node
+        id: bundle-smoke
+        if: ${{ !cancelled() && steps.admit.outcome == 'success' }}
+        env:
+          NODE_RUNTIME_VERSION: '24.22.2'
+        run: |
+          node scripts/prepare_tauri_server_resources.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Server resource preparation failed.' }
+          node scripts/download_tauri_node_runtime.mjs win-x64
+          if ($LASTEXITCODE -ne 0) { throw 'Official Node runtime preparation failed.' }
+          node scripts/smoke_tauri_server_bundle.mjs web/src-tauri/resources/server
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged server smoke failed.' }
+      - name: Retain source and binding evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-storage-consumer-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/yawf-windows-storage-packet/packet.json
+            server/.build/windows-storage-observer/compile.json
+            server/.build/windows-storage-observer/runtime/binding.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14

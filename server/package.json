@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.cjs",
-    "build": "npm run typecheck && node -e \"require('fs').rmSync('dist', { recursive: true, force: true }); require('esbuild').buildSync({ entryPoints: ['src/index.ts'], bundle: true, platform: 'node', format: 'cjs', target: 'node24', outfile: 'dist/index.cjs' })\"",
+    "build": "npm run typecheck && node build.mjs",
     "test": "node node_modules/vitest/vitest.mjs run",
     "typecheck": "node node_modules/typescript/lib/tsc.js -p tsconfig.json --noEmit"
   },

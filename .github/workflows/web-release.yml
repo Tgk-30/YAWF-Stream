@@ -398,6 +398,63 @@ jobs:
         working-directory: web
         run: npm test
 
+      - name: Compile Windows storage observer
+        if: matrix.os == 'windows' && vars.YAWF_RELEASE_WINDOWS == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node scripts/prepare_windows_storage_observer.mjs compile
+          if ($LASTEXITCODE -ne 0) { throw 'Storage observer compilation failed.' }
+
+      - name: Sign Windows storage observer
+        if: matrix.os == 'windows' && vars.YAWF_RELEASE_WINDOWS == 'true'
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE: ${{ secrets.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $compiled = Get-Content server/.build/windows-storage-observer/compile.json -Raw | ConvertFrom-Json
+          $helper = 'server/.build/windows-storage-observer/unsigned/StorageDescriptorObserver.exe'
+          $unsignedPin = (Get-FileHash $helper -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($unsignedPin -cne $compiled.unsignedHelperSha256) { throw 'Unsigned storage observer identity failed.' }
+          node --input-type=module -e @'
+          import { spawnSync } from 'node:child_process';
+          import { resolve } from 'node:path';
+          import { windowsSigningConfig } from './scripts/generate_windows_signing_config.mjs';
+          try {
+            const command = windowsSigningConfig().bundle.windows.signCommand;
+            if (command.cmd !== 'artifact-signing-cli' || command.args.filter(a => a === '%1').length !== 1) throw new Error();
+            const file = resolve('server/.build/windows-storage-observer/unsigned/StorageDescriptorObserver.exe');
+            const args = command.args.map(a => a === '%1' ? file : a);
+            const result = spawnSync(command.cmd, args, { shell: false, timeout: 180000,
+              maxBuffer: 65536, stdio: ['ignore', 'pipe', 'pipe'] });
+            if (result.status !== 0 || result.error) throw new Error();
+          } catch {
+            console.error('Windows storage observer signing failed. Raw signer output was not retained.');
+            process.exitCode = 1;
+          }
+          '@
+          if ($LASTEXITCODE -ne 0) { throw 'Storage observer signing failed.' }
+
+      - name: Verify and bind signed Windows storage observer
+        if: matrix.os == 'windows' && vars.YAWF_RELEASE_WINDOWS == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $helper = 'server/.build/windows-storage-observer/unsigned/StorageDescriptorObserver.exe'
+          $signature = Get-AuthenticodeSignature -FilePath $helper
+          if ($signature.Status -ne 'Valid' -or $signature.SignatureType -ne 'Authenticode') {
+            throw 'Storage observer requires a valid Authenticode signature before binding.'
+          }
+          $finalPin = (Get-FileHash $helper -Algorithm SHA256).Hash.ToLowerInvariant()
+          node scripts/prepare_windows_storage_observer.mjs bind --sha256 $finalPin
+          if ($LASTEXITCODE -ne 0) { throw 'Signed storage observer binding failed.' }
+
       - name: Test server
         # CI still tests held Windows; only shipping platforms gate packaging.
         if: matrix.os != 'windows' || vars.YAWF_RELEASE_WINDOWS == 'true'
@@ -405,14 +462,17 @@ jobs:
         run: npm test
 
       - name: Build server bundle
+        if: matrix.os != 'windows' || vars.YAWF_RELEASE_WINDOWS == 'true'
         working-directory: server
         run: npm run build
 
       - name: Build hosted PWA assets
+        if: matrix.os != 'windows' || vars.YAWF_RELEASE_WINDOWS == 'true'
         working-directory: web
         run: npm run build
 
       - name: Prepare desktop server resources
+        if: matrix.os != 'windows' || vars.YAWF_RELEASE_WINDOWS == 'true'
         run: node scripts/prepare_tauri_server_resources.mjs
 
       - name: Bundle Node runtime (macOS)

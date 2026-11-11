@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { lstatSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { dirname, join, parse, resolve } from "node:path";
 
 export class PrivateStorageError extends Error {
@@ -72,75 +74,69 @@ export function windowsStorageDescriptorIsPrivate(value: WindowsStorageDescripto
   return value.kind !== "directory" || (fileInheritance && directoryInheritance);
 }
 
-// Static code only. Paths travel as JSON on stdin, never as executable text or
-// command-line values. This observer cannot change ACLs or read file contents.
-const DESCRIPTOR_OBSERVER = String.raw`
-$ErrorActionPreference = 'Stop'
-$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
-[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
-[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class YawfNativeSecurity {
-  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
-  [return: MarshalAs(UnmanagedType.Bool)]
-  private static extern bool GetFileSecurityW(string name, uint information, [Out] byte[] buffer, uint length, out uint needed);
-  public static byte[] Read(string path) {
-    uint needed;
-    bool initial = GetFileSecurityW(path, 5, null, 0, out needed);
-    if (initial || Marshal.GetLastWin32Error() != 122 || needed < 20 || needed > 262144)
-      throw new InvalidOperationException("Storage metadata could not be read.");
-    byte[] bytes = new byte[(int)needed];
-    uint actual;
-    if (!GetFileSecurityW(path, 5, bytes, (uint)bytes.Length, out actual) || actual > bytes.Length)
-      throw new InvalidOperationException("Storage metadata could not be read.");
-    return bytes;
-  }
+// Production bundles receive this literal at build time. Source development
+// uses only the fixed module-relative preparation directory, never PATH or CWD.
+declare const __YAWF_WINDOWS_STORAGE_BINDING__: unknown;
+const OBSERVER_PROTOCOL = "yawf-windows-storage-descriptor-v1";
+const OBSERVER_EXE = "StorageDescriptorObserver.exe";
+const REFERENCE_NAMES = ["mscorlib.dll", "System.dll", "System.Core.dll", "System.Web.Extensions.dll"];
+interface ObserverBinding {
+  schemaVersion: 1; protocol: string; sourceSha256: string; compilerSha256: string;
+  frameworkTarget: string; referenceSha256: Record<string, string>;
+  unsignedHelperSha256: string; helperSha256: string; helperSize: number;
 }
-'@
-$entries = ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())
-$current = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$installer = $null
-try { $installer = ([Security.Principal.NTAccount]::new('NT SERVICE', 'TrustedInstaller')).Translate([Security.Principal.SecurityIdentifier]).Value } catch {}
-$result = @()
-foreach ($entry in $entries) {
-  $attributes = [IO.File]::GetAttributes($entry.path)
-  $raw = [Security.AccessControl.RawSecurityDescriptor]::new([YawfNativeSecurity]::Read($entry.path), 0)
-  $rules = @()
-  $types = @()
-  if ($null -ne $raw.DiscretionaryAcl) {
-    foreach ($ace in $raw.DiscretionaryAcl) {
-      $types += [int]$ace.AceType
-      if ($ace -isnot [Security.AccessControl.CommonAce] -or [int]$ace.AceType -notin @(0, 1)) { continue }
-      $aceFlags = [int]$ace.AceFlags
-      $rules += [ordered]@{
-        sid = $ace.SecurityIdentifier.Value
-        allow = [int]$ace.AceType -eq 0
-        rights = ([int64]$ace.AccessMask -band 4294967295)
-        inheritOnly = ($aceFlags -band [int][Security.AccessControl.AceFlags]::InheritOnly) -ne 0
-        objectInherit = ($aceFlags -band [int][Security.AccessControl.AceFlags]::ObjectInherit) -ne 0
-        containerInherit = ($aceFlags -band [int][Security.AccessControl.AceFlags]::ContainerInherit) -ne 0
-        noPropagate = ($aceFlags -band [int][Security.AccessControl.AceFlags]::NoPropagateInherit) -ne 0
-      }
-    }
-  }
-  $result += [ordered]@{
-    id = $entry.id
-    kind = $entry.kind
-    currentSid = $current
-    ownerSid = $raw.Owner.Value
-    trustedInstallerSid = $installer
-    directory = $attributes.HasFlag([IO.FileAttributes]::Directory)
-    reparse = $attributes.HasFlag([IO.FileAttributes]::ReparsePoint)
-    daclPresent = ($raw.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclPresent) -ne 0
-    daclNull = $null -eq $raw.DiscretionaryAcl
-    rawAceTypes = $types
-    rules = $rules
-  }
+function exactKeys(value: unknown, keys: string[]): value is Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
 }
-[Console]::WriteLine((ConvertTo-Json -InputObject $result -Depth 8 -Compress))
-`;
+function observerBinding(value: unknown): ObserverBinding {
+  const digest = (hash: unknown) => typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash);
+  if (!exactKeys(value, ["schemaVersion", "protocol", "sourceSha256", "compilerSha256", "frameworkTarget",
+    "referenceSha256", "unsignedHelperSha256", "helperSha256", "helperSize"]) || value.schemaVersion !== 1 ||
+    value.protocol !== OBSERVER_PROTOCOL || value.frameworkTarget !== ".NETFramework,Version=v4.8" ||
+    ![value.sourceSha256, value.compilerSha256, value.unsignedHelperSha256, value.helperSha256].every(digest) ||
+    !exactKeys(value.referenceSha256, REFERENCE_NAMES) || !Object.values(value.referenceSha256).every(digest) ||
+    !Number.isSafeInteger(value.helperSize) || (value.helperSize as number) < 1 || (value.helperSize as number) > 2_000_000) throw new PrivateStorageError();
+  return value as unknown as ObserverBinding;
+}
+function unredirected(path: string): void {
+  const absolute = resolve(path);
+  for (let current = absolute; ; current = dirname(current)) {
+    if (lstatSync(current).isSymbolicLink()) throw new PrivateStorageError();
+    if (current === parse(current).root) break;
+  }
+  if (realpathSync.native(absolute).toLowerCase() !== absolute.toLowerCase()) throw new PrivateStorageError();
+}
+function observerFile(path: string, limit: number): Buffer {
+  unredirected(path);
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.size < 1 || stat.size > limit) throw new PrivateStorageError();
+  const bytes = readFileSync(path);
+  if (bytes.length !== stat.size) throw new PrivateStorageError();
+  return bytes;
+}
+function verifiedObserver(): string {
+  let directory: string;
+  let expected: ObserverBinding;
+  if (typeof __YAWF_WINDOWS_STORAGE_BINDING__ !== "undefined") {
+    // A non-Windows bundle cannot fall back to a mutable development manifest.
+    expected = observerBinding(__YAWF_WINDOWS_STORAGE_BINDING__);
+    directory = join(__dirname, "windows-storage-observer");
+  } else {
+    directory = fileURLToPath(new URL("../.build/windows-storage-observer/runtime/", import.meta.url));
+    expected = observerBinding(JSON.parse(observerFile(join(directory, "binding.json"), 16_000).toString("utf8")));
+    const source = fileURLToPath(new URL("../native/windows/StorageDescriptorObserver.cs", import.meta.url));
+    if (createHash("sha256").update(observerFile(source, 64_000)).digest("hex") !== expected.sourceSha256) throw new PrivateStorageError();
+  }
+  unredirected(directory);
+  if (readdirSync(directory).sort().join("\0") !== [OBSERVER_EXE, "binding.json"].sort().join("\0")) throw new PrivateStorageError();
+  const disk = observerBinding(JSON.parse(observerFile(join(directory, "binding.json"), 16_000).toString("utf8")));
+  if (JSON.stringify(disk) !== JSON.stringify(expected)) throw new PrivateStorageError();
+  const executable = join(directory, OBSERVER_EXE);
+  const bytes = observerFile(executable, 2_000_000);
+  if (bytes.length !== expected.helperSize || createHash("sha256").update(bytes).digest("hex") !== expected.helperSha256) throw new PrivateStorageError();
+  return executable;
+}
 
 /** Validate existing artifacts and the private ancestor from which a new
  * artifact would inherit its DACL. No cache: permissions can change at runtime. */
@@ -182,18 +178,19 @@ export function assertPrivateWindowsStorage(paths: readonly string[]): void {
       }
     }
     const requests = [...entries.values()].map((entry, id) => ({ ...entry, id }));
-    const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const executable = verifiedObserver();
     const osEnvironment = new Set(["SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "TEMP", "TMP", "USERPROFILE",
       "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMDATA", "LOCALAPPDATA", "APPDATA"]);
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => osEnvironment.has(key.toUpperCase()))
       .map(([key, value]) => [key.toUpperCase(), value]));
-    env.PSModulePath = join(dirname(powershell), "Modules");
-    const output = execFileSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-      Buffer.from(DESCRIPTOR_OBSERVER, "utf16le").toString("base64")], {
-      input: JSON.stringify(requests), encoding: "utf8", env, timeout: 7000, maxBuffer: 256_000, windowsHide: true,
+    const output = execFileSync(executable, [], {
+      input: JSON.stringify({ protocol: OBSERVER_PROTOCOL, entries: requests }), encoding: "utf8", env, timeout: 7000, maxBuffer: 256_000, windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
-    const descriptors = JSON.parse(output.replace(/^\uFEFF/, "").trim()) as Array<WindowsStorageDescriptor & { id: number }>;
+    if (Buffer.byteLength(output, "utf8") > 256_000) throw new PrivateStorageError();
+    const response: unknown = JSON.parse(output.replace(/^\uFEFF/, "").trim());
+    if (!exactKeys(response, ["protocol", "descriptors"]) || response.protocol !== OBSERVER_PROTOCOL) throw new PrivateStorageError();
+    const descriptors = response.descriptors as Array<WindowsStorageDescriptor & { id: number }>;
     if (!Array.isArray(descriptors) || descriptors.length !== requests.length || descriptors.some((value, id) =>
       value.id !== id || value.kind !== requests[id]!.kind || !windowsStorageDescriptorIsPrivate(value))) throw new PrivateStorageError();
   } catch {

@@ -66,6 +66,7 @@ web/dist
 web/src-tauri/target
 web/src-tauri/gen
 server/node_modules
+server/.build
 server/dist
 server/data
 **/*.tsbuildinfo
