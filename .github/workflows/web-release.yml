@@ -1,66 +1,30 @@
-# Release workflow for the DebridStreamer Tauri (web/) desktop app.
-#
-# Builds installable bundles for macOS (per-arch), Linux and Windows, signs the
-# updater artifacts, (on macOS) bundles the libmpv runtime + code-signs +
-# notarizes with a Developer ID, and uploads everything to a DRAFT GitHub Release
-# plus the `latest.json` the in-app updater reads.
-#
-# Trigger: a v*-web tag builds the coordinated draft release. Manual branch
-# dispatch builds only a signed Android verification artifact, never a release.
-#
-# ──────────────────────────────────────────────────────────────────────────
-# REQUIRED REPO SECRETS (Settings → Secrets and variables → Actions)
-#
-# Updater signing (REQUIRED for auto-update to work):
-#   TAURI_SIGNING_PRIVATE_KEY            Minisign private key blob (base64).
-#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD   Password for that key ("" if none).
-#
-# macOS code-signing + notarization (REQUIRED for a public mac release):
-#   APPLE_CERTIFICATE          Base64 of the "Developer ID Application" .p12.
-#   APPLE_CERTIFICATE_PASSWORD Password set when exporting that .p12.
-#   APPLE_SIGNING_IDENTITY     e.g. "Developer ID Application: Your Name (TEAMID)".
-#   APPLE_ID                   Apple ID email used for notarization.
-#   APPLE_PASSWORD             App-specific password for that Apple ID.
-#   APPLE_TEAM_ID              Your 10-char Apple Developer Team ID.
-#
-# Windows Authenticode signing through Azure Artifact Signing (REQUIRED for a
-# public Windows release). Windows artifacts are held unless the repository
-# variable YAWF_RELEASE_WINDOWS is set to true:
-#   AZURE_CLIENT_ID
-#   AZURE_CLIENT_SECRET
-#   AZURE_TENANT_ID
-#   AZURE_ARTIFACT_SIGNING_ENDPOINT
-#   AZURE_ARTIFACT_SIGNING_ACCOUNT
-#   AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE
-#
-# macOS shipping is PER-ARCH (see web/src-tauri/DEPLOYMENT.md): arm64 builds on
-# an Apple-Silicon runner and x86_64 on an Intel runner, each bundling its NATIVE
-# source-built macOS11 libmpv/FFmpeg dependency tree, verified before release.
-# ──────────────────────────────────────────────────────────────────────────
-
-name: web-release
+# Exact one-tag recovery. Product code and release gates remain frozen at 2edc189a.
+# Reuses independently qualified unsigned native media, never shipping58 binaries.
+# No automatic publication, Android/server build, Windows release or retagging.
+name: desktop96-pinned-recovery
 
 on:
-  push:
-    tags:
-      - "v*-web"
   workflow_dispatch:
 
-# tauri-action creates/edits a release and uploads assets.
 permissions:
   actions: read
   contents: write
 
+concurrency:
+  group: yawf-desktop96-pinned-recovery
+  cancel-in-progress: false
+
+env:
+  RECOVERY_RELEASE_TAG: v2.3.96-web
+
 jobs:
   release-scope:
-    name: Resolve explicit release scope
+    name: Admit exact frozen source and unsigned runtime identities
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'Tgk-30/YAWF-Stream' && github.actor == 'Tgk-30' && github.ref == 'refs/heads/codex/desktop96-recovery'
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
+    timeout-minutes: 10
     outputs:
-      desktop_only: ${{ steps.scope.outputs.desktop_only }}
-      include_android: ${{ steps.scope.outputs.include_android }}
-      include_server: ${{ steps.scope.outputs.include_server }}
+      desktop_only: ${{ steps.admit.outputs.desktop_only }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -68,23 +32,31 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - name: Validate and resolve scope without credentials
-        id: scope
+      - name: Validate unsigned admission controls before reading metadata
+        run: |
+          node --test scripts/ci/admit_desktop96_recovery.test.mjs scripts/ci/desktop96_recovery_workflow.test.mjs
+          python3 -I -B scripts/ci/validate_desktop96_media_recovery.test.py -v
+      - name: Validate exact source and completed producer metadata
+        id: admit
         env:
-          RELEASE_SCOPE_EVENT_NAME: ${{ github.event_name }}
-          RELEASE_SCOPE_REF_TYPE: ${{ github.ref_type }}
-          RELEASE_SCOPE_REF_NAME: ${{ github.ref_name }}
-          RELEASE_SCOPE_DESKTOP_ONLY_TAG: ${{ vars.YAWF_RELEASE_DESKTOP_ONLY_TAG }}
-        run: node scripts/resolve_release_scope.mjs --github-output "$GITHUB_OUTPUT"
-
-  macos-media-runtime:
-    needs: release-scope
-    if: github.event_name == 'push' && github.ref_type == 'tag' && needs.release-scope.result == 'success' && (needs.release-scope.outputs.desktop_only == 'true' || needs.release-scope.outputs.desktop_only == 'false')
-    uses: ./.github/workflows/macos-media-runtime.yml
+          GH_TOKEN: ${{ github.token }}
+          DESKTOP_ONLY_TAG: ${{ vars.YAWF_RELEASE_DESKTOP_ONLY_TAG }}
+          WINDOWS_ENABLED: ${{ vars.YAWF_RELEASE_WINDOWS }}
+        run: |
+          set -euo pipefail
+          node scripts/ci/admit_desktop96_recovery.mjs "$RUNNER_TEMP/desktop96-recovery-metadata.json"
+          printf 'desktop_only=true\n' >> "$GITHUB_OUTPUT"
+      - name: Retain source and runtime metadata binding
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop96-recovery-metadata
+          path: ${{ runner.temp }}/desktop96-recovery-metadata.json
+          if-no-files-found: error
+          retention-days: 14
 
   release:
-    if: github.event_name == 'push' && github.ref_type == 'tag' && needs.release-scope.result == 'success' && (needs.release-scope.outputs.desktop_only == 'true' || needs.release-scope.outputs.desktop_only == 'false')
-    needs: [release-scope, macos-media-runtime]
+    if: needs.release-scope.result == 'success'
+    needs: release-scope
     strategy:
       fail-fast: false
       matrix:
@@ -99,12 +71,18 @@ jobs:
           - platform: macos-15
             os: macos
             media_arch: arm64
+            media_run: 42916926303
+            media_artifact: 13810464736
+            media_sha256: c3a076d075b70e39f07dd5a048d842f41696428818ea5848198e0a5e7836a4ec
             rust_target: aarch64-apple-darwin
             node_runtime: darwin-arm64
             args: "--target aarch64-apple-darwin"
           - platform: macos-15-intel
             os: macos
             media_arch: x86_64
+            media_run: 42963084399
+            media_artifact: 13833037325
+            media_sha256: 88a499bda51a7baba874e342ded2d73d9578b5648d58991dec952cf17576400b
             rust_target: x86_64-apple-darwin
             node_runtime: darwin-x64
             args: "--target x86_64-apple-darwin"
@@ -116,9 +94,6 @@ jobs:
           - platform: ubuntu-24.04
             os: linux
             args: "--bundles deb,appimage"
-          - platform: windows-latest
-            os: windows
-            args: ""
 
     runs-on: ${{ matrix.platform }}
 
@@ -127,6 +102,21 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: 2edc189a33539bf1742435590810fb84aa653ce5
+          persist-credentials: false
+
+      - name: Bind immutable product source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 2edc189a33539bf1742435590810fb84aa653ce5
+          test "$(git rev-parse 'v2.3.96-web^{commit}')" = 2edc189a33539bf1742435590810fb84aa653ce5
+
+      - name: Checkout separate unsigned admission tooling
+        uses: actions/checkout@v4
+        with:
+          path: .recovery-tools
+          persist-credentials: false
 
       - name: Install Node
         uses: actions/setup-node@v4
@@ -326,14 +316,22 @@ jobs:
         if: matrix.os == 'macos'
         uses: actions/download-artifact@v4
         with:
-          name: macos-media-runtime-${{ matrix.media_arch }}
+          artifact-ids: ${{ matrix.media_artifact }}
+          run-id: ${{ matrix.media_run }}
+          github-token: ${{ github.token }}
           path: ${{ runner.temp }}/media-transfer
 
       - name: Verify and extract archived macOS media transport
         if: matrix.os == 'macos'
         env:
           MEDIA_ARCH: ${{ matrix.media_arch }}
+          MEDIA_SHA256: ${{ matrix.media_sha256 }}
         run: |
+          set -euo pipefail
+          python3 -I -B .recovery-tools/scripts/ci/validate_desktop96_media_recovery.py \
+            --archive "$RUNNER_TEMP/media-transfer/macos-media-runtime-$MEDIA_ARCH.tar.gz" \
+            --arch "$MEDIA_ARCH" --sha256 "$MEDIA_SHA256" \
+            --output "$RUNNER_TEMP/media-admission-$MEDIA_ARCH.json"
           cd "$RUNNER_TEMP/media-transfer"
           shasum -a 256 -c "macos-media-runtime-$MEDIA_ARCH.tar.gz.sha256"
           mkdir "$RUNNER_TEMP/media-candidate"
@@ -346,6 +344,17 @@ jobs:
       - name: Retest natural media runtime after artifact transport
         if: matrix.os == 'macos'
         run: node scripts/smoke_macos_media_runtime.mjs "$RUNNER_TEMP/media-candidate" "$RUNNER_TEMP/media-post-transport-evidence"
+
+      - name: Retain unsigned transport admission evidence
+        if: always() && matrix.os == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop96-recovery-media-${{ matrix.media_arch }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/media-admission-${{ matrix.media_arch }}.json
+            ${{ runner.temp }}/media-post-transport-evidence/RESULTS.json
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Import Developer ID certificate
         if: matrix.os == 'macos'
@@ -506,7 +515,7 @@ jobs:
           expected_cli="$(node -p "require('./web/package-lock.json').packages['node_modules/@tauri-apps/cli'].version")"
           test "$cli_version" = "tauri-cli $expected_cli"
           {
-            printf 'sourceRevision=%s\n' "$GITHUB_SHA"
+            printf 'sourceRevision=%s\n' "$(git rev-parse HEAD)"
             printf 'selectedExecutable=%s\n' "$(command -v hdiutil)"
             printf 'realExecutable=/usr/bin/hdiutil\n'
             printf 'tauriCli=%s\n' "$cli_version"
@@ -545,7 +554,7 @@ jobs:
           AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE: ${{ secrets.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE }}
         with:
           projectPath: web
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__-web' }}
+          tagName: v2.3.96-web
           releaseName: "YAWF Stream v__VERSION__"
           releaseBody: ${{ env.RELEASE_BODY }}
           releaseDraft: true
@@ -581,12 +590,12 @@ jobs:
           source_dir="$RUNNER_TEMP/media-candidate/source"
           provenance="$source_dir/macos-media-provenance-$MEDIA_ARCH.json"
           test -f "$provenance"
-          gh release upload "$GITHUB_REF_NAME" "$provenance" --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$RECOVERY_RELEASE_TAG" "$provenance" --clobber --repo "$GITHUB_REPOSITORY"
           if [ "$MEDIA_ARCH" = arm64 ]; then
             archives=("$source_dir"/yawf-macos-media-runtime-source-*.tar.gz)
             test "${#archives[@]}" -eq 1
             test -f "${archives[0]}"
-            gh release upload "$GITHUB_REF_NAME" "${archives[0]}" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release upload "$RECOVERY_RELEASE_TAG" "${archives[0]}" --clobber --repo "$GITHUB_REPOSITORY"
           fi
 
       # tauri-action notarizes + staples the .app but NOT the .dmg container.
@@ -612,7 +621,7 @@ jobs:
           STAPLER_RETRY_RECEIPT="$RUNNER_TEMP/yawf-stapler-validate.jsonl" \
             /bin/bash scripts/macos_stapler_retry.sh validate "$dmg"
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            tag="$GITHUB_REF_NAME"
+            tag="$RECOVERY_RELEASE_TAG"
           else
             tag="v$(node -p "require('./web/src-tauri/tauri.conf.json').version")-web"
           fi
@@ -628,6 +637,7 @@ jobs:
             ${{ runner.temp }}/yawf-stapler-validate.jsonl
           if-no-files-found: warn
           retention-days: 14
+
 
   android-tv:
     name: Signed Android TV APK
@@ -1007,14 +1017,8 @@ jobs:
 
   finalize-release-assets:
     name: Checksums and provenance
-    needs: [release-scope, release, android-tv, android-app-publish]
-    if: >-
-      always() && !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' &&
-      needs.release-scope.result == 'success' && needs.release.result == 'success' &&
-      ((needs.release-scope.outputs.desktop_only == 'true' &&
-        needs.android-tv.result == 'skipped' && needs.android-app-publish.result == 'skipped') ||
-       (needs.release-scope.outputs.desktop_only == 'false' &&
-        needs.android-tv.result == 'success' && needs.android-app-publish.result == 'success'))
+    needs: [release-scope, release]
+    if: always() && !cancelled() && needs.release-scope.result == 'success' && needs.release.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1023,20 +1027,23 @@ jobs:
     steps:
       - name: Check out release source
         uses: actions/checkout@v4
+        with:
+          ref: 2edc189a33539bf1742435590810fb84aa653ce5
+          persist-credentials: false
       - name: Download draft release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir artifacts
-          gh release download "$GITHUB_REF_NAME" \
+          gh release download "$RECOVERY_RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --dir artifacts
 
       - name: Split desktop updater feeds
         run: |
           set -euo pipefail
-          node scripts/split_desktop_updater_manifests.mjs artifacts/latest.json artifacts/latest.json artifacts/latest-macos11.json "$GITHUB_REF_NAME"
+          node scripts/split_desktop_updater_manifests.mjs artifacts/latest.json artifacts/latest.json artifacts/latest-macos11.json "$RECOVERY_RELEASE_TAG"
           test ! -e artifacts/latest.json.sig
 
       - name: Upload desktop updater feeds
@@ -1044,7 +1051,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release upload "$GITHUB_REF_NAME" artifacts/latest.json artifacts/latest-macos11.json --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$RECOVERY_RELEASE_TAG" artifacts/latest.json artifacts/latest-macos11.json --clobber --repo "$GITHUB_REPOSITORY"
 
       - name: Create SHA256SUMS
         run: |
@@ -1066,23 +1073,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$GITHUB_REF_NAME" artifacts/SHA256SUMS \
+          gh release upload "$RECOVERY_RELEASE_TAG" artifacts/SHA256SUMS \
             --clobber \
             --repo "$GITHUB_REPOSITORY"
+
 
   clean-install:
     name: Verify clean installs
     needs: [release-scope, finalize-release-assets]
-    if: >-
-      always() && !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' &&
-      needs.release-scope.result == 'success' && needs.finalize-release-assets.result == 'success' &&
-      (needs.release-scope.outputs.desktop_only == 'true' || needs.release-scope.outputs.desktop_only == 'false')
+    if: always() && !cancelled() && needs.release-scope.result == 'success' && needs.finalize-release-assets.result == 'success'
     permissions:
-      # The reusable workflow must download assets from the draft release.
       contents: write
-    uses: ./.github/workflows/clean-install.yml
+    uses: Tgk-30/YAWF-Stream/.github/workflows/clean-install.yml@2edc189a33539bf1742435590810fb84aa653ce5
     with:
-      tag: ${{ github.ref_name }}
+      tag: v2.3.96-web
       include_windows: ${{ vars.YAWF_RELEASE_WINDOWS == 'true' }}
-      include_android: ${{ needs.release-scope.outputs.include_android == 'true' }}
-      include_server: ${{ needs.release-scope.outputs.include_server == 'true' }}
+      include_android: false
+      include_server: false
