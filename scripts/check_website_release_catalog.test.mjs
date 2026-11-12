@@ -30,28 +30,28 @@ for (const { name, from, to } of [
   },
   {
     name: "Android phone tag",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.99', tag: 'android-v2.3.99' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.102', tag: 'android-v2.3.102' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.20', tag: 'v2.3.13' };",
   },
   {
     name: "stale Android phone channel",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.99', tag: 'android-v2.3.99' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.102', tag: 'android-v2.3.102' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.88', tag: 'android-v2.3.88' };",
   },
   {
     name: "older published Android phone channel",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.99', tag: 'android-v2.3.99' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.102', tag: 'android-v2.3.102' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.96', tag: 'android-v2.3.96' };",
   },
   {
     name: "previous published Android phone channel",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.99', tag: 'android-v2.3.99' };",
-    to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.98', tag: 'android-v2.3.98' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.102', tag: 'android-v2.3.102' };",
+    to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.99', tag: 'android-v2.3.99' };",
   },
   {
     name: "unpublished future Android phone channel",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.99', tag: 'android-v2.3.99' };",
-    to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.100', tag: 'android-v2.3.100' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.102', tag: 'android-v2.3.102' };",
+    to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.103', tag: 'android-v2.3.103' };",
   },
   {
     name: "Android TV filename",
