@@ -1199,6 +1199,10 @@ function localProfileId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+// The registry is shared across editor mounts. A reopened editor must queue
+// behind earlier writes for the same record, even after their UI unmounts.
+const profileNameWrites = new Map<string, Promise<void>>();
+
 function ProfilesTab({
   activeProfile,
   profiles,
@@ -1218,6 +1222,45 @@ function ProfilesTab({
   const [message, setMessage] = useState<string | null>(null);
   const [passwords, setPasswords] = useState<Record<string, string>>({});
   const canManage = activeProfile?.isAdmin ?? false;
+  const [nameDrafts, setNameDrafts] = useState<Map<string, string>>(() => new Map());
+  const nameVersions = useRef(new Map<string, number>());
+  const nameContext = useRef({ activeId: activeProfile?.id, settings, updateSettings, refreshProfiles });
+  nameContext.current = { activeId: activeProfile?.id, settings, updateSettings, refreshProfiles };
+  const nameEditorMounted = useRef(true);
+  useEffect(() => {
+    nameEditorMounted.current = true;
+    return () => { nameEditorMounted.current = false; };
+  }, []);
+
+  function editProfileName(profile: LocalProfile, input: string) {
+    const name = input.slice(0, 40);
+    setNameDrafts((previous) => new Map(previous).set(profile.id, name));
+    setMessage(null);
+    const version = (nameVersions.current.get(profile.id) ?? 0) + 1;
+    nameVersions.current.set(profile.id, version);
+    const editorOwner = nameContext.current.activeId;
+    const isCurrentEdit = () => nameEditorMounted.current && nameVersions.current.get(profile.id) === version;
+    // Registry patches stay ordered for this profile. Refreshes are not the
+    // input's source of truth while this editor owns a local name draft.
+    const write = (profileNameWrites.get(profile.id) ?? Promise.resolve()).then(async () => {
+      await updateProfileRecord(profile.id, { name });
+      if (!isCurrentEdit()) return;
+      const context = nameContext.current;
+      if (profile.id === context.activeId) {
+        const result = await context.updateSettings({ ...context.settings, userName: name });
+        if (!result.ok) throw new Error("Profile name settings were not saved");
+      }
+      if (isCurrentEdit() && context.activeId === nameContext.current.activeId) await nameContext.current.refreshProfiles();
+    }).catch(() => {
+      if (isCurrentEdit() && (nameContext.current.activeId === editorOwner || nameContext.current.activeId === profile.id)) {
+        setMessage("The profile name could not be fully saved. Your edit is kept here.");
+      }
+    });
+    profileNameWrites.set(profile.id, write);
+    void write.then(() => {
+      if (profileNameWrites.get(profile.id) === write) profileNameWrites.delete(profile.id);
+    });
+  }
 
   async function refresh(message?: string) {
     await refreshProfiles();
@@ -1368,7 +1411,7 @@ function ProfilesTab({
 
               {canManage && (
                 <div className="settings-profile-edit">
-                  <Field label="Name"><input value={profile.name} maxLength={40} onChange={(event) => editProfile(profile, { name: event.target.value })} /></Field>
+                  <Field label="Name"><input value={nameDrafts.get(profile.id) ?? profile.name} maxLength={40} onChange={(event) => editProfileName(profile, event.target.value)} /></Field>
                   <div className="settings-profile-look">
                     <span className="settings-label">Profile look</span>
                     <div className="settings-profile-avatar-tools">
