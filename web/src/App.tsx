@@ -652,9 +652,8 @@ export function App() {
   }, [route, routeTitle]);
 
   return (
-    // data-setup-nudge reserves scroll room under the fixed get-started card
-    // (App.css) so the last content row is never stranded behind it.
-    <div className="app" data-setup-nudge={showSetupNudge || showInstallPrompt || undefined}>
+    // Only the floating install prompt needs extra bottom scroll clearance.
+    <div className="app" data-install-prompt={showInstallPrompt || undefined}>
       <a className="skip-to-content" href="#main-content">
         {translate(interfaceLocale, "common.skipContent", "Skip to content")}
       </a>
@@ -688,6 +687,18 @@ export function App() {
             onSwitchProfile={() => setProfilePickerOpen(true)}
             showSwitch={isServerMode() || (multiUserEnabled && profiles.length > 1)}
           />
+        )}
+
+        {showSetupNudge && (
+          <div className="app-setup-region" data-with-search={showsGlobalSearch || undefined}>
+            <Suspense fallback={null}>
+              <SetupNudge
+                onStartWizard={() => setFirstRunOpen(true)}
+                onShowTour={() => setWelcomeGuideOpen(true)}
+                onDismiss={dismissNudge}
+              />
+            </Suspense>
+          </div>
         )}
 
         {/* Route transition: a keyed frame that plays a CSS enter animation on
@@ -824,14 +835,6 @@ export function App() {
         {/* Re-run of the first-run persona wizard (full-screen; closes on done or
             skip - the wizard persists its own onboarding_completed flag). */}
         {firstRunOpen && <FirstRunWizard onDone={() => setFirstRunOpen(false)} />}
-
-        {showSetupNudge && (
-          <SetupNudge
-            onStartWizard={() => setFirstRunOpen(true)}
-            onShowTour={() => setWelcomeGuideOpen(true)}
-            onDismiss={dismissNudge}
-          />
-        )}
       </Suspense>
 
       {showInstallPrompt && <InstallPrompt onDismiss={dismissInstall} />}

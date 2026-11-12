@@ -1,23 +1,13 @@
-/* SetupNudge - dismissible "finish setup" bar, fixed to the bottom so it never
-   shifts page layout. */
+/* Dismissible setup guidance stays in the app scroll flow, never above route CTAs. */
 .setup-nudge {
-  position: fixed;
-  left: calc(var(--nav-safe-left) + var(--sp-lg));
-  right: var(--sp-lg);
-  bottom: var(--sp-lg);
+  position: relative;
   margin-inline: auto;
-  transform: none;
-  z-index: 40;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--sp-md);
-  width: min(
-    680px,
-    calc(
-      100% - var(--nav-safe-left) - var(--sp-lg) - var(--sp-lg)
-    )
-  );
+  width: min(680px, 100%);
+  min-width: 0;
   padding: var(--sp-md) var(--sp-lg);
   border-radius: var(--r-lg, calc(18px * var(--radius-scale)));
 }
@@ -57,8 +47,8 @@
 .setup-nudge-dismiss {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 44px;
+  height: 44px;
   flex: 0 0 auto;
   border: none;
   border-radius: 50%;
@@ -72,22 +62,12 @@
 }
 
 @media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {
-  /* The mobile More drawer is modal and its NavRail stacking context is 30.
-     Keep this reminder below it so covered drawer actions cannot receive the
-     reminder's guided-setup action instead. */
   .setup-nudge {
-    z-index: 29;
     align-items: flex-start;
-    right: max(var(--sp-sm), var(--safe-area-right));
-    left: max(var(--sp-sm), var(--safe-area-left));
-    bottom: calc(var(--mobile-nav-bottom) + var(--mobile-nav-height) + var(--sp-sm));
-    max-height: calc(100vh - max(var(--sp-sm), var(--safe-area-top)) - var(--mobile-nav-bottom) - var(--mobile-nav-height) - var(--sp-sm));
-    overflow-y: auto;
-    width: auto;
+    width: 100%;
     gap: var(--sp-sm);
     padding: var(--sp-md);
     margin-inline: 0;
-    transform: none;
   }
 
   .setup-nudge-text span {
@@ -119,11 +99,5 @@
     height: 44px;
     top: var(--sp-sm);
     right: var(--sp-sm);
-  }
-
-  @supports (height: 100dvh) {
-    .setup-nudge {
-      max-height: calc(100dvh - max(var(--sp-sm), var(--safe-area-top)) - var(--mobile-nav-bottom) - var(--mobile-nav-height) - var(--sp-sm));
-    }
   }
 }

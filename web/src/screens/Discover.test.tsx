@@ -12,6 +12,7 @@ import userEvent from "@testing-library/user-event";
 import type { MediaPreview } from "../models/media";
 import type { WatchHistoryRecord } from "../storage/models";
 import type { DiscoverData } from "../data/discover";
+import { SetupNudge } from "../components/SetupNudge";
 
 // --- mutable mock state -----------------------------------------------------
 
@@ -203,6 +204,29 @@ describe("Discover loaded", () => {
     expect(screen.getByText("Nothing to discover yet")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Search catalog" }));
     expect(navigate).toHaveBeenCalledWith("search");
+  });
+
+  it("keeps sample metadata guidance actionable alongside independent streaming setup", async () => {
+    mockDiscover = { data: fullData(), loading: false, source: "fixtures" };
+    const start = vi.fn();
+    const tour = vi.fn();
+    const dismiss = vi.fn();
+    render(
+      <main>
+        <SetupNudge onStartWizard={start} onShowTour={tour} onDismiss={dismiss} />
+        <Discover />
+      </main>,
+    );
+    expect(screen.getByRole("region", { name: "Streaming setup reminder" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Sample catalog");
+    await userEvent.click(screen.getByRole("button", { name: "Open metadata settings" }));
+    expect(navigate).toHaveBeenCalledWith("settings");
+    await userEvent.click(screen.getByRole("button", { name: "Start guided setup" }));
+    await userEvent.click(screen.getByRole("button", { name: "Show me around" }));
+    await userEvent.click(screen.getByRole("button", { name: "Dismiss setup reminder" }));
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(tour).toHaveBeenCalledTimes(1);
+    expect(dismiss).toHaveBeenCalledTimes(1);
   });
 
   it("labels fixture content and routes to metadata settings", async () => {
