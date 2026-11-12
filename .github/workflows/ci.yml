@@ -272,7 +272,7 @@ jobs:
           java-version: "17"
 
       - name: Generated Android project patch tests
-        run: node --test scripts/patch_tauri_android.test.mjs
+        run: node --test scripts/patch_tauri_android.test.mjs scripts/patch_tauri_android_cold_recovery.test.mjs
 
       - name: Android Gradle bootstrap contracts
         run: node --test scripts/prepare_android_gradle.test.mjs scripts/fetch_android_gradle.test.mjs scripts/fetch_android_kotlin_compiler.test.mjs scripts/prepare_android_kotlin_gradle.test.mjs
