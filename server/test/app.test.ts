@@ -4217,6 +4217,53 @@ describe("DebridStreamer server", () => {
     } finally { generationLookup?.mockRestore(); await supersession?.catch(() => undefined); await on.close(); }
   });
 
+  it("transcode: master snapshots describe only published files and never adopt the prepared generation", async () => {
+    const fake = makeFakeTranscoder();
+    const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({ maxTranscodes: 2 }, fake);
+    try {
+      const owner = await setupOwner(on); const session = await createRawSession(owner);
+      const root = `/api/stream/${session.id}/`;
+      const first = await request(owner, { method: "GET", url: `${root}index.m3u8?quality=480p` });
+      const old = first.body.match(/^480p\.m3u8\?generation=[^\r\n]+/m)![0];
+      await request(owner, { method: "GET", url: root + old });
+      const kill = vi.spyOn(spawn.mock.results[0]!.value as ReturnType<Transcoder["spawnHls"]>, "kill");
+      const url = `${root}index.m3u8?quality=360p&start=29`;
+      const initial = await request(owner, { method: "GET", url });
+      const child = initial.body.match(/^360p\.m3u8\?generation=[^\r\n]+/m)![0];
+      const generation = child.split("=")[1];
+      const args = spawn.mock.calls[1]![0]; const dir = dirname(args[args.length - 1]!);
+      const text = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:6", "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:EVENT", "#EXTINF:6.000000,", "360p_seg_00000.ts", "#EXTINF:6.000000,", "360p_seg_00001.ts", ""].join("\n");
+      writeFileSync(join(dir, "360p.m3u8"), text);
+      const missing = await request(owner, { method: "GET", url });
+      expect(missing.headers["x-yawf-hls-snapshot-version"]).toBe("1");
+      expect(missing.headers["x-yawf-hls-snapshot-frontier"]).toBeUndefined();
+      writeFileSync(join(dir, "360p_seg_00001.ts"), "");
+      const empty = await request(owner, { method: "GET", url });
+      expect(empty.headers["x-yawf-hls-snapshot-frontier"]).toBeUndefined();
+      writeFileSync(join(dir, "360p_seg_00001.ts"), fakeMpegTsSegment(35 * 90_000));
+      writeFileSync(join(dir, "360p.m3u8"), text.replace("#EXTINF:6.000000,\n360p_seg_00001.ts\n", ""));
+      const unlisted = await request(owner, { method: "GET", url });
+      expect(unlisted.headers["x-yawf-hls-snapshot-frontier"]).toBe("6");
+      writeFileSync(join(dir, "360p.m3u8"), text + "#EXT-X-ENDLIST\n");
+      const complete = await request(owner, { method: "GET", url });
+      expect(complete.headers["x-yawf-hls-snapshot-endlist"]).toBe("1");
+      writeFileSync(join(dir, "360p.m3u8"), text);
+      const refresh = await request(owner, { method: "GET", url });
+      expect(refresh.headers["x-yawf-hls-snapshot-generation"]).toBe(generation);
+      expect(refresh.headers["x-yawf-hls-snapshot-frontier"]).toBe("12");
+      expect(refresh.headers["x-yawf-hls-snapshot-target"]).toBe("6");
+      expect(refresh.headers["x-yawf-hls-snapshot-endlist"]).toBe("0");
+      expect(refresh.headers["x-yawf-transcode-quality"]).toBe("360p");
+      expect(refresh.headers["x-yawf-transcode-start"]).toBe("29");
+      expect(refresh.headers["x-yawf-transcode-audio"]).toBe("0");
+      expect(spawn).toHaveBeenCalledTimes(2); expect(kill).not.toHaveBeenCalled();
+      expect((await request(owner, { method: "HEAD", url: root + old })).statusCode).toBe(200);
+      expect((await request(owner, { method: "GET", url: root + child })).statusCode).toBe(200);
+      expect(kill).toHaveBeenCalledTimes(1);
+    } finally { await on.close(); }
+  });
+
   it("transcode: abandoned prepared replacement keeps current playback and lease alive", async () => {
     const fake = makeFakeTranscoder();
     const spawn = vi.spyOn(fake, "spawnHls");

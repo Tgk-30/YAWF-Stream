@@ -118,7 +118,7 @@ import {
   stopAndroidTVPlayback,
   type AndroidTVPlaybackProgress,
 } from "../lib/androidTV";
-import { renewServerHlsLease, serverHlsLeaseTarget } from "../lib/serverApi";
+import { parseServerHlsSnapshot, renewServerHlsLease, serverHlsLeaseTarget, serverHlsSnapshotAdmits, type ServerHlsSnapshot } from "../lib/serverApi";
 import { notifyUnauthorized } from "../lib/serverSession";
 import type {
   ServerAudioInventoryLoadOptions,
@@ -2084,7 +2084,7 @@ export function VideoPlayer({
     async (
       quality: ServerTranscodeQuality,
       absolutePositionSeconds: number,
-      handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
+      handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState | null),
       audioTrack?: number,
       audioPreference?: AudioPreference,
       positionIntent: ServerOptimizedPositionIntent = "follow-current",
@@ -2149,6 +2149,10 @@ export function VideoPlayer({
         const manifestDeadline = Date.now() + SERVER_HLS_STARTUP_TIMEOUT_MS;
         let retryDelayMs = SERVER_OPTIMIZED_RETRY_BASE_MS;
         let manifest: string | null = null;
+        let previousSnapshot: ServerHlsSnapshot | null = null;
+        let advertisedSnapshot = false;
+        let automaticHandoffState: PlaybackHandoffState | null = null;
+        let activationPosition = position;
         let preparedAudioTrack = (purpose === "recovery" || purpose === "automatic-starvation") ? next.audioTrack : audioTrack ?? next.audioTrack;
         while (manifest == null) {
           if (!ownsRequest() || controller.signal.aborted) return false;
@@ -2157,11 +2161,13 @@ export function VideoPlayer({
             controller.abort();
             throw new Error("Server optimized playback timed out.");
           }
+          const snapshotRequestedAt = performance.now();
           const response = await promiseWithinTimeout(
             fetch(next.url, {
               credentials: "include",
               headers: { accept: "application/vnd.apple.mpegurl" },
               signal: controller.signal,
+              ...(purpose === "automatic-starvation" ? { cache: "no-store" as const, redirect: "error" as const } : {}),
             }),
             remainingMs,
             "Server optimized playback timed out.",
@@ -2193,29 +2199,50 @@ export function VideoPlayer({
             controller.abort();
             throw new Error("Server optimized playback timed out.");
           }
-          manifest = await promiseWithinTimeout(
+          const text = await promiseWithinTimeout(
             response.text(),
             textRemainingMs,
             "Server optimized playback timed out.",
             () => controller.abort(),
           );
+          if (!ownsRequest()) return false;
+          if (!text.startsWith("#EXTM3U")) throw new Error("The server did not return a playable HLS manifest.");
+          const snapshot = purpose === "automatic-starvation"
+            ? parseServerHlsSnapshot(next.url, text, response.headers, quality, next.timelineOffsetSeconds, audioTrack)
+            : "legacy";
+          if (snapshot == null || (snapshot === "legacy" && advertisedSnapshot)) {
+            throw new Error("The server returned invalid playback readiness metadata.");
+          }
+          if (snapshot !== "legacy") {
+            advertisedSnapshot = true;
+            if (previousSnapshot != null && (snapshot.generation !== previousSnapshot.generation ||
+                snapshot.audio !== previousSnapshot.audio || snapshot.target !== previousSnapshot.target ||
+                snapshot.frontier < previousSnapshot.frontier || (previousSnapshot.endlist &&
+                  (!snapshot.endlist || snapshot.frontier !== previousSnapshot.frontier)))) {
+              throw new Error("The server changed playback readiness metadata.");
+            }
+            previousSnapshot = snapshot;
+          }
+          // Sampling the owned decoder updates the absolute clock even without
+          // a timeupdate event. No await separates this sample and activation.
+          automaticHandoffState = purpose === "automatic-starvation" && typeof handoffState === "function"
+            ? handoffState() : null;
+          if (!ownsRequest()) return false;
+          activationPosition = positionIntent === "fixed" ? position : latestAbsolutePositionRef.current;
+          if (purpose === "automatic-starvation" && activationPosition < next.timelineOffsetSeconds) return false;
+          if (snapshot !== "legacy") {
+            const state = currentWebviewHandoffState(automaticHandoffState);
+            if (automaticHandoffState == null || state == null || !serverHlsSnapshotAdmits(snapshot, activationPosition - next.timelineOffsetSeconds,
+              state.paused, state.playbackRate, performance.now() - snapshotRequestedAt)) {
+              const delay = Math.min(500, manifestDeadline - Date.now());
+              if (delay <= 0) { controller.abort(); throw new Error("Server optimized playback timed out."); }
+              await abortableDelay(delay, controller.signal);
+              continue;
+            }
+          }
+          manifest = text;
         }
         if (!ownsRequest()) return false;
-        if (!manifest.startsWith("#EXTM3U")) {
-          throw new Error("The server did not return a playable HLS manifest.");
-        }
-        if (!ownsRequest()) return false;
-        // Automatic reduction samples the owned decoder again at adoption,
-        // including clock movement since its most recent timeupdate event.
-        const automaticHandoffState = purpose === "automatic-starvation" && typeof handoffState === "function"
-          ? handoffState() : null;
-        if (!ownsRequest()) return false;
-        // Ordinary quality switches follow playback while the manifest warms.
-        // An explicit out-of-window seek instead owns its requested position;
-        // a late clock event from the old media must not undo that user action.
-        const activationPosition = positionIntent === "fixed"
-          ? position
-          : latestAbsolutePositionRef.current;
         // A user seek can move before an already-prepared audio generation.
         // Keep the original source rather than clamp that newer intent forward.
         if ((purpose === "remembered-audio" || purpose === "automatic-starvation") && activationPosition < next.timelineOffsetSeconds) {
@@ -2385,7 +2412,7 @@ export function VideoPlayer({
   const selectServerOptimized = useCallback((
     quality: ServerTranscodeQuality,
     absolutePositionSeconds: number,
-    handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
+    handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState | null),
     audioTrack?: number,
     audioPreference?: AudioPreference,
     positionIntent: ServerOptimizedPositionIntent = "follow-current",
@@ -2444,7 +2471,7 @@ export function VideoPlayer({
 
   const reduceAutomaticQuality = useCallback((
     quality: ServerTranscodeQuality,
-    handoff: () => PlaybackHandoffState,
+    handoff: () => PlaybackHandoffState | null,
     audioTrack?: number,
     audioPreference?: AudioPreference,
   ) => {
@@ -3529,7 +3556,7 @@ function WebviewPlayer({
   onLocalQualityIntentChange: (automatic: boolean) => void;
   starvationPolicy: PlaybackStarvation;
   automaticQualityIntent: boolean;
-  onAutomaticQualityReduction: (quality: ServerTranscodeQuality, handoff: () => PlaybackHandoffState,
+  onAutomaticQualityReduction: (quality: ServerTranscodeQuality, handoff: () => PlaybackHandoffState | null,
     audioTrack?: number, audioPreference?: AudioPreference) => void;
   onPlaybackPendingChange: (pending: boolean) => void;
   onPendingHandoffPausedChange: (paused: boolean) => void;
@@ -3612,7 +3639,7 @@ function WebviewPlayer({
   onSwitchServerOptimized: (
     quality: ServerTranscodeQuality,
     absolutePositionSeconds: number,
-    handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
+    handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState | null),
     audioTrack?: number,
     audioPreference?: AudioPreference,
     positionIntent?: ServerOptimizedPositionIntent,
@@ -3623,7 +3650,7 @@ function WebviewPlayer({
   onSelectServerOptimized: (
     quality: ServerTranscodeQuality,
     absolutePositionSeconds: number,
-    handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState),
+    handoffState?: PlaybackHandoffState | (() => PlaybackHandoffState | null),
     audioTrack?: number,
     audioPreference?: AudioPreference,
     positionIntent?: ServerOptimizedPositionIntent,
@@ -7479,10 +7506,9 @@ function WebviewPlayer({
       }
       const sourceAudioTrack = selected?.index ?? resolvedServerAudioTrack;
       onAutomaticQualityReduction(quality, () => {
-        if (currentMediaEvent(video) && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.error == null && !video.seeking &&
-          !rendererSeekingRef.current && !recoveryClockWasReset(video) && !terminalRecoveryOwns(video)) {
-          onAbsolutePositionChange(absolutePlaybackPosition());
-        }
+        if (!currentMediaEvent(video) || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.error != null || video.seeking ||
+          rendererSeekingRef.current || recoveryClockWasReset(video) || terminalRecoveryOwns(video) || !Number.isFinite(video.currentTime)) return null;
+        onAbsolutePositionChange(absolutePlaybackPosition());
         return playbackHandoffState();
       }, sourceAudioTrack ?? undefined,
         sourceAudioTrack == null ? undefined : {

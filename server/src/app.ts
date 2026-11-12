@@ -1,6 +1,6 @@
 import { Readable, Transform } from "node:stream";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { constants, createReadStream, existsSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import cookie from "@fastify/cookie";
 import compress from "@fastify/compress";
@@ -60,6 +60,7 @@ import { ExternalStreamAssets, type ExternalStreamAsset } from "./externalStream
 import { MAX_HLS_MANIFEST_BYTES, rewriteHlsManifest } from "./hlsManifest.js";
 import {
   isTranscodeAssetName,
+  parsePublishedTranscodeSnapshot,
   rewriteGeneratedWebVttForTimeline,
   rewriteTranscodeManifest,
 } from "./transcodeHls.js";
@@ -71,7 +72,7 @@ import {
 import { fetchOmdbRatings, fetchOmdbViaBroker, type OMDBRatings } from "./omdb.js";
 import { embeddedSecret } from "./embeddedSecrets.js";
 import { bandwidthCapStatus, type BandwidthCapStatus } from "./bandwidth.js";
-import { readFile } from "node:fs/promises";
+import { lstat, open, readFile } from "node:fs/promises";
 import { realTranscoder } from "./transcode.js";
 import {
   MANIFEST_NAME,
@@ -6497,6 +6498,44 @@ function registerRoutes(
     const manifest = await readGeneratedManifest(join(dir, MANIFEST_NAME));
     if (transcode.registry.dirForAsset(row.id, MANIFEST_NAME, generation) !== dir) {
       throw httpError(404, "Transcode asset not found.");
+    }
+    // This is advisory metadata on the authorized master, never an asset GET
+    // and therefore never an adoption of a prepared generation.
+    if (quality !== "auto") {
+      reply.header("x-yawf-hls-snapshot-version", "1");
+      const rendition = `${quality}.m3u8`;
+      let snapshot: ReturnType<typeof parsePublishedTranscodeSnapshot> = null;
+      try {
+        const file = await open(join(dir, rendition), constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          const info = await file.stat();
+          if (info.isFile() && info.size <= 1_048_576) {
+            const bytes = Buffer.alloc(info.size + 1);
+            const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+            if (bytesRead === info.size) snapshot = parsePublishedTranscodeSnapshot(bytes.subarray(0, bytesRead).toString("utf8"), quality);
+          }
+        } finally { await file.close(); }
+        if (snapshot != null) {
+          // Batch the checks to cap concurrently open filesystem operations.
+          for (let offset = 0; offset < snapshot.segments.length; offset += 64) {
+            const files = await Promise.all(snapshot.segments.slice(offset, offset + 64).map((name) => lstat(join(dir, name))));
+            if (files.some((info) => !info.isFile() || info.size <= 0)) { snapshot = null; break; }
+          }
+        }
+      } catch { snapshot = null; }
+      assertConnected();
+      if (loadTranscodeSession(request)?.id !== row.id ||
+          transcode.registry.dirForAsset(row.id, MANIFEST_NAME, generation) !== dir ||
+          transcode.registry.dirForAsset(row.id, rendition, generation) !== dir) {
+        throw httpError(404, "Transcode asset not found.");
+      }
+      if (snapshot != null) {
+        reply.header("x-yawf-hls-snapshot-generation", generation);
+        reply.header("x-yawf-hls-snapshot-frontier", String(snapshot.frontier));
+        reply.header("x-yawf-hls-snapshot-target", String(snapshot.target));
+        reply.header("x-yawf-hls-snapshot-endlist", snapshot.endlist ? "1" : "0");
+      }
+      reply.header("access-control-expose-headers", "x-yawf-transcode-quality, x-yawf-transcode-start, x-yawf-transcode-audio, x-yawf-hls-snapshot-version, x-yawf-hls-snapshot-generation, x-yawf-hls-snapshot-frontier, x-yawf-hls-snapshot-target, x-yawf-hls-snapshot-endlist");
     }
     const rewritten = rewriteTranscodeManifest(manifest, generation);
     reply.header("content-type", "application/vnd.apple.mpegurl");

@@ -1417,3 +1417,29 @@ describe("server HLS generation retention", () => {
   });
 
 });
+
+
+describe("published HLS handoff metadata", () => {
+  const url = "https://server.example/api/stream/one/index.m3u8?quality=360p&start=29&audio=1";
+  const body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n360p.m3u8?generation=transcode-one\n";
+  const headers = () => new Headers({ "x-yawf-hls-snapshot-version": "1", "x-yawf-hls-snapshot-generation": "transcode-one", "x-yawf-hls-snapshot-frontier": "12", "x-yawf-hls-snapshot-target": "6", "x-yawf-hls-snapshot-endlist": "0", "x-yawf-transcode-quality": "360p", "x-yawf-transcode-start": "29", "x-yawf-transcode-audio": "1" });
+  it("binds generation, quality, start and audio to a trusted master", () => {
+    configuredServerURL.mockReturnValue("https://server.example");
+    expect(api.parseServerHlsSnapshot(url, body, headers(), "360p", 29, 1)).toEqual({generation: "transcode-one", frontier: 12, target: 6, endlist: false, audio: 1});
+    expect(api.parseServerHlsSnapshot(url, body, new Headers(), "360p", 29, 1)).toBe("legacy");
+    for (const [key, value] of [["x-yawf-hls-snapshot-generation", "transcode-other"], ["x-yawf-hls-snapshot-frontier", "Infinity"], ["x-yawf-hls-snapshot-target", "0"], ["x-yawf-hls-snapshot-endlist", "true"], ["x-yawf-transcode-start", "28"], ["x-yawf-transcode-quality", "480p"], ["x-yawf-transcode-audio", "2"]]) {
+      const invalid = headers(); invalid.set(key!, value!);
+      expect(api.parseServerHlsSnapshot(url, body, invalid, "360p", 29, 1)).toBeNull();
+    }
+    expect(api.parseServerHlsSnapshot(url, body.replace("360p.m3u8", "480p.m3u8"), headers(), "360p", 29, 1)).toBeNull();
+    expect(api.parseServerHlsSnapshot(url.replace("audio=1", "audio=2"), body, headers(), "360p", 29)).toBeNull();
+  });
+  it("accounts for moving playback, rate, age, pause and a bounded endlist", () => {
+    const base = {generation: "transcode-one", frontier: 6, target: 6, endlist: false, audio: 1};
+    expect(api.serverHlsSnapshotAdmits(base, 1.894, false, 1, 0)).toBe(false);
+    expect(api.serverHlsSnapshotAdmits({...base, frontier: 12}, 5, false, 2, 600)).toBe(false);
+    expect(api.serverHlsSnapshotAdmits({...base, frontier: 12}, 5, true, 2, 600)).toBe(true);
+    expect(api.serverHlsSnapshotAdmits({...base, endlist: true}, 5.9, false, 1, 1000)).toBe(true);
+    expect(api.serverHlsSnapshotAdmits({...base, endlist: true}, 6, false, 1, 0)).toBe(false);
+  });
+});
