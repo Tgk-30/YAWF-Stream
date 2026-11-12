@@ -30,6 +30,7 @@ let mockDiscover: {
 const openBrowse = vi.fn();
 const openDetail = vi.fn();
 const navigate = vi.fn();
+const openSettingsSection = vi.fn();
 let mockContinueWatching: WatchHistoryRecord[] = [];
 let mockServices: {
   tmdb: unknown;
@@ -48,6 +49,7 @@ vi.mock("../store/AppStore", () => ({
     openBrowse,
     openDetail,
     navigate,
+    openSettingsSection,
     continueWatching: mockContinueWatching,
   }),
 }));
@@ -164,6 +166,7 @@ beforeEach(() => {
   openBrowse.mockReset();
   openDetail.mockReset();
   navigate.mockReset();
+  openSettingsSection.mockReset();
   curateServerAI.mockReset();
 });
 
@@ -220,7 +223,9 @@ describe("Discover loaded", () => {
     expect(screen.getByRole("region", { name: "Streaming setup reminder" })).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent("Sample catalog");
     await userEvent.click(screen.getByRole("button", { name: "Open metadata settings" }));
-    expect(navigate).toHaveBeenCalledWith("settings");
+    expect(openSettingsSection).toHaveBeenCalledWith("keys");
+    expect(openSettingsSection).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole("button", { name: "Start guided setup" }));
     await userEvent.click(screen.getByRole("button", { name: "Show me around" }));
     await userEvent.click(screen.getByRole("button", { name: "Dismiss setup reminder" }));
@@ -229,7 +234,7 @@ describe("Discover loaded", () => {
     expect(dismiss).toHaveBeenCalledTimes(1);
   });
 
-  it("labels fixture content and routes to metadata settings", async () => {
+  it("labels fixture content and opens the metadata API keys section", async () => {
     mockDiscover = {
       data: fullData(),
       loading: false,
@@ -247,7 +252,9 @@ describe("Discover loaded", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Open metadata settings" }),
     );
-    expect(navigate).toHaveBeenCalledWith("settings");
+    expect(openSettingsSection).toHaveBeenCalledWith("keys");
+    expect(openSettingsSection).toHaveBeenCalledTimes(1);
+    expect(navigate).not.toHaveBeenCalled();
   });
 
   it("does not mislabel an all-empty live error as a successful empty catalog", () => {

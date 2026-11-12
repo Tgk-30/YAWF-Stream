@@ -24,6 +24,7 @@ const failureRefObserver = vi.hoisted(() => ({
   enabled: false,
   refs: [] as Array<{ current: (message: string, exactHandoffPending: boolean) => void }>,
 }));
+const automaticAdmissionRefObserver = vi.hoisted(() => ({ enabled: false, refs: [] as Array<{ current: unknown }> }));
 const healthyRecoveryObserver = vi.hoisted(() => ({
   enabled: false,
   callbacks: [] as Array<(video: HTMLVideoElement) => boolean>,
@@ -51,6 +52,7 @@ vi.mock("react", async (original) => {
     useRef: ((...args: unknown[]) => {
       const ref = Reflect.apply(actual.useRef, undefined, args);
       const initial = args[0];
+      if (automaticAdmissionRefObserver.enabled && !automaticAdmissionRefObserver.refs.includes(ref)) automaticAdmissionRefObserver.refs.push(ref);
       if (failureRefObserver.enabled && typeof initial === "function" && initial.name === "onPlaybackError" && !failureRefObserver.refs.includes(ref)) {
         failureRefObserver.refs.push(ref);
       }
@@ -17668,6 +17670,7 @@ describe("automatic starvation95 adaptation", () => {
     sourceTracks?: ServerAudioTrack[]; audioChurn?: boolean; lazyAudio?: "pending" | "failed" | "ambiguous";
     unknownFile?: boolean; reused?: boolean; compatibility?: boolean; fixedUrl?: boolean;
     snapshots?: number[]; snapshotGeneration?: string[]; snapshotEndlist?: boolean;
+    currentAudio?: number; currentManifest?: string; currentHeaders?: Record<string, string>;
   } = {}) {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const manifest = deferred<Response>();
@@ -17714,6 +17717,12 @@ describe("automatic starvation95 adaptation", () => {
         if (options.pending) return manifest.promise;
         return new Response("#EXTM3U\n", { headers: options.audio || options.audioChurn || options.lazyAudio ? { "x-yawf-transcode-audio": "1" } : {} });
       }
+      if (options.currentAudio != null) return new Response(options.currentManifest ?? '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000,CODECS="avc1.42e01e,mp4a.40.2"\n480p.m3u8?generation=transcode-current102\n', { headers: {
+        "x-yawf-hls-snapshot-version": "1", "x-yawf-hls-snapshot-generation": "transcode-current102",
+        "x-yawf-hls-snapshot-frontier": "30", "x-yawf-hls-snapshot-target": "6", "x-yawf-hls-snapshot-endlist": "0",
+        "x-yawf-transcode-quality": "480p", "x-yawf-transcode-start": "0", "x-yawf-transcode-audio": String(options.currentAudio),
+        ...options.currentHeaders,
+      } });
       return new Response(options.lease ? "#EXTM3U\n480p.m3u8?generation=transcode-starvation95\n" : "#EXTM3U\n");
     }));
     const props = {
@@ -17778,6 +17787,159 @@ describe("automatic starvation95 adaptation", () => {
   async function confirmedEpisode96(p: Awaited<ReturnType<typeof setup>>) {
     beginConfirmedEpisode96(p); await advance96(2_000);
   }
+
+  function unlabeledNative102(language = "und") {
+    deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    const list = Object.assign(new EventTarget(), {
+      0: { id: "renderer-local-999", label: "", language, enabled: true }, length: 1,
+    });
+    Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", { configurable: true, get: () => list });
+    return list;
+  }
+
+  it.each([[0, ""], [5, "und"]] as const)("[audio102] attested current muxed audio%s survives native language '%s' during480 to360", async (index, language) => {
+    unlabeledNative102(language);
+    const p = await setup({ compatibility: true, height: 480, pending: true, currentAudio: index, sourceTracks: [
+      { index: 0, label: "English", language: "eng", default: true },
+      { index: 5, label: "Japanese Main", language: "jpn", default: false },
+    ] });
+    const source = p.video.src;
+    expect(hlsInstances).toHaveLength(0);
+    p.episodes(); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("360p", 106, index);
+    expect(p.video.src).toBe(source);
+    expect(vi.mocked(fetch).mock.calls.filter(([input, init]) => String(input).includes("compat95/index.m3u8") && init?.method !== "HEAD")).toHaveLength(1);
+    p.episodes(); await settle(); expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[audio102] delayed owned inventory completes earned episodes once without a new wait", async () => {
+    unlabeledNative102();
+    const p = await setup({ compatibility: true, height: 480, pending: true, currentAudio: 5, lazyAudio: "pending" });
+    p.episodes(); await settle();
+    expect(p.loadAudioTracks).toHaveBeenCalledTimes(1); expect(p.request).not.toHaveBeenCalled();
+    await act(async () => p.inventory.resolve([{ index: 5, label: "Japanese", language: "jpn", default: false }]));
+    await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("360p", 106, 5);
+    p.episodes(); await settle(); expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["missing", "wrong header", "wrong generation", "alternate AUDIO", "index absent", "meaningful mismatch", "Commentary", "zero enabled", "multiple tracks", "post-start selection"])("[audio102] refuses current-audio inference for %s", async scenario => {
+    const list = unlabeledNative102();
+    if (scenario === "meaningful mismatch") list[0].language = "fr";
+    if (scenario === "Commentary") list[0].label = "Commentary";
+    if (scenario === "zero enabled") list[0].enabled = false;
+    if (scenario === "multiple tracks") Object.assign(list, { 1: { ...list[0], id: "other", enabled: false }, length: 2 });
+    const p = await setup({ compatibility: true, height: 480, pending: true,
+      currentAudio: scenario === "missing" ? undefined : 5,
+      currentHeaders: scenario === "wrong header" ? { "x-yawf-transcode-start": "9" }
+        : scenario === "wrong generation" ? { "x-yawf-hls-snapshot-generation": "transcode-other" } : undefined,
+      currentManifest: scenario === "alternate AUDIO" ? '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="other",URI="audio.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=1000,AUDIO="other"\n480p.m3u8?generation=transcode-current102\n' : undefined,
+      sourceTracks: [{ index: 0, label: "English", language: "eng", default: true },
+        { index: scenario === "index absent" ? 4 : 5, label: "Japanese", language: "jpn", default: false }],
+    });
+    if (scenario === "post-start selection") {
+      p.playing(); p.progress(); p.progress(); list[0].id = "changed-after-decoding";
+      act(() => list.dispatchEvent(new Event("change"))); await settle();
+    }
+    p.episodes(); await settle(); expect(p.request).not.toHaveBeenCalled();
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+  });
+
+  it("[audio102] expected startup discovery remains eligible before decoded progress", async () => {
+    const list = unlabeledNative102();
+    list.length = 0;
+    const p = await setup({ compatibility: true, height: 480, pending: true, currentAudio: 5,
+      sourceTracks: [{ index: 0, label: "English", language: "eng", default: true },
+        { index: 5, label: "Japanese", language: "jpn", default: false }] });
+    list.length = 1; act(() => list.dispatchEvent(new Event("addtrack"))); await settle();
+    p.episodes(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("360p", 106, 5);
+  });
+
+  it("[audio102] explicit native audio choice retires initial proof even when the sole track stays selected", async () => {
+    unlabeledNative102();
+    const p = await setup({ compatibility: true, height: 480, pending: true, currentAudio: 5, lazyAudio: "pending" });
+    p.episode(); await settle(); p.settings();
+    fireEvent.click(screen.getByRole("button", { name: "Audio 1" })); await settle();
+    await act(async () => p.inventory.resolve([
+      { index: 0, label: "English", language: "eng", default: true },
+      { index: 5, label: "Japanese", language: "jpn", default: false },
+    ])); await settle();
+    p.episodes(); await settle(); expect(p.request).not.toHaveBeenCalled();
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+  });
+
+  it("[audio102] immutable handoff plan rejects silent native selection drift while next generation prepares", async () => {
+    const list = unlabeledNative102();
+    const p = await setup({ compatibility: true, height: 480, pending: true, currentAudio: 5, sourceTracks: [
+      { index: 0, label: "English", language: "eng", default: true },
+      { index: 5, label: "Japanese", language: "jpn", default: false },
+    ] });
+    const source = p.video.src; p.episodes(); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("360p", 106, 5);
+    list[0].id = "changed-without-event";
+    await act(async () => p.manifest.resolve(new Response('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n360p.m3u8?generation=transcode-next102\n', { headers: {
+      "x-yawf-hls-snapshot-version": "1", "x-yawf-hls-snapshot-generation": "transcode-next102",
+      "x-yawf-hls-snapshot-frontier": "30", "x-yawf-hls-snapshot-target": "6", "x-yawf-hls-snapshot-endlist": "0",
+      "x-yawf-transcode-quality": "360p", "x-yawf-transcode-start": "106", "x-yawf-transcode-audio": "5",
+    } }))); await settle();
+    expect(p.video.src).toBe(source); expect(document.querySelector("video.player-video")).toBe(p.video);
+    expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[audio102] authoritative busy ref refuses without spending earned episodes while child pending prop is stale", async () => {
+    automaticAdmissionRefObserver.enabled = true; automaticAdmissionRefObserver.refs = [];
+    try {
+      // Identify the real parent ref from an observed accepted request, not a
+      // guessed hook ordinal or fabricated child prop. A fresh mount gets a
+      // fresh one-attempt policy and the same verified parent-ref position.
+      const calibration = await setup({ pending: true }); calibration.episodes(); await settle();
+      expect(calibration.request).toHaveBeenCalledTimes(1);
+      const index = automaticAdmissionRefObserver.refs.findIndex(ref =>
+        (ref.current as { purpose?: string } | null)?.purpose === "automatic-starvation");
+      expect(index).toBeGreaterThanOrEqual(0);
+      const observed = automaticAdmissionRefObserver.refs[index].current as { owner: string };
+      calibration.view.unmount(); await settle(); automaticAdmissionRefObserver.refs = [];
+      const p = await setup({ pending: true });
+      const parentPending = automaticAdmissionRefObserver.refs[index]; expect(parentPending.current).toBeNull();
+      // No React state update: the child sees pending=false while the actual
+      // authoritative parent ref is already occupied by another operation.
+      parentPending.current = { owner: observed.owner, request: 999, controller: new AbortController(), purpose: "ordinary" };
+      p.episodes(); await settle(); expect(p.request).not.toHaveBeenCalled();
+      parentPending.current = null;
+      // Ordinary descriptor/state reconciliation retries the earned decision,
+      // without another waiting event, fake progress or inventory probe.
+      p.view.rerender(<VideoPlayer {...p.props} serverOptimized={{ ...p.props.serverOptimized! }} />); await settle();
+      expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106);
+      p.episodes(); await settle(); expect(p.request).toHaveBeenCalledTimes(1);
+    } finally { automaticAdmissionRefObserver.enabled = false; automaticAdmissionRefObserver.refs = []; }
+  });
+
+  it.each(["fast", "confirmed", "inventory"])("[audio102] invalid %s plan does not spend the one valid attempt", async mode => {
+    vi.useFakeTimers(); const list = unlabeledNative102();
+    const p = await setup({ compatibility: true, height: 480, pending: true,
+      ...(mode === "inventory" ? { lazyAudio: "pending" as const } : { sourceTracks: [
+        { index: 0, label: "English", language: "eng", default: true },
+        { index: 5, label: "Japanese", language: "jpn", default: false },
+      ] }),
+    });
+    if (mode === "confirmed") { await confirmedEpisode96(p); await confirmedEpisode96(p); }
+    else p.episodes();
+    if (mode === "inventory") {
+      await act(async () => p.inventory.resolve([
+        { index: 0, label: "English", language: "eng", default: true },
+        { index: 5, label: "Japanese", language: "jpn", default: false },
+      ])); await settle();
+    }
+    await settle(); expect(p.request).not.toHaveBeenCalled();
+    // Genuine new native intent retires the old proof/window. It may still
+    // earn a fresh decision through a unique semantic match, once ready.
+    list[0].language = "ja"; list[0].label = "Japanese";
+    act(() => list.dispatchEvent(new Event("change"))); await settle();
+    p.setAhead(0); p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
+    p.episode(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("360p", p.clock(), 5);
+    p.episodes(); await settle(); expect(p.request).toHaveBeenCalledTimes(1);
+  });
 
   it.each([40_000, 150_000])("[native200] native Safari480 preserves audio0 and requests360 on the second starvation spaced %sms apart", async spacing => {
     vi.useFakeTimers();
