@@ -269,6 +269,33 @@ function assertInitialAttributeProbe(source) {
   assert.match(probe, /attachment\.lifetime = \.keepAlways/);
 }
 
+function assertFreshHostedClipboardSeed(source) {
+  const profile = swiftSection(source, "private func seedProfileName(", "private func seedWatchlist(");
+  assert.ok(profile.indexOf("runtimeAdmissionRefusal(environment: ProcessInfo.processInfo.environment)") >= 0);
+  assert.ok(profile.indexOf("runtimeAdmissionRefusal(environment: ProcessInfo.processInfo.environment)") < profile.indexOf("NSPasteboard.general"));
+  assert.match(profile, /let clearedChangeCount = clipboard\.clearContents\(\)/);
+  assert.match(profile, /guard clearedChangeCount > 0, clipboard\.changeCount == clearedChangeCount/);
+  assert.match(profile, /clipboard\.types\?\.isEmpty \?\? true/);
+  assert.match(profile, /defer \{ _ = clipboard\.clearContents\(\) \}/);
+  assert.equal((profile.match(/clipboard\.setString\(/g) ?? []).length, 1);
+  assert.match(profile, /guard clipboard\.setString\("OTA Runner", forType: \.string\),\s*clipboard\.string\(forType: \.string\) == "OTA Runner" else/);
+  assert.ok(profile.indexOf('clipboard.setString("OTA Runner"') < profile.indexOf('clipboard.string(forType: .string)'));
+  assert.equal((profile.match(/app\.typeKey\("v", modifierFlags: \.command\)/g) ?? []).length, 1);
+  assert.doesNotMatch(profile, /typeText|readObjects|pasteboardItems|restoreClipboard|previousClipboard/);
+  assert.match(profile, /capturePhase\("profile-name-after-paste", in: app\)/);
+}
+
+function assertScopedWatchlistToggle(source) {
+  const seed = swiftSection(source, "private func seedWatchlist(", "private func assertProfileName(");
+  assert.match(seed, /let toggleRoles = \[NSNumber\(value: XCUIElement\.ElementType\.button\.rawValue\), NSNumber\(value: XCUIElement\.ElementType\.checkBox\.rawValue\)\]/);
+  assert.match(seed, /detailQuery\.firstMatch\.descendants\(matching: \.any\)\.matching\(NSPredicate\(format: "elementType IN %@", toggleRoles\)\)/);
+  assert.match(seed, /uniqueHittable\(named\(detailActions, "Watchlist"\)/);
+  assert.match(seed, /uniqueHittable\(named\(detailActions, "In watchlist"\)/);
+  assert.equal((seed.match(/detailButton\.click\(\)/g) ?? []).length, 1);
+  assert.match(seed, /XCTAssertTrue\(selectedValue == "1" \|\| selectedValue == "true"/);
+  assert.doesNotMatch(seed, /named\(detailQuery\.firstMatch\.buttons, "(?:In watchlist|Watchlist)"/);
+}
+
 function assertPreservedValueQueries(source) {
   const profile = swiftSection(source, "private func seedProfileName(", "private func seedWatchlist(");
   assert.match(profile, /uniqueHittable\(named\(app\.textFields, "NAME"\)/);
@@ -279,12 +306,13 @@ function assertPreservedValueQueries(source) {
   assert.match(profile, /windowFrame\.contains\(fieldFrame\)/);
   assert.match(profile, /field\.coordinate\(withNormalizedOffset: CGVector\(dx: 0\.5, dy: 0\.5\)\)\.click\(\)/);
   assert.match(profile, /app\.typeKey\("a", modifierFlags: \.command\)/);
-  assert.match(profile, /app\.typeText\(name\)/);
+  assert.match(profile, /app\.typeKey\("v", modifierFlags: \.command\)/);
+  assert.doesNotMatch(profile, /app\.typeText\(/);
   assert.match(profile, /guard waitUntil\(timeout: 10, condition: \{ \(field\.value as\? String\) == name \}\) else/);
   assert.ok(profile.indexOf('app.activate()') < profile.indexOf('capturePhase("profile-name-before-center"'));
   assert.ok(profile.indexOf('capturePhase("profile-name-before-center"') < profile.indexOf('let field ='));
   assert.ok(profile.indexOf('windowFrame.contains(fieldFrame)') < profile.indexOf('field.coordinate('));
-  assert.ok(profile.indexOf('capturePhase("profile-name-after-typing"') < profile.indexOf('guard waitUntil('));
+  assert.ok(profile.indexOf('capturePhase("profile-name-after-paste"') < profile.indexOf('guard waitUntil('));
   assert.ok(profile.indexOf('guard waitUntil(') < profile.indexOf('try saveSettingsIfEnabled('));
   assert.doesNotMatch(profile, /field\.click\(\)|field\.typeKey|field\.typeText|setValue|evaluateJavaScript/);
   const persisted = swiftSection(source, "private func assertProfileName(", "private func assertWatchlist(");
@@ -334,6 +362,14 @@ test("Swift bounded public attribute probe precedes the first required UI select
   assertInitialAttributeProbe(await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8"));
 });
 
+test("Swift seeds only the fixed fake profile through one fresh-hosted-clipboard paste", async () => {
+  assertFreshHostedClipboardSeed(await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8"));
+});
+
+test("Swift scopes the exact watchlist toggle to the title detail and verifies selected state", async () => {
+  assertScopedWatchlistToggle(await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8"));
+});
+
 test("Swift title-aware naming does not replace editable or selected-state value assertions", async () => {
   assertPreservedValueQueries(await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8"));
 });
@@ -342,6 +378,14 @@ test("Swift AX source contracts independently reject critical selector regressio
   // Source-contract mutations, not XCTest execution or simulated UI proof.
   const source = await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8");
   const controls = [
+    ["watchlist checkbox role", assertScopedWatchlistToggle, 'NSNumber(value: XCUIElement.ElementType.checkBox.rawValue)', 'NSNumber(value: XCUIElement.ElementType.textField.rawValue)'],
+    ["watchlist detail scope", assertScopedWatchlistToggle, 'detailQuery.firstMatch.descendants(matching: .any)', 'app.descendants(matching: .any)'],
+    ["watchlist selected state", assertScopedWatchlistToggle, 'XCTAssertTrue(selectedValue == "1" || selectedValue == "true"', 'XCTAssertTrue(true || selectedValue == "true"'],
+    ["clipboard fresh admission", assertFreshHostedClipboardSeed, 'runtimeAdmissionRefusal(environment: ProcessInfo.processInfo.environment)', 'noFreshClipboardAdmission()'],
+    ["clipboard clear success", assertFreshHostedClipboardSeed, 'guard clearedChangeCount > 0', 'guard true'],
+    ["clipboard readback", assertFreshHostedClipboardSeed, 'clipboard.string(forType: .string) == "OTA Runner"', 'true'],
+    ["clipboard defer clear", assertFreshHostedClipboardSeed, 'defer { _ = clipboard.clearContents() }', ''],
+    ["clipboard no typing fallback", assertFreshHostedClipboardSeed, 'app.typeKey("v", modifierFlags: .command)', 'app.typeText(name)'],
     ["responsive category before and after", assertSettingsCategoryContract, 'try selectSettingsCategory("Appearance", in: app)', 'try clickUniqueButton("Appearance", in: app)'],
     ["exact popup role", assertSettingsCategoryContract, 'app.popUpButtons, "SETTINGS CATEGORY"', 'app.buttons, "SETTINGS CATEGORY"'],
     ["capture before option query", assertSettingsCategoryContract, 'capturePhase("settings-category-\\(category)-menu", in: app)', 'captureSettingsMenuAfterOptionQuery(in: app)'],

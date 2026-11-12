@@ -288,8 +288,22 @@ final class MacOTARuntimeTests: XCTestCase {
         }
         field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
         app.typeKey("a", modifierFlags: .command)
-        app.typeText(name)
-        capturePhase("profile-name-after-typing", in: app)
+        if let reason = runtimeAdmissionRefusal(environment: ProcessInfo.processInfo.environment) {
+            throw AdmissionError.refused(reason)
+        }
+        let clipboard = NSPasteboard.general
+        let clearedChangeCount = clipboard.clearContents()
+        defer { _ = clipboard.clearContents() }
+        guard clearedChangeCount > 0, clipboard.changeCount == clearedChangeCount,
+              clipboard.types?.isEmpty ?? true else {
+            throw AdmissionError.refused("The fresh hosted VM clipboard could not be cleared.")
+        }
+        guard clipboard.setString("OTA Runner", forType: .string),
+              clipboard.string(forType: .string) == "OTA Runner" else {
+            throw AdmissionError.refused("The fixed fake profile name was not written to the fresh VM clipboard.")
+        }
+        app.typeKey("v", modifierFlags: .command)
+        capturePhase("profile-name-after-paste", in: app)
         guard waitUntil(timeout: 10, condition: { (field.value as? String) == name }) else {
             throw AdmissionError.refused("The exact NAME field did not read back OTA Runner before Save.")
         }
@@ -300,14 +314,19 @@ final class MacOTARuntimeTests: XCTestCase {
     @MainActor
     private func seedWatchlist(in app: XCUIApplication, title: String) throws {
         try clickUniqueButton("Discover", in: app)
+        capturePhase("discover-before-ranked-card", in: app)
         let rankedCard = try uniqueHittable(named(app.buttons, "#1: \(title)"), label: "#1: \(title)", timeout: 60)
         rankedCard.click()
         let detailQuery = named(app.groups, "\(title) details")
         XCTAssertTrue(detailQuery.firstMatch.waitForExistence(timeout: 30), "The exact title details dialog was not exposed.")
         XCTAssertEqual(detailQuery.count, 1, "The title details dialog was ambiguous.")
-        let detailButton = try uniqueHittable(named(detailQuery.firstMatch.buttons, "Watchlist"), label: "Detail Watchlist", timeout: 30)
+        let toggleRoles = [NSNumber(value: XCUIElement.ElementType.button.rawValue), NSNumber(value: XCUIElement.ElementType.checkBox.rawValue)]
+        let detailActions = detailQuery.firstMatch.descendants(matching: .any).matching(NSPredicate(format: "elementType IN %@", toggleRoles))
+        let detailButton = try uniqueHittable(named(detailActions, "Watchlist"), label: "Detail Watchlist", timeout: 30)
         detailButton.click()
-        _ = try uniqueHittable(named(detailQuery.firstMatch.buttons, "In watchlist"), label: "In watchlist", timeout: 30)
+        let selected = try uniqueHittable(named(detailActions, "In watchlist"), label: "In watchlist", timeout: 30)
+        let selectedValue = (selected.value as? String)?.lowercased()
+        XCTAssertTrue(selectedValue == "1" || selectedValue == "true" || (selected.value as? NSNumber)?.boolValue == true || selected.isSelected, "The exact Detail watchlist toggle was not selected.")
         let back = try uniqueHittable(named(detailQuery.firstMatch.buttons, "Back"), label: "Detail Back", timeout: 30)
         back.click()
         XCTAssertTrue(waitUntil(timeout: 30) { !detailQuery.firstMatch.exists }, "The Detail dialog did not close through its visible Back control.")
