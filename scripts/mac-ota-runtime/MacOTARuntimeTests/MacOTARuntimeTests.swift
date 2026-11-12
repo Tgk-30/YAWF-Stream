@@ -369,15 +369,28 @@ final class MacOTARuntimeTests: XCTestCase {
 
     @MainActor
     private func captureInitialPublicAttributes(in app: XCUIApplication) {
-        _ = named(app.groups, "Welcome").firstMatch.waitForExistence(timeout: 30)
-        func attributes(_ query: XCUIElementQuery) -> [[String: String]] {
-            query.allElementsBoundByIndex.prefix(20).map { element in
-                ["title": String(element.title.prefix(512)),
-                 "label": String(element.label.prefix(512)),
-                 "value": String(String(describing: element.value ?? "").prefix(512))]
+        let welcome = named(app.groups, "Welcome").firstMatch
+        guard welcome.waitForExistence(timeout: 30) else { return }
+        // Read one immutable hierarchy, not live index references that can
+        // disappear between property reads while WebKit finishes loading.
+        guard let snapshot = try? welcome.snapshot() else { return }
+        var buttons: [[String: String]] = []
+        var texts: [[String: String]] = []
+        var visited = 0
+        func visit(_ element: any XCUIElementSnapshot, depth: Int) {
+            guard depth <= 32, visited < 512 else { return }
+            visited += 1
+            let row = ["title": String(element.title.prefix(512)),
+                       "label": String(element.label.prefix(512)),
+                       "value": String(String(describing: element.value ?? "").prefix(512))]
+            if element.elementType == .button, buttons.count < 20 { buttons.append(row) }
+            if element.elementType == .staticText, texts.count < 20 { texts.append(row) }
+            for child in element.children {
+                visit(child, depth: depth + 1)
             }
         }
-        let report = ["buttons": attributes(app.buttons), "staticTexts": attributes(app.staticTexts)]
+        visit(snapshot, depth: 0)
+        let report = ["buttons": buttons, "staticTexts": texts]
         guard let data = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]), data.count <= 64_000 else {
             XCTFail("Initial public attribute diagnostics exceeded their bound.")
             return

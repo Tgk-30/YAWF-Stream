@@ -199,7 +199,18 @@ function assertInitialAttributeProbe(source) {
   assert.ok(flow.indexOf("captureInitialPublicAttributes(in: activeApp)") >= 0);
   assert.ok(flow.indexOf("captureInitialPublicAttributes(in: activeApp)") < flow.indexOf("try dismissInitialWelcome(in: activeApp)"));
   const probe = swiftSection(source, "private func captureInitialPublicAttributes(", "private func uniqueHittable(");
-  assert.match(probe, /allElementsBoundByIndex\.prefix\(20\)/);
+  assert.match(probe, /let welcome = named\(app\.groups, "Welcome"\)\.firstMatch/);
+  assert.match(probe, /guard welcome\.waitForExistence\(timeout: 30\) else \{ return \}/);
+  assert.match(probe, /guard let snapshot = try\? welcome\.snapshot\(\) else \{ return \}/);
+  assert.equal((probe.match(/\.snapshot\(/g) ?? []).length, 1);
+  assert.match(probe, /func visit\(_ element: any XCUIElementSnapshot, depth: Int\)/);
+  assert.match(probe, /guard depth <= 32, visited < 512 else \{ return \}/);
+  assert.match(probe, /visited \+= 1/);
+  assert.match(probe, /buttons\.count < 20/);
+  assert.match(probe, /texts\.count < 20/);
+  assert.match(probe, /for child in element\.children \{\s*visit\(child, depth: depth \+ 1\)/);
+  assert.match(probe, /visit\(snapshot, depth: 0\)/);
+  assert.doesNotMatch(probe, /allElementsBoundByIndex|element\(boundBy:|app\.buttons|app\.staticTexts/);
   for (const attribute of ["title", "label", "value"]) assert.match(probe, new RegExp(`"${attribute}"\\s*:`));
   assert.match(probe, /element\.title\.prefix\(512\)/);
   assert.match(probe, /element\.label\.prefix\(512\)/);
@@ -255,6 +266,7 @@ test("Swift AX source contracts independently reject critical selector regressio
     ["unique return", assertStaticTextContract, 'if count == 1, matches.firstMatch.exists', 'if count > 0, matches.firstMatch.exists'],
     ["probe before selector", assertInitialAttributeProbe, 'captureInitialPublicAttributes(in: activeApp)', 'captureInitialPublicAttributesAfterSelectors(in: activeApp)'],
     ["bounded probe", assertInitialAttributeProbe, 'data.count <= 64_000', 'data.count <= 640_000'],
+    ["no live diagnostic index list", assertInitialAttributeProbe, 'var visited = 0', 'var visited = 0; let live = app.buttons.allElementsBoundByIndex'],
     ["profile value", assertPreservedValueQueries, '"value == %@", "You"', '"label == %@", "You"'],
     ["persisted value", assertPreservedValueQueries, '"value == %@", name', '"title == %@", name'],
   ];
