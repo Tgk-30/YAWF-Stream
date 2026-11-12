@@ -1,0 +1,24 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+		A10000000000000000000001 = { isa = PBXProject; attributes = { BuildIndependentTargetsInParallel = YES; LastSwiftUpdateCheck = 2700; LastUpgradeCheck = 2700; }; buildConfigurationList = A10000000000000000000002; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = A10000000000000000000003; productRefGroup = A10000000000000000000004; projectDirPath = ""; projectRoot = ""; targets = (A10000000000000000000005); };
+		A10000000000000000000003 = { isa = PBXGroup; children = (A10000000000000000000006, A10000000000000000000004); sourceTree = "<group>"; };
+		A10000000000000000000004 = { isa = PBXGroup; children = (A10000000000000000000007); name = Products; sourceTree = "<group>"; };
+		A10000000000000000000006 = { isa = PBXGroup; children = (A10000000000000000000008); path = MacOTARuntimeTests; sourceTree = "<group>"; };
+		A10000000000000000000008 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacOTARuntimeTests.swift; sourceTree = "<group>"; };
+		A10000000000000000000007 = { isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MacOTARuntimeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000009 = { isa = PBXBuildFile; fileRef = A10000000000000000000008; };
+		A1000000000000000000000A = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000009); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000005 = { isa = PBXNativeTarget; buildConfigurationList = A1000000000000000000000B; buildPhases = (A1000000000000000000000A); buildRules = (); dependencies = (); name = MacOTARuntimeTests; productName = MacOTARuntimeTests; productReference = A10000000000000000000007; productType = "com.apple.product-type.bundle.ui-testing"; };
+		A10000000000000000000002 = { isa = XCConfigurationList; buildConfigurations = (A1000000000000000000000C, A1000000000000000000000D); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A1000000000000000000000B = { isa = XCConfigurationList; buildConfigurations = (A1000000000000000000000E, A1000000000000000000000F); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A1000000000000000000000C = { isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; }; name = Debug; };
+		A1000000000000000000000D = { isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; }; name = Release; };
+		A1000000000000000000000E = { isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = ""; CODE_SIGNING_ALLOWED = YES; CODE_SIGNING_IDENTITY = "-"; CODE_SIGNING_REQUIRED = YES; CODE_SIGN_STYLE = Manual; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = MacOTARuntimeTests; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @loader_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = com.tgk30.yawfstream.macotaruntime.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = macosx; SKIP_INSTALL = YES; SWIFT_VERSION = 6.0; TEST_TARGET_NAME = ""; }; name = Debug; };
+		A1000000000000000000000F = { isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = ""; CODE_SIGNING_ALLOWED = YES; CODE_SIGNING_IDENTITY = "-"; CODE_SIGNING_REQUIRED = YES; CODE_SIGN_STYLE = Manual; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = MacOTARuntimeTests; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @loader_path/../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 15.0; PRODUCT_BUNDLE_IDENTIFIER = com.tgk30.yawfstream.macotaruntime.tests; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = macosx; SKIP_INSTALL = YES; SWIFT_VERSION = 6.0; TEST_TARGET_NAME = ""; }; name = Release; };
+	};
+	rootObject = A10000000000000000000001;
+}
