@@ -201,6 +201,8 @@ interface ActivePlayer {
   /** Original Server Mode source. It supplies the stream-scoped external-player
    * capability and, when transcoding is available, the safe HLS fallback. */
   fallbackStream: StreamInfo | null;
+  /** The initial fixed rendition was selected for compatibility, not by the user. */
+  initialQualityIntent: "automatic" | null;
   /** Saved resume position (seconds) to seek to on load; 0 starts fresh. */
   startPositionSeconds: number;
   /** Remembered audio/subtitle/speed for this (media, episode), snapshotted at
@@ -1029,6 +1031,7 @@ export function Detail() {
     timelineOffsetSeconds = 0,
     playbackHandoff: ActivePlayer["playbackHandoff"] = null,
     recoverySource: StreamRow | null = null,
+    initialQualityIntent: ActivePlayer["initialQualityIntent"] = null,
   ): void {
     const metadataTitle = item?.title?.trim() || detailItem?.title?.trim() || "";
     const metadataYear = item?.year ?? detailItem?.year ?? null;
@@ -1094,6 +1097,7 @@ export function Detail() {
       sourceFileName,
       engine,
       fallbackStream,
+      initialQualityIntent,
       startPositionSeconds: Math.max(
         0,
         (startPositionOverride ?? resumeSecondsFor()) - timelineOffsetSeconds,
@@ -1388,6 +1392,7 @@ export function Detail() {
         initialServerOptimizedSource?.timelineOffsetSeconds ?? timelineOffsetSeconds,
         playbackHandoff,
         retainedRecoverySource,
+        initialServerOptimizedSource != null ? "automatic" : null,
       );
       return;
     }
@@ -2405,6 +2410,7 @@ export function Detail() {
               serverOptimizedQualities.length > 0
                 ? {
                     qualities: serverOptimizedQualities,
+                    initialQualityIntent: player.initialQualityIntent,
                     loadAudioTracks: (options) =>
                       serverStreamAudioTracks(player.fallbackStream!, options),
                     loadSourceInfo: (options) =>

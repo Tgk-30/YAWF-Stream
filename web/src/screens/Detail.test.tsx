@@ -526,6 +526,7 @@ vi.mock("../components/VideoPlayer", () => ({
       data-timeline-offset={String(timelineOffsetSeconds ?? 0)}
       data-external-playback-url={externalPlaybackUrl ?? ""}
       data-handoff-rate={String(initialHandoffState?.playbackRate ?? "")}
+      data-initial-quality-intent={serverOptimized?.initialQualityIntent ?? ""}
       data-has-source-info={String(serverOptimized?.loadSourceInfo != null)}
       data-scrobble-tmdb={scrobbleContext?.tmdbId ?? ""}
       data-scrobble-season={scrobbleContext?.season ?? ""}
@@ -2657,6 +2658,20 @@ describe("Detail play", () => {
       transcode: true,
       transcodeOptions: { profile: "data-saver" },
     });
+  });
+
+  it("passes implicit compatibility quality intent to the player", async () => {
+    serverModeOn = true;
+    transcodeAvailable = true;
+    transcodeQualities = ["480p", "360p"];
+    resolveServerStream.mockResolvedValue({ fileName: "show.mkv", streamURL: "https://server.example/api/stream/session-1", codec: "H.265" });
+    mockDetailItem = preview("s1", { type: "series", title: "Obsession", tmdbId: 200 });
+    mockDetail = detailState({ item: mediaItem({ id: "s1", type: "series", title: "Obsession", tmdbId: 200 }) });
+    mockServices.tmdb = { getEpisodes: vi.fn(async () => []), getSeasons: vi.fn(async () => []) };
+    render(<Detail />);
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    await userEvent.click(screen.getByTestId("resolve-and-play-stream"));
+    expect(await screen.findByTestId("player")).toHaveAttribute("data-initial-quality-intent", "automatic");
   });
 
   it("automatically uses server HLS for an incompatible source in the hosted web app", async () => {
