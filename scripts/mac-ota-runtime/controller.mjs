@@ -15,6 +15,12 @@ export const BASELINE = Object.freeze({
   version: "2.3.96",
   targetVersion: "2.3.102",
 });
+export const RECEIPT_ATTACHMENT = Object.freeze({
+  name: "MacOTARuntimeReceipt",
+  testIdentifier: "MacOTARuntimeTests/testPublic96To102ThroughNormalUpdaterUI()",
+  testIdentifierURL: "test://com.apple.xcode/MacOTARuntime/MacOTARuntimeTests/MacOTARuntimeTests/testPublic96To102ThroughNormalUpdaterUI",
+});
+const receiptSuggestedNamePattern = /^MacOTARuntimeReceipt_0_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i;
 
 const fail = (message) => { throw new Error(message); };
 const sha256 = async (file) => createHash("sha256").update(await readFile(file)).digest("hex");
@@ -97,6 +103,39 @@ export function pathsOverlap(first, second) {
   const a = path.resolve(first);
   const b = path.resolve(second);
   return a === b || a.startsWith(`${b}${path.sep}`) || b.startsWith(`${a}${path.sep}`);
+}
+
+export async function loadReceiptAttachment(exportRoot, runnerTemp) {
+  const root = await admitOwnedPath(exportRoot, runnerTemp);
+  const rootInfo = await lstat(root);
+  if (!rootInfo.isDirectory()) fail("attachment export root is not a directory");
+  const manifestPath = await admitOwnedPath(path.join(root, "manifest.json"), runnerTemp);
+  const manifestInfo = await lstat(manifestPath);
+  if (!manifestInfo.isFile() || manifestInfo.size <= 0 || manifestInfo.size >= 64 * 1024) fail("attachment manifest bounds invalid");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  if (!Array.isArray(manifest) || manifest.length !== 1) fail("expected exactly one exported testcase attachment row");
+  const [row] = manifest;
+  if (row?.testIdentifier !== RECEIPT_ATTACHMENT.testIdentifier || row?.testIdentifierURL !== RECEIPT_ATTACHMENT.testIdentifierURL) fail("attachment testcase identity mismatch");
+  if (!Array.isArray(row.attachments)) fail("attachment list missing");
+  for (const attachment of row.attachments) {
+    if (typeof attachment?.exportedFileName !== "string" || path.basename(attachment.exportedFileName) !== attachment.exportedFileName) fail("unsafe exported attachment filename");
+  }
+  const matches = row.attachments.filter((attachment) => typeof attachment.suggestedHumanReadableName === "string" && receiptSuggestedNamePattern.test(attachment.suggestedHumanReadableName));
+  if (matches.length !== 1) fail("expected exactly one named lifecycle receipt attachment");
+  const [attachment] = matches;
+  if (attachment.isAssociatedWithFailure !== false || attachment.configurationName !== "Test Scheme Action" || attachment.deviceName !== "My Mac" || typeof attachment.deviceId !== "string" || attachment.deviceId.length === 0 || !Number.isFinite(attachment.timestamp)) fail("receipt attachment provenance mismatch");
+  if (!/^[a-z0-9][a-z0-9._-]{0,127}\.json$/i.test(attachment.exportedFileName)) fail("receipt attachment filename safety mismatch");
+  const receiptPath = await admitOwnedPath(path.join(root, attachment.exportedFileName), runnerTemp);
+  if (path.dirname(receiptPath) !== root) fail("receipt attachment escaped export root");
+  const receiptInfo = await lstat(receiptPath);
+  if (!receiptInfo.isFile() || receiptInfo.size <= 0 || receiptInfo.size >= 64 * 1024) fail("receipt attachment bounds invalid");
+  const bytes = await readFile(receiptPath);
+  const receipt = JSON.parse(bytes.toString("utf8"));
+  return {
+    receipt,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    exportedFileName: attachment.exportedFileName,
+  };
 }
 
 export function patchXCTestRun(document, environment) {
@@ -218,10 +257,8 @@ async function execute(options) {
   await admitBundle(reference, BASELINE.targetVersion);
   const expectedDigest = await bundleManifest(reference);
   const configPath = path.join(runRoot, "test-config.json");
-  const receiptPath = path.join(runRoot, "ui-receipt.json");
   await writeFile(configPath, JSON.stringify({
     appPath: prepared.appPath,
-    receiptPath,
     expectedBeforeVersion: BASELINE.version,
     expectedAfterVersion: BASELINE.targetVersion,
   }) + "\n", { flag: "wx" });
@@ -235,23 +272,31 @@ async function execute(options) {
     RUNNER_OS: process.env.RUNNER_OS,
     RUNNER_ARCH: process.env.RUNNER_ARCH,
     RUNNER_TEMP: process.env.RUNNER_TEMP,
-    HOME: process.env.HOME,
     YAWF_OTA_CONFIG_PATH: configPath,
   });
   const patchedPath = path.join(path.dirname(original), "MacOTARuntime.patched.xctestrun");
   await writeFile(patchedPath, JSON.stringify(patched), { flag: "wx" });
   run("/usr/bin/plutil", ["-convert", "binary1", patchedPath]);
 
+  const resultBundlePath = path.join(runRoot, "MacOTARuntime.xcresult");
   run("/usr/bin/xcodebuild", [
     "test-without-building",
     "-xctestrun", patchedPath,
     "-destination", "platform=macOS,arch=arm64",
     "-parallel-testing-enabled", "NO",
     "-only-testing:MacOTARuntimeTests/MacOTARuntimeTests/testPublic96To102ThroughNormalUpdaterUI",
-    "-resultBundlePath", path.join(runRoot, "MacOTARuntime.xcresult"),
+    "-resultBundlePath", resultBundlePath,
   ], { timeout: 25 * 60 * 1000 });
 
-  const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+  const attachmentRoot = path.join(runRoot, "receipt-attachments");
+  run("/usr/bin/xcrun", [
+    "xcresulttool", "export", "attachments",
+    "--path", resultBundlePath,
+    "--output-path", attachmentRoot,
+    "--test-id", RECEIPT_ATTACHMENT.testIdentifier,
+  ]);
+  const attachmentReceipt = await loadReceiptAttachment(attachmentRoot, process.env.RUNNER_TEMP);
+  const receipt = attachmentReceipt.receipt;
   validateReceipt(receipt, prepared);
   await admitBundle(prepared.appPath, BASELINE.targetVersion);
   await admitBundle(reference, BASELINE.targetVersion);
@@ -259,6 +304,8 @@ async function execute(options) {
   if (finalReferenceDigest !== expectedDigest) fail("independent public v2.3.102 reference changed during the UI test");
   if (actualDigest !== expectedDigest) fail("OTA-installed bundle differs from the independently downloaded public v2.3.102 bundle");
   receipt.bundleManifestSha256 = actualDigest;
+  receipt.receiptAttachmentSha256 = attachmentReceipt.sha256;
+  receipt.receiptAttachmentExportedFileName = attachmentReceipt.exportedFileName;
   await writeFile(path.join(runRoot, "verified.json"), JSON.stringify(receipt, null, 2) + "\n", { flag: "wx" });
 }
 
