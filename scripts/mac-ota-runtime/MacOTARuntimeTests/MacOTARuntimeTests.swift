@@ -246,9 +246,23 @@ final class MacOTARuntimeTests: XCTestCase {
     }
 
     @MainActor
+    private func selectSettingsCategory(_ category: String, in app: XCUIApplication) throws {
+        guard ["Appearance", "Profiles"].contains(category) else {
+            throw AdmissionError.refused("Unknown scoped Settings category.")
+        }
+        let picker = try uniqueHittable(named(app.popUpButtons, "SETTINGS CATEGORY"), label: "Settings category popup", timeout: 30)
+        picker.click()
+        capturePhase("settings-category-\(category)-menu", in: app)
+        let option = try uniqueHittable(named(app.menuItems, category), label: "Settings category option \(category)", timeout: 15)
+        option.click()
+        let selected = try uniqueHittable(named(app.popUpButtons, "SETTINGS CATEGORY"), label: "selected Settings category popup", timeout: 15)
+        XCTAssertTrue(waitUntil(timeout: 15) { (selected.value as? String) == category }, "The visible Settings category value did not match the selected category.")
+    }
+
+    @MainActor
     private func seedCompactDensity(in app: XCUIApplication) throws {
         try clickUniqueButton("Settings", in: app)
-        try clickUniqueButton("Appearance", in: app)
+        try selectSettingsCategory("Appearance", in: app)
         let compact = try uniqueHittable(named(app.buttons, "Apply Compact control style"), label: "Apply Compact control style", timeout: 30)
         compact.click()
         try saveSettingsIfEnabled(in: app)
@@ -258,7 +272,7 @@ final class MacOTARuntimeTests: XCTestCase {
     @MainActor
     private func seedProfileName(in app: XCUIApplication, name: String) throws {
         try clickUniqueButton("Settings", in: app)
-        try clickUniqueButton("Profiles", in: app)
+        try selectSettingsCategory("Profiles", in: app)
         let field = try uniqueHittable(app.textFields.matching(NSPredicate(format: "value == %@", "You")), label: "fresh Quick setup profile name", timeout: 30)
         field.click()
         field.typeKey("a", modifierFlags: .command)
@@ -287,14 +301,14 @@ final class MacOTARuntimeTests: XCTestCase {
     @MainActor
     private func assertProfileName(in app: XCUIApplication, name: String) throws {
         try clickUniqueButton("Settings", in: app)
-        try clickUniqueButton("Profiles", in: app)
+        try selectSettingsCategory("Profiles", in: app)
         _ = try uniqueHittable(app.textFields.matching(NSPredicate(format: "value == %@", name)), label: "seeded profile name", timeout: 30)
     }
 
     @MainActor
     private func assertCompactDensity(in app: XCUIApplication) throws {
         try clickUniqueButton("Settings", in: app)
-        try clickUniqueButton("Appearance", in: app)
+        try selectSettingsCategory("Appearance", in: app)
         let compact = try uniqueHittable(named(app.buttons, "Apply Compact control style"), label: "Apply Compact control style", timeout: 30)
         let stringValue = (compact.value as? String)?.lowercased()
         let pressed = stringValue == "1" || stringValue == "true" || (compact.value as? NSNumber)?.boolValue == true || compact.isSelected

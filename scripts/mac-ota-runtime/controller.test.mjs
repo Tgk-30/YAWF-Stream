@@ -194,6 +194,28 @@ function assertPersonaCaptureWithoutRedundantStatic(source) {
   assert.match(quick, /"Quick setup", quickSetupCopy, "Quick setup", quickSetupCopy/);
 }
 
+function assertSettingsCategoryContract(source) {
+  for (const [start, end, category] of [
+    ["private func seedCompactDensity(", "private func seedProfileName(", "Appearance"],
+    ["private func seedProfileName(", "private func seedWatchlist(", "Profiles"],
+    ["private func assertProfileName(", "private func assertCompactDensity(", "Profiles"],
+    ["private func assertCompactDensity(", "private func assertWatchlist(", "Appearance"],
+  ]) {
+    const phase = swiftSection(source, start, end);
+    assert.ok(phase.includes(`try selectSettingsCategory("${category}", in: app)`));
+    assert.ok(!phase.includes(`try clickUniqueButton("${category}", in: app)`));
+  }
+  const select = swiftSection(source, "private func selectSettingsCategory(", "private func seedCompactDensity(");
+  assert.match(select, /guard \["Appearance", "Profiles"\]\.contains\(category\) else/);
+  assert.equal((select.match(/uniqueHittable\(named\(app\.popUpButtons, "SETTINGS CATEGORY"\)/g) ?? []).length, 2);
+  assert.match(select, /uniqueHittable\(named\(app\.menuItems, category\)/);
+  assert.ok(select.indexOf("picker.click()") < select.indexOf('capturePhase("settings-category-'));
+  assert.ok(select.indexOf('capturePhase("settings-category-') < select.indexOf("let option ="));
+  assert.ok(select.indexOf("let option =") < select.indexOf("option.click()"));
+  assert.match(select, /\(selected\.value as\? String\) == category/);
+  assert.doesNotMatch(select, /setValue|typeText|evaluateJavaScript|app\.buttons/);
+}
+
 function assertStaticTextContract(source) {
   const exact = swiftSection(source, "private func findUniqueStaticText(", "private func uniqueStaticText(");
   assert.match(exact, /for attribute in \["title", "label", "value"\]/);
@@ -251,6 +273,10 @@ test("Swift source follows title-aware AX first-run queries with bounded phase e
   assert.match(source, /XCTAttachment\(screenshot:/);
 });
 
+test("Swift uses the observed responsive Settings category popup through normal menu UI", async () => {
+  assertSettingsCategoryContract(await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8"));
+});
+
 test("Swift static text uses exact title then label then value and refuses ambiguity", async () => {
   assertStaticTextContract(await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8"));
 });
@@ -267,6 +293,10 @@ test("Swift AX source contracts independently reject critical selector regressio
   // Source-contract mutations, not XCTest execution or simulated UI proof.
   const source = await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8");
   const controls = [
+    ["responsive category before and after", assertSettingsCategoryContract, 'try selectSettingsCategory("Appearance", in: app)', 'try clickUniqueButton("Appearance", in: app)'],
+    ["exact popup role", assertSettingsCategoryContract, 'app.popUpButtons, "SETTINGS CATEGORY"', 'app.buttons, "SETTINGS CATEGORY"'],
+    ["capture before option query", assertSettingsCategoryContract, 'capturePhase("settings-category-\\(category)-menu", in: app)', 'captureSettingsMenuAfterOptionQuery(in: app)'],
+    ["category selected value", assertSettingsCategoryContract, '(selected.value as? String) == category', 'true'],
     ["redundant standalone Quick setup", assertPersonaCaptureWithoutRedundantStatic, 'capturePhase("02-persona-choice", in: app)', '_ = try uniqueStaticText(app.staticTexts, text: "Quick setup", timeout: 30)\n        capturePhase("02-persona-choice", in: app)'],
     ["title naming", assertTitleAwareQueries, 'title == %@ OR label == %@', 'label == %@'],
     ["Quick title and copy", assertTitleAwareQueries, '(title CONTAINS %@ AND title CONTAINS %@)', '(title CONTAINS %@)'],
