@@ -160,6 +160,21 @@ test("Swift source retains actual machine gates and uses an XCTest attachment", 
   assert.doesNotMatch(source, /Data\.write|writeReceipt/);
 });
 
+test("Swift source follows the AX-backed first-run sequence with bounded phase evidence", async () => {
+  const source = await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8");
+  assert.match(source, /app\.groups\.matching\(NSPredicate\(format: "label == %@", "Welcome"\)\)/);
+  assert.match(source, /welcome\.buttons\.matching\(NSPredicate\(format: "label == %@", "Skip"\)\)/);
+  assert.match(source, /How do you want to use YAWF Stream\?/);
+  assert.match(source, /Start with public sources without adding your own keys now\. Catalog and playback limits are explained before continuing\./);
+  assert.match(source, /label CONTAINS %@ AND label CONTAINS %@/);
+  assert.doesNotMatch(source, /app\.buttons\["Quick setup"\]/);
+  for (const phase of ["01-initial-welcome", "02-persona-choice", "03-quick-privacy", "04-postsetup-tour", "05-update-offer", "06-postupdate-state"]) {
+    assert.match(source, new RegExp(`capturePhase\\("${phase}"`));
+  }
+  assert.match(source, /debugDescription\.prefix\(64_000\)/);
+  assert.match(source, /XCTAttachment\(screenshot:/);
+});
+
 test("receipt requires an exact relaunch, path, state, and normal quit", () => {
   const expected = { appPath: "/runner/temp/YAWF Stream.app", executablePath: "/runner/temp/YAWF Stream.app/Contents/MacOS/debridstreamer" };
   const receipt = {

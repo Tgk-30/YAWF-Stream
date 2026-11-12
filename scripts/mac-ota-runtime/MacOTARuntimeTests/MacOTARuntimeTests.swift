@@ -127,6 +127,7 @@ final class MacOTARuntimeTests: XCTestCase {
         XCTAssertTrue(activeApp.wait(for: .runningForeground, timeout: 30))
         var installOwner = try uniqueRunningApplication(at: appURL)
 
+        try dismissInitialWelcome(in: activeApp)
         try completeQuickSetup(in: activeApp)
         try seedCompactDensity(in: activeApp)
         try seedProfileName(in: activeApp, name: "OTA Runner")
@@ -145,6 +146,7 @@ final class MacOTARuntimeTests: XCTestCase {
         }
         let updateText = activeApp.staticTexts["Update v\(config.expectedAfterVersion) available"]
         XCTAssertTrue(updateText.waitForExistence(timeout: 180), "The public signed update was not offered after at most one normal relaunch check.")
+        capturePhase("05-update-offer", in: activeApp)
         let beforeExecutablePath = try XCTUnwrap(installOwner.executableURL).path
         let install = try uniqueHittable(activeApp.buttons.matching(NSPredicate(format: "label == %@", "Install")), label: "Install", timeout: 15)
         install.click()
@@ -166,6 +168,7 @@ final class MacOTARuntimeTests: XCTestCase {
         try assertProfileName(in: relaunched, name: "OTA Runner")
         try assertCompactDensity(in: relaunched)
         try assertWatchlist(in: relaunched, title: "Inception")
+        capturePhase("06-postupdate-state", in: relaunched)
 
         relaunched.typeKey("q", modifierFlags: .command)
         XCTAssertTrue(relaunched.wait(for: .notRunning, timeout: 30), "The private app did not stop through its normal Quit command.")
@@ -188,12 +191,32 @@ final class MacOTARuntimeTests: XCTestCase {
     }
 
     @MainActor
+    private func dismissInitialWelcome(in app: XCUIApplication) throws {
+        let welcomeQuery = app.groups.matching(NSPredicate(format: "label == %@", "Welcome"))
+        let welcome = try uniqueExisting(welcomeQuery, label: "initial Welcome group", timeout: 60)
+        _ = try uniqueExisting(welcome.staticTexts.matching(NSPredicate(format: "label == %@", "Welcome to YAWF Stream")), label: "Welcome to YAWF Stream heading", timeout: 30)
+        let skip = try uniqueHittable(welcome.buttons.matching(NSPredicate(format: "label == %@", "Skip")), label: "initial Welcome Skip", timeout: 30)
+        capturePhase("01-initial-welcome", in: app)
+        skip.click()
+        XCTAssertTrue(waitUntil(timeout: 30) { !welcome.exists }, "The initial Welcome group did not close through its visible Skip control.")
+        _ = try uniqueExisting(app.staticTexts.matching(NSPredicate(format: "label == %@", "How do you want to use YAWF Stream?")), label: "persona heading", timeout: 60)
+        _ = try uniqueExisting(app.staticTexts.matching(NSPredicate(format: "label == %@", "Quick setup")), label: "Quick setup card title", timeout: 30)
+        capturePhase("02-persona-choice", in: app)
+    }
+
+    @MainActor
     private func completeQuickSetup(in app: XCUIApplication) throws {
-        let quickSetup = try uniqueHittable(app.buttons.matching(NSPredicate(format: "label == %@", "Quick setup")), label: "Quick setup", timeout: 60)
+        let quickSetupCopy = "Start with public sources without adding your own keys now. Catalog and playback limits are explained before continuing."
+        let quickSetup = try uniqueHittable(
+            app.buttons.matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "Quick setup", quickSetupCopy)),
+            label: "Quick setup semantic card",
+            timeout: 60
+        )
         quickSetup.click()
 
         let heading = app.staticTexts["Continue without adding credentials"]
         XCTAssertTrue(heading.waitForExistence(timeout: 30))
+        capturePhase("03-quick-privacy", in: app)
         let acknowledgement = try uniqueHittable(
             app.checkBoxes.matching(NSPredicate(format: "label CONTAINS %@", "I understand the privacy, reliability, catalog, and playback limits")),
             label: "Quick setup acknowledgement",
@@ -204,10 +227,11 @@ final class MacOTARuntimeTests: XCTestCase {
         let continueButton = try uniqueHittable(app.buttons.matching(NSPredicate(format: "label == %@", "Continue with Quick setup")), label: "Continue with Quick setup", timeout: 15)
         continueButton.click()
         XCTAssertTrue(app.buttons["Discover"].waitForExistence(timeout: 60))
-        let welcome = app.dialogs.matching(NSPredicate(format: "label == %@", "Welcome tour"))
+        let welcome = app.groups.matching(NSPredicate(format: "label == %@", "Welcome tour"))
         XCTAssertTrue(welcome.firstMatch.waitForExistence(timeout: 30), "The normal post-setup Welcome tour was not presented.")
         XCTAssertEqual(welcome.count, 1, "The Welcome tour dialog was ambiguous.")
         let skip = try uniqueHittable(welcome.firstMatch.buttons.matching(NSPredicate(format: "label == %@", "Skip the tour")), label: "Skip the tour", timeout: 15)
+        capturePhase("04-postsetup-tour", in: app)
         skip.click()
         XCTAssertTrue(waitUntil(timeout: 15) { !welcome.firstMatch.exists }, "The Welcome tour did not close through its visible control.")
     }
@@ -239,7 +263,7 @@ final class MacOTARuntimeTests: XCTestCase {
         try clickUniqueButton("Discover", in: app)
         let rankedCard = try uniqueHittable(app.buttons.matching(NSPredicate(format: "label == %@", "#1: \(title)")), label: "#1: \(title)", timeout: 60)
         rankedCard.click()
-        let detailQuery = app.dialogs.matching(NSPredicate(format: "label == %@", "\(title) details"))
+        let detailQuery = app.groups.matching(NSPredicate(format: "label == %@", "\(title) details"))
         XCTAssertTrue(detailQuery.firstMatch.waitForExistence(timeout: 30), "The exact title details dialog was not exposed.")
         XCTAssertEqual(detailQuery.count, 1, "The title details dialog was ambiguous.")
         let detailButton = try uniqueHittable(detailQuery.firstMatch.buttons.matching(NSPredicate(format: "label == %@", "Watchlist")), label: "Detail Watchlist", timeout: 30)
@@ -299,6 +323,29 @@ final class MacOTARuntimeTests: XCTestCase {
             throw AdmissionError.refused("Required unique hittable control was unavailable: \(label)")
         }
         return element
+    }
+
+    @MainActor
+    private func uniqueExisting(_ query: XCUIElementQuery, label: String, timeout: TimeInterval) throws -> XCUIElement {
+        let element = query.firstMatch
+        guard element.waitForExistence(timeout: timeout), query.count == 1 else {
+            throw AdmissionError.refused("Required unique element was unavailable: \(label)")
+        }
+        return element
+    }
+
+    @MainActor
+    private func capturePhase(_ name: String, in app: XCUIApplication) {
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "MacOTARuntime-\(name)-screenshot"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+
+        let boundedHierarchy = String(app.debugDescription.prefix(64_000))
+        let hierarchy = XCTAttachment(data: Data(boundedHierarchy.utf8), uniformTypeIdentifier: "public.plain-text")
+        hierarchy.name = "MacOTARuntime-\(name)-AX"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
     }
 
     private func loadConfiguration() throws -> Configuration {

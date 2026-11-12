@@ -1,8 +1,8 @@
 {
   "scripts/mac-ota-runtime/MacOTARuntime.xcodeproj/project.pbxproj": "b9d3db800c7004fb8a2a6ebd5ae654b38f7d5eb891658c6c37cdecffa00cbc6a",
   "scripts/mac-ota-runtime/MacOTARuntime.xcodeproj/xcshareddata/xcschemes/MacOTARuntime.xcscheme": "209369589ef1948ef53521f68ac91da69d735cf234106a6c7275c05584179611",
-  "scripts/mac-ota-runtime/MacOTARuntimeTests/MacOTARuntimeTests.swift": "b47ec2112ed4c40820222c34ae0dae022b8cc7feeb3bca9f10460067ded95271",
-  "scripts/mac-ota-runtime/README.md": "98f721b0bec8d02b13b4d4a8331f6c2c0f27e4fc85ed01209b3eef6f3e88e1a1",
+  "scripts/mac-ota-runtime/MacOTARuntimeTests/MacOTARuntimeTests.swift": "106984b4e4a4f301d17a65c94d9269e6db4956d4d4d452012e3478ed5b001ea2",
+  "scripts/mac-ota-runtime/README.md": "e54812d183b030aafda0bc87105116b3b6c4d9bfb549c11cbf129fb3a27ccab5",
   "scripts/mac-ota-runtime/controller.mjs": "ab2addde18d81dba7b92204701221c042c76e6dfa511cccf03f46aa43247c1c6",
-  "scripts/mac-ota-runtime/controller.test.mjs": "7e1740d3deb8bfa828f8c265509f72a778cf23da6233ec6bb78717a9998ed128"
+  "scripts/mac-ota-runtime/controller.test.mjs": "45b5a445e37be472193ec201a131302788fc4aeaf2e627cffa285b8185fc1d16"
 }
