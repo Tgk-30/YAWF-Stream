@@ -274,10 +274,25 @@ final class MacOTARuntimeTests: XCTestCase {
     private func seedProfileName(in app: XCUIApplication, name: String) throws {
         try clickUniqueButton("Settings", in: app)
         try selectSettingsCategory("Profiles", in: app)
-        let field = try uniqueHittable(app.textFields.matching(NSPredicate(format: "value == %@", "You")), label: "fresh Quick setup profile name", timeout: 30)
-        field.click()
-        field.typeKey("a", modifierFlags: .command)
-        field.typeText(name)
+        app.activate()
+        capturePhase("profile-name-before-center", in: app)
+        let field = try uniqueHittable(named(app.textFields, "NAME"), label: "fresh NAME profile field", timeout: 30)
+        let window = try uniqueExisting(app.windows, label: "private app window", timeout: 15)
+        let fieldFrame = field.frame
+        let windowFrame = window.frame
+        guard name == "OTA Runner", (field.value as? String) == "You",
+              !fieldFrame.isNull, !fieldFrame.isInfinite, fieldFrame.width > 0, fieldFrame.height > 0,
+              !windowFrame.isNull, !windowFrame.isInfinite, windowFrame.width > 0, windowFrame.height > 0,
+              windowFrame.contains(fieldFrame) else {
+            throw AdmissionError.refused("The exact fresh NAME field and its contained visible frame were not admitted.")
+        }
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        app.typeKey("a", modifierFlags: .command)
+        app.typeText(name)
+        capturePhase("profile-name-after-typing", in: app)
+        guard waitUntil(timeout: 10, condition: { (field.value as? String) == name }) else {
+            throw AdmissionError.refused("The exact NAME field did not read back OTA Runner before Save.")
+        }
         try saveSettingsIfEnabled(in: app)
         try assertProfileName(in: app, name: name)
     }

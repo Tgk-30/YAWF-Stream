@@ -271,7 +271,22 @@ function assertInitialAttributeProbe(source) {
 
 function assertPreservedValueQueries(source) {
   const profile = swiftSection(source, "private func seedProfileName(", "private func seedWatchlist(");
-  assert.match(profile, /app\.textFields\.matching\(NSPredicate\(format: "value == %@", "You"\)\)/);
+  assert.match(profile, /uniqueHittable\(named\(app\.textFields, "NAME"\)/);
+  assert.match(profile, /guard name == "OTA Runner", \(field\.value as\? String\) == "You"/);
+  assert.match(profile, /uniqueExisting\(app\.windows,/);
+  assert.match(profile, /!fieldFrame\.isNull, !fieldFrame\.isInfinite, fieldFrame\.width > 0, fieldFrame\.height > 0/);
+  assert.match(profile, /!windowFrame\.isNull, !windowFrame\.isInfinite, windowFrame\.width > 0, windowFrame\.height > 0/);
+  assert.match(profile, /windowFrame\.contains\(fieldFrame\)/);
+  assert.match(profile, /field\.coordinate\(withNormalizedOffset: CGVector\(dx: 0\.5, dy: 0\.5\)\)\.click\(\)/);
+  assert.match(profile, /app\.typeKey\("a", modifierFlags: \.command\)/);
+  assert.match(profile, /app\.typeText\(name\)/);
+  assert.match(profile, /guard waitUntil\(timeout: 10, condition: \{ \(field\.value as\? String\) == name \}\) else/);
+  assert.ok(profile.indexOf('app.activate()') < profile.indexOf('capturePhase("profile-name-before-center"'));
+  assert.ok(profile.indexOf('capturePhase("profile-name-before-center"') < profile.indexOf('let field ='));
+  assert.ok(profile.indexOf('windowFrame.contains(fieldFrame)') < profile.indexOf('field.coordinate('));
+  assert.ok(profile.indexOf('capturePhase("profile-name-after-typing"') < profile.indexOf('guard waitUntil('));
+  assert.ok(profile.indexOf('guard waitUntil(') < profile.indexOf('try saveSettingsIfEnabled('));
+  assert.doesNotMatch(profile, /field\.click\(\)|field\.typeKey|field\.typeText|setValue|evaluateJavaScript/);
   const persisted = swiftSection(source, "private func assertProfileName(", "private func assertWatchlist(");
   assert.match(persisted, /app\.textFields\.matching\(NSPredicate\(format: "value == %@", name\)\)/);
   assert.match(persisted, /\(compact\.value as\? String\)\?\.lowercased\(\)/);
@@ -343,7 +358,10 @@ test("Swift AX source contracts independently reject critical selector regressio
     ["probe before selector", assertInitialAttributeProbe, 'captureInitialPublicAttributes(in: activeApp)', 'captureInitialPublicAttributesAfterSelectors(in: activeApp)'],
     ["bounded probe", assertInitialAttributeProbe, 'data.count <= 64_000', 'data.count <= 640_000'],
     ["no live diagnostic index list", assertInitialAttributeProbe, 'var visited = 0', 'var visited = 0; let live = app.buttons.allElementsBoundByIndex'],
-    ["profile value", assertPreservedValueQueries, '"value == %@", "You"', '"label == %@", "You"'],
+    ["profile value", assertPreservedValueQueries, '(field.value as? String) == "You"', '(field.label as? String) == "You"'],
+    ["profile element-relative center", assertPreservedValueQueries, 'field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()', 'field.click()'],
+    ["profile contained frame", assertPreservedValueQueries, 'windowFrame.contains(fieldFrame)', 'true'],
+    ["profile exact typed readback", assertPreservedValueQueries, '(field.value as? String) == name', 'true'],
     ["persisted value", assertPreservedValueQueries, '"value == %@", name', '"title == %@", name'],
   ];
   for (const [label, check, before, after] of controls) {
