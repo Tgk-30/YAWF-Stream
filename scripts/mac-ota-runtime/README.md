@@ -11,6 +11,20 @@ Never execute the UI test on a real user's login or on a self-hosted runner. Loc
 - The signed physical v2.3.96 executable independently embeds the public `latest-macos11.json` endpoint. Its bundled compiled web assets contain `downloadAndInstall`, the update offer text, the Quick setup flow, and the Compact style control used by this test. Read-only source at `3cd6e640d17f0a1da89da6c2a9387954bb61663a` documents the matching normal `check()`, `downloadAndInstall()`, and `relaunch()` design, without claiming that ref compiled the physical archive. The test never replaces that feed or calls either plugin directly.
 - GitHub documents standard hosted jobs as fresh virtual machines, with listed exceptions that do not include this `macos-15` standard runner. The workflow must still set the explicit admission marker consumed here.
 
+## Current evidence and title-aware selector revision
+
+Three actual hosted CI attempts are retained as harness failures, not updater or product passes:
+
+- `43298974667`: hosted-environment admission refused before app UI, 1.766 seconds, at 2026-11-12 20:20:09 UTC.
+- `43303114330`: unique hittable `Quick setup` selector refused, 65.843 seconds, at 20:46:43 UTC. A bare button name did not describe the observed semantic card.
+- `43306264306`: required `Welcome to YAWF Stream` heading selector refused, 38.660 seconds, at 21:05:18 UTC. The actual native AX representation requires title-aware matching, not a label-only assumption.
+
+Their original logs and attachments remain separate. No attempt above qualifies the updater lifecycle. Root verified the public `XCUIElementAttributes.title` property in the installed SDK header. This supports using its public predicate attribute, not undocumented KVC. Current ordinary-control naming matches exact title OR label. Static text tries exact title, then exact label, then exact value, refusing multiple matches at each priority before returning one. This avoids counting a WebKit heading title plus child text value as two controls. Quick setup requires both its title and complete explanation in the same title or label attribute. Installing progress checks title, label and bounded public value fallback. Profile input and persisted selection assertions still use their actual values, not labels substituted for values.
+
+The initial public-attribute JSON attachment precedes the first required UI selector. It records bounded title/label/value strings from at most 20 buttons and 20 static texts, at most 512 characters each, with a 64,000-byte total bound. It does not capture credentials. Six bounded phase screenshots/AX attachments remain in place.
+
+Host verification: 37 tests pass, including all 32 unchanged controller/security baseline tests and the updated UI source contract. Twelve independent source mutations are correctly rejected for title naming, Quick setup copy, Installing value, title priority, exact matching, ambiguity, value fallback/preservation and probe ordering/bounds. These are source-contract checks only. They do not execute XCTest, establish the current native AX tree, prove Quick setup/privacy navigation, or qualify OTA/persistence. Native Quick setup, privacy acknowledgement and the full public updater lifecycle remain pending actual hosted execution and retained evidence. SDK build results are separately root-owned.
+
 ## Root-owned workflow recipe
 
 1. Use one `macos-15` arm64 GitHub-hosted job with a 30 minute job timeout. Do not reuse a self-hosted runner or run this job under a local account.

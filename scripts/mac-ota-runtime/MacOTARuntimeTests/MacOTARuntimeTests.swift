@@ -25,6 +25,16 @@ final class MacOTARuntimeTests: XCTestCase {
         let normalQuitObserved: Bool
     }
 
+    private struct PublicElementAttributes: Encodable {
+        let type: String
+        let index: Int
+        let title: String
+        let label: String
+        let value: String
+        let enabled: Bool
+        let hittable: Bool
+    }
+
     private enum AdmissionError: LocalizedError {
         case refused(String)
 
@@ -127,6 +137,7 @@ final class MacOTARuntimeTests: XCTestCase {
         XCTAssertTrue(activeApp.wait(for: .runningForeground, timeout: 30))
         var installOwner = try uniqueRunningApplication(at: appURL)
 
+        captureInitialPublicAttributes(in: activeApp)
         try dismissInitialWelcome(in: activeApp)
         try completeQuickSetup(in: activeApp)
         try seedCompactDensity(in: activeApp)
@@ -134,7 +145,8 @@ final class MacOTARuntimeTests: XCTestCase {
         try seedWatchlist(in: activeApp, title: "Inception")
 
         var preInstallReopenUsed = false
-        if !activeApp.staticTexts["Update v\(config.expectedAfterVersion) available"].waitForExistence(timeout: 180) {
+        let updateOffer = "Update v\(config.expectedAfterVersion) available"
+        if try findUniqueStaticText(activeApp.staticTexts, text: updateOffer, timeout: 180) == nil {
             preInstallReopenUsed = true
             activeApp.typeKey("q", modifierFlags: .command)
             XCTAssertTrue(activeApp.wait(for: .notRunning, timeout: 30), "The baseline app did not stop through its normal Quit command before retrying its launch check.")
@@ -144,14 +156,13 @@ final class MacOTARuntimeTests: XCTestCase {
             XCTAssertTrue(activeApp.wait(for: .runningForeground, timeout: 30))
             installOwner = try uniqueRunningApplication(at: appURL)
         }
-        let updateText = activeApp.staticTexts["Update v\(config.expectedAfterVersion) available"]
-        XCTAssertTrue(updateText.waitForExistence(timeout: 180), "The public signed update was not offered after at most one normal relaunch check.")
+        _ = try uniqueStaticText(activeApp.staticTexts, text: updateOffer, timeout: 180)
         capturePhase("05-update-offer", in: activeApp)
         let beforeExecutablePath = try XCTUnwrap(installOwner.executableURL).path
-        let install = try uniqueHittable(activeApp.buttons.matching(NSPredicate(format: "label == %@", "Install")), label: "Install", timeout: 15)
+        let install = try uniqueHittable(named(activeApp.buttons, "Install"), label: "Install", timeout: 15)
         install.click()
         XCTAssertTrue(waitUntil(timeout: 600) {
-            installOwner.isTerminated || activeApp.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Installing")).firstMatch.exists
+            installOwner.isTerminated || self.textPrefixExists(activeApp.staticTexts, prefix: "Installing")
         }, "Neither installation progress nor the updater-owned process exit was observed after the single Install action.")
 
         XCTAssertTrue(waitUntil(timeout: 600) { installOwner.isTerminated })
@@ -192,15 +203,15 @@ final class MacOTARuntimeTests: XCTestCase {
 
     @MainActor
     private func dismissInitialWelcome(in app: XCUIApplication) throws {
-        let welcomeQuery = app.groups.matching(NSPredicate(format: "label == %@", "Welcome"))
+        let welcomeQuery = named(app.groups, "Welcome")
         let welcome = try uniqueExisting(welcomeQuery, label: "initial Welcome group", timeout: 60)
-        _ = try uniqueExisting(welcome.staticTexts.matching(NSPredicate(format: "label == %@", "Welcome to YAWF Stream")), label: "Welcome to YAWF Stream heading", timeout: 30)
-        let skip = try uniqueHittable(welcome.buttons.matching(NSPredicate(format: "label == %@", "Skip")), label: "initial Welcome Skip", timeout: 30)
+        _ = try uniqueStaticText(welcome.staticTexts, text: "Welcome to YAWF Stream", timeout: 30)
+        let skip = try uniqueHittable(named(welcome.buttons, "Skip"), label: "initial Welcome Skip", timeout: 30)
         capturePhase("01-initial-welcome", in: app)
         skip.click()
         XCTAssertTrue(waitUntil(timeout: 30) { !welcome.exists }, "The initial Welcome group did not close through its visible Skip control.")
-        _ = try uniqueExisting(app.staticTexts.matching(NSPredicate(format: "label == %@", "How do you want to use YAWF Stream?")), label: "persona heading", timeout: 60)
-        _ = try uniqueExisting(app.staticTexts.matching(NSPredicate(format: "label == %@", "Quick setup")), label: "Quick setup card title", timeout: 30)
+        _ = try uniqueStaticText(app.staticTexts, text: "How do you want to use YAWF Stream?", timeout: 60)
+        _ = try uniqueStaticText(app.staticTexts, text: "Quick setup", timeout: 30)
         capturePhase("02-persona-choice", in: app)
     }
 
@@ -208,29 +219,28 @@ final class MacOTARuntimeTests: XCTestCase {
     private func completeQuickSetup(in app: XCUIApplication) throws {
         let quickSetupCopy = "Start with public sources without adding your own keys now. Catalog and playback limits are explained before continuing."
         let quickSetup = try uniqueHittable(
-            app.buttons.matching(NSPredicate(format: "label CONTAINS %@ AND label CONTAINS %@", "Quick setup", quickSetupCopy)),
+            app.buttons.matching(NSPredicate(format: "(title CONTAINS %@ AND title CONTAINS %@) OR (label CONTAINS %@ AND label CONTAINS %@)", "Quick setup", quickSetupCopy, "Quick setup", quickSetupCopy)),
             label: "Quick setup semantic card",
             timeout: 60
         )
         quickSetup.click()
 
-        let heading = app.staticTexts["Continue without adding credentials"]
-        XCTAssertTrue(heading.waitForExistence(timeout: 30))
+        _ = try uniqueStaticText(app.staticTexts, text: "Continue without adding credentials", timeout: 30)
         capturePhase("03-quick-privacy", in: app)
         let acknowledgement = try uniqueHittable(
-            app.checkBoxes.matching(NSPredicate(format: "label CONTAINS %@", "I understand the privacy, reliability, catalog, and playback limits")),
+            app.checkBoxes.matching(NSPredicate(format: "title CONTAINS %@ OR label CONTAINS %@", "I understand the privacy, reliability, catalog, and playback limits", "I understand the privacy, reliability, catalog, and playback limits")),
             label: "Quick setup acknowledgement",
             timeout: 15
         )
         if (acknowledgement.value as? String) != "1" { acknowledgement.click() }
 
-        let continueButton = try uniqueHittable(app.buttons.matching(NSPredicate(format: "label == %@", "Continue with Quick setup")), label: "Continue with Quick setup", timeout: 15)
+        let continueButton = try uniqueHittable(named(app.buttons, "Continue with Quick setup"), label: "Continue with Quick setup", timeout: 15)
         continueButton.click()
-        XCTAssertTrue(app.buttons["Discover"].waitForExistence(timeout: 60))
-        let welcome = app.groups.matching(NSPredicate(format: "label == %@", "Welcome tour"))
+        XCTAssertTrue(named(app.buttons, "Discover").firstMatch.waitForExistence(timeout: 60))
+        let welcome = named(app.groups, "Welcome tour")
         XCTAssertTrue(welcome.firstMatch.waitForExistence(timeout: 30), "The normal post-setup Welcome tour was not presented.")
         XCTAssertEqual(welcome.count, 1, "The Welcome tour dialog was ambiguous.")
-        let skip = try uniqueHittable(welcome.firstMatch.buttons.matching(NSPredicate(format: "label == %@", "Skip the tour")), label: "Skip the tour", timeout: 15)
+        let skip = try uniqueHittable(named(welcome.firstMatch.buttons, "Skip the tour"), label: "Skip the tour", timeout: 15)
         capturePhase("04-postsetup-tour", in: app)
         skip.click()
         XCTAssertTrue(waitUntil(timeout: 15) { !welcome.firstMatch.exists }, "The Welcome tour did not close through its visible control.")
@@ -240,7 +250,7 @@ final class MacOTARuntimeTests: XCTestCase {
     private func seedCompactDensity(in app: XCUIApplication) throws {
         try clickUniqueButton("Settings", in: app)
         try clickUniqueButton("Appearance", in: app)
-        let compact = try uniqueHittable(app.buttons.matching(NSPredicate(format: "label == %@", "Apply Compact control style")), label: "Apply Compact control style", timeout: 30)
+        let compact = try uniqueHittable(named(app.buttons, "Apply Compact control style"), label: "Apply Compact control style", timeout: 30)
         compact.click()
         try saveSettingsIfEnabled(in: app)
         try assertCompactDensity(in: app)
@@ -261,15 +271,15 @@ final class MacOTARuntimeTests: XCTestCase {
     @MainActor
     private func seedWatchlist(in app: XCUIApplication, title: String) throws {
         try clickUniqueButton("Discover", in: app)
-        let rankedCard = try uniqueHittable(app.buttons.matching(NSPredicate(format: "label == %@", "#1: \(title)")), label: "#1: \(title)", timeout: 60)
+        let rankedCard = try uniqueHittable(named(app.buttons, "#1: \(title)"), label: "#1: \(title)", timeout: 60)
         rankedCard.click()
-        let detailQuery = app.groups.matching(NSPredicate(format: "label == %@", "\(title) details"))
+        let detailQuery = named(app.groups, "\(title) details")
         XCTAssertTrue(detailQuery.firstMatch.waitForExistence(timeout: 30), "The exact title details dialog was not exposed.")
         XCTAssertEqual(detailQuery.count, 1, "The title details dialog was ambiguous.")
-        let detailButton = try uniqueHittable(detailQuery.firstMatch.buttons.matching(NSPredicate(format: "label == %@", "Watchlist")), label: "Detail Watchlist", timeout: 30)
+        let detailButton = try uniqueHittable(named(detailQuery.firstMatch.buttons, "Watchlist"), label: "Detail Watchlist", timeout: 30)
         detailButton.click()
-        _ = try uniqueHittable(detailQuery.firstMatch.buttons.matching(NSPredicate(format: "label == %@", "In watchlist")), label: "In watchlist", timeout: 30)
-        let back = try uniqueHittable(detailQuery.firstMatch.buttons.matching(NSPredicate(format: "label == %@", "Back")), label: "Detail Back", timeout: 30)
+        _ = try uniqueHittable(named(detailQuery.firstMatch.buttons, "In watchlist"), label: "In watchlist", timeout: 30)
+        let back = try uniqueHittable(named(detailQuery.firstMatch.buttons, "Back"), label: "Detail Back", timeout: 30)
         back.click()
         XCTAssertTrue(waitUntil(timeout: 30) { !detailQuery.firstMatch.exists }, "The Detail dialog did not close through its visible Back control.")
         try assertWatchlist(in: app, title: title)
@@ -286,7 +296,7 @@ final class MacOTARuntimeTests: XCTestCase {
     private func assertCompactDensity(in app: XCUIApplication) throws {
         try clickUniqueButton("Settings", in: app)
         try clickUniqueButton("Appearance", in: app)
-        let compact = try uniqueHittable(app.buttons.matching(NSPredicate(format: "label == %@", "Apply Compact control style")), label: "Apply Compact control style", timeout: 30)
+        let compact = try uniqueHittable(named(app.buttons, "Apply Compact control style"), label: "Apply Compact control style", timeout: 30)
         let stringValue = (compact.value as? String)?.lowercased()
         let pressed = stringValue == "1" || stringValue == "true" || (compact.value as? NSNumber)?.boolValue == true || compact.isSelected
         XCTAssertTrue(pressed, "Compact density was not selected after the lifecycle transition.")
@@ -295,25 +305,87 @@ final class MacOTARuntimeTests: XCTestCase {
     @MainActor
     private func assertWatchlist(in app: XCUIApplication, title: String) throws {
         try clickUniqueButton("Watchlist", in: app)
-        _ = try uniqueHittable(app.buttons.matching(NSPredicate(format: "label == %@", title)), label: "watchlist title \(title)", timeout: 60)
+        _ = try uniqueHittable(named(app.buttons, title), label: "watchlist title \(title)", timeout: 60)
     }
 
     @MainActor
     private func clickUniqueButton(_ label: String, in app: XCUIApplication) throws {
-        let button = try uniqueHittable(app.buttons.matching(NSPredicate(format: "label == %@", label)), label: label, timeout: 30)
+        let button = try uniqueHittable(named(app.buttons, label), label: label, timeout: 30)
         button.click()
     }
 
     @MainActor
     private func saveSettingsIfEnabled(in app: XCUIApplication) throws {
-        let save = app.buttons["Save changes"]
+        let save = named(app.buttons, "Save changes").firstMatch
         if save.waitForExistence(timeout: 5), save.isEnabled {
-            let button = try uniqueHittable(app.buttons.matching(NSPredicate(format: "label == %@", "Save changes")), label: "Save changes", timeout: 15)
+            let button = try uniqueHittable(named(app.buttons, "Save changes"), label: "Save changes", timeout: 15)
             button.click()
             XCTAssertTrue(waitUntil(timeout: 30) {
-                app.buttons["Saved"].exists || app.buttons["Up to date"].exists
+                named(app.buttons, "Saved").firstMatch.exists || named(app.buttons, "Up to date").firstMatch.exists
             }, "The visible settings save did not reach its durable completion state.")
         }
+    }
+
+    @MainActor
+    private func named(_ query: XCUIElementQuery, _ name: String) -> XCUIElementQuery {
+        query.matching(NSPredicate(format: "title == %@ OR label == %@", name, name))
+    }
+
+    @MainActor
+    private func findUniqueStaticText(_ query: XCUIElementQuery, text: String, timeout: TimeInterval) throws -> XCUIElement? {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            // A WebKit heading can expose its title and a child text value.
+            // Prefer the exact title instead of counting that pair twice.
+            for attribute in ["title", "label", "value"] {
+                let matches = query.matching(NSPredicate(format: "%K == %@", attribute, text))
+                let count = matches.count
+                guard count <= 1 else {
+                    throw AdmissionError.refused("Ambiguous static text through \(attribute): \(text)")
+                }
+                if count == 1, matches.firstMatch.exists { return matches.firstMatch }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        } while Date() < deadline
+        return nil
+    }
+
+    @MainActor
+    private func uniqueStaticText(_ query: XCUIElementQuery, text: String, timeout: TimeInterval) throws -> XCUIElement {
+        guard let element = try findUniqueStaticText(query, text: text, timeout: timeout) else {
+            throw AdmissionError.refused("Required unique static text was unavailable: \(text)")
+        }
+        return element
+    }
+
+    @MainActor
+    private func textPrefixExists(_ query: XCUIElementQuery, prefix: String) -> Bool {
+        let namedMatches = query.matching(NSPredicate(format: "title BEGINSWITH %@ OR label BEGINSWITH %@", prefix, prefix))
+        if namedMatches.firstMatch.exists { return true }
+        return query.allElementsBoundByIndex.prefix(128).contains {
+            ($0.value as? String)?.hasPrefix(prefix) == true
+        }
+    }
+
+    @MainActor
+    private func captureInitialPublicAttributes(in app: XCUIApplication) {
+        _ = named(app.groups, "Welcome").firstMatch.waitForExistence(timeout: 30)
+        func attributes(_ query: XCUIElementQuery) -> [[String: String]] {
+            query.allElementsBoundByIndex.prefix(20).map { element in
+                ["title": String(element.title.prefix(512)),
+                 "label": String(element.label.prefix(512)),
+                 "value": String(String(describing: element.value ?? "").prefix(512))]
+            }
+        }
+        let report = ["buttons": attributes(app.buttons), "staticTexts": attributes(app.staticTexts)]
+        guard let data = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]), data.count <= 64_000 else {
+            XCTFail("Initial public attribute diagnostics exceeded their bound.")
+            return
+        }
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "MacOTARuntime-initial-public-attributes"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     @MainActor

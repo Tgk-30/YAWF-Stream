@@ -160,19 +160,108 @@ test("Swift source retains actual machine gates and uses an XCTest attachment", 
   assert.doesNotMatch(source, /Data\.write|writeReceipt/);
 });
 
-test("Swift source follows the AX-backed first-run sequence with bounded phase evidence", async () => {
-  const source = await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8");
-  assert.match(source, /app\.groups\.matching\(NSPredicate\(format: "label == %@", "Welcome"\)\)/);
-  assert.match(source, /welcome\.buttons\.matching\(NSPredicate\(format: "label == %@", "Skip"\)\)/);
-  assert.match(source, /How do you want to use YAWF Stream\?/);
-  assert.match(source, /Start with public sources without adding your own keys now\. Catalog and playback limits are explained before continuing\./);
-  assert.match(source, /label CONTAINS %@ AND label CONTAINS %@/);
+function swiftSection(source, start, end) {
+  const begin = source.indexOf(start);
+  const finish = source.indexOf(end, begin + start.length);
+  assert.ok(begin >= 0 && finish > begin, `Missing Swift section: ${start}`);
+  return source.slice(begin, finish);
+}
+
+function assertTitleAwareQueries(source) {
+  const named = swiftSection(source, "private func named(", "private func findUniqueStaticText(");
+  assert.match(named, /"title == %@ OR label == %@", name, name/);
+  assert.match(source, /let welcomeQuery = named\(app\.groups, "Welcome"\)/);
+  assert.match(source, /uniqueHittable\(named\(welcome\.buttons, "Skip"\)/);
+  const quick = swiftSection(source, "private func completeQuickSetup(", "private func seedCompactDensity(");
+  assert.match(quick, /\(title CONTAINS %@ AND title CONTAINS %@\) OR \(label CONTAINS %@ AND label CONTAINS %@\)/);
+  assert.match(quick, /"Quick setup", quickSetupCopy, "Quick setup", quickSetupCopy/);
+  assert.match(quick, /Start with public sources without adding your own keys now\. Catalog and playback limits are explained before continuing\./);
+  assert.match(quick, /checkBoxes\.matching\(NSPredicate\(format: "title CONTAINS %@ OR label CONTAINS %@"/);
   assert.doesNotMatch(source, /app\.buttons\["Quick setup"\]/);
+  const installing = swiftSection(source, "private func textPrefixExists(", "private func captureInitialPublicAttributes(");
+  assert.match(installing, /"title BEGINSWITH %@ OR label BEGINSWITH %@", prefix, prefix/);
+  assert.match(installing, /allElementsBoundByIndex\.prefix\(128\)/);
+  assert.match(installing, /\(\$0\.value as\? String\)\?\.hasPrefix\(prefix\) == true/);
+}
+
+function assertStaticTextContract(source) {
+  const exact = swiftSection(source, "private func findUniqueStaticText(", "private func uniqueStaticText(");
+  assert.match(exact, /for attribute in \["title", "label", "value"\]/);
+  assert.match(exact, /NSPredicate\(format: "%K == %@", attribute, text\)/);
+  assert.match(exact, /guard count <= 1 else \{\s*throw AdmissionError\.refused/);
+  assert.match(exact, /if count == 1, matches\.firstMatch\.exists \{ return matches\.firstMatch \}/);
+  assert.ok(exact.indexOf("guard count <= 1") < exact.indexOf("return matches.firstMatch"));
+  assert.doesNotMatch(exact, /CONTAINS|BEGINSWITH/);
+}
+
+function assertInitialAttributeProbe(source) {
+  const flow = swiftSection(source, "func testPublic96To102ThroughNormalUpdaterUI()", "private func dismissInitialWelcome(");
+  assert.ok(flow.indexOf("captureInitialPublicAttributes(in: activeApp)") >= 0);
+  assert.ok(flow.indexOf("captureInitialPublicAttributes(in: activeApp)") < flow.indexOf("try dismissInitialWelcome(in: activeApp)"));
+  const probe = swiftSection(source, "private func captureInitialPublicAttributes(", "private func uniqueHittable(");
+  assert.match(probe, /allElementsBoundByIndex\.prefix\(20\)/);
+  for (const attribute of ["title", "label", "value"]) assert.match(probe, new RegExp(`"${attribute}"\\s*:`));
+  assert.match(probe, /element\.title\.prefix\(512\)/);
+  assert.match(probe, /element\.label\.prefix\(512\)/);
+  assert.match(probe, /element\.value \?\? ""\)\.prefix\(512\)/);
+  assert.match(probe, /data\.count <= 64_000/);
+  assert.match(probe, /attachment\.name = "MacOTARuntime-initial-public-attributes"/);
+  assert.match(probe, /attachment\.lifetime = \.keepAlways/);
+}
+
+function assertPreservedValueQueries(source) {
+  const profile = swiftSection(source, "private func seedProfileName(", "private func seedWatchlist(");
+  assert.match(profile, /app\.textFields\.matching\(NSPredicate\(format: "value == %@", "You"\)\)/);
+  const persisted = swiftSection(source, "private func assertProfileName(", "private func assertWatchlist(");
+  assert.match(persisted, /app\.textFields\.matching\(NSPredicate\(format: "value == %@", name\)\)/);
+  assert.match(persisted, /\(compact\.value as\? String\)\?\.lowercased\(\)/);
+  assert.match(persisted, /\(compact\.value as\? NSNumber\)\?\.boolValue == true/);
+}
+
+test("Swift source follows title-aware AX first-run queries with bounded phase evidence", async () => {
+  const source = await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8");
+  assertTitleAwareQueries(source);
+  assert.match(source, /How do you want to use YAWF Stream\?/);
   for (const phase of ["01-initial-welcome", "02-persona-choice", "03-quick-privacy", "04-postsetup-tour", "05-update-offer", "06-postupdate-state"]) {
     assert.match(source, new RegExp(`capturePhase\\("${phase}"`));
   }
   assert.match(source, /debugDescription\.prefix\(64_000\)/);
   assert.match(source, /XCTAttachment\(screenshot:/);
+});
+
+test("Swift static text uses exact title then label then value and refuses ambiguity", async () => {
+  assertStaticTextContract(await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8"));
+});
+
+test("Swift bounded public attribute probe precedes the first required UI selector", async () => {
+  assertInitialAttributeProbe(await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8"));
+});
+
+test("Swift title-aware naming does not replace editable or selected-state value assertions", async () => {
+  assertPreservedValueQueries(await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8"));
+});
+
+test("Swift AX source contracts independently reject critical selector regressions", async () => {
+  // Source-contract mutations, not XCTest execution or simulated UI proof.
+  const source = await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8");
+  const controls = [
+    ["title naming", assertTitleAwareQueries, 'title == %@ OR label == %@', 'label == %@'],
+    ["Quick title and copy", assertTitleAwareQueries, '(title CONTAINS %@ AND title CONTAINS %@)', '(title CONTAINS %@)'],
+    ["Installing value", assertTitleAwareQueries, '($0.value as? String)?.hasPrefix(prefix) == true', 'false'],
+    ["title priority", assertStaticTextContract, '["title", "label", "value"]', '["label", "title", "value"]'],
+    ["value fallback", assertStaticTextContract, '["title", "label", "value"]', '["title", "label"]'],
+    ["exact text", assertStaticTextContract, '%K == %@', '%K CONTAINS %@'],
+    ["ambiguous static text", assertStaticTextContract, 'guard count <= 1 else', 'guard count <= 2 else'],
+    ["unique return", assertStaticTextContract, 'if count == 1, matches.firstMatch.exists', 'if count > 0, matches.firstMatch.exists'],
+    ["probe before selector", assertInitialAttributeProbe, 'captureInitialPublicAttributes(in: activeApp)', 'captureInitialPublicAttributesAfterSelectors(in: activeApp)'],
+    ["bounded probe", assertInitialAttributeProbe, 'data.count <= 64_000', 'data.count <= 640_000'],
+    ["profile value", assertPreservedValueQueries, '"value == %@", "You"', '"label == %@", "You"'],
+    ["persisted value", assertPreservedValueQueries, '"value == %@", name', '"title == %@", name'],
+  ];
+  for (const [label, check, before, after] of controls) {
+    assert.ok(source.includes(before), `${label}: mutation anchor`);
+    assert.throws(() => check(source.replace(before, after)), { name: "AssertionError" }, label);
+  }
 });
 
 test("receipt requires an exact relaunch, path, state, and normal quit", () => {
