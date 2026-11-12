@@ -211,7 +211,6 @@ final class MacOTARuntimeTests: XCTestCase {
         skip.click()
         XCTAssertTrue(waitUntil(timeout: 30) { !welcome.exists }, "The initial Welcome group did not close through its visible Skip control.")
         _ = try uniqueStaticText(app.staticTexts, text: "How do you want to use YAWF Stream?", timeout: 60)
-        _ = try uniqueStaticText(app.staticTexts, text: "Quick setup", timeout: 30)
         capturePhase("02-persona-choice", in: app)
     }
 

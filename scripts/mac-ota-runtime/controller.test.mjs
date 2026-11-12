@@ -184,6 +184,16 @@ function assertTitleAwareQueries(source) {
   assert.match(installing, /\(\$0\.value as\? String\)\?\.hasPrefix\(prefix\) == true/);
 }
 
+function assertPersonaCaptureWithoutRedundantStatic(source) {
+  const welcome = swiftSection(source, "private func dismissInitialWelcome(", "private func completeQuickSetup(");
+  assert.match(welcome, /uniqueStaticText\(app\.staticTexts, text: "How do you want to use YAWF Stream\?", timeout: 60\)\s*capturePhase\("02-persona-choice", in: app\)/);
+  assert.doesNotMatch(welcome, /uniqueStaticText\(app\.staticTexts, text: "Quick setup"/);
+  const quick = swiftSection(source, "private func completeQuickSetup(", "private func seedCompactDensity(");
+  assert.match(quick, /let quickSetup = try uniqueHittable\(/);
+  assert.match(quick, /\(title CONTAINS %@ AND title CONTAINS %@\) OR \(label CONTAINS %@ AND label CONTAINS %@\)/);
+  assert.match(quick, /"Quick setup", quickSetupCopy, "Quick setup", quickSetupCopy/);
+}
+
 function assertStaticTextContract(source) {
   const exact = swiftSection(source, "private func findUniqueStaticText(", "private func uniqueStaticText(");
   assert.match(exact, /for attribute in \["title", "label", "value"\]/);
@@ -232,6 +242,7 @@ function assertPreservedValueQueries(source) {
 test("Swift source follows title-aware AX first-run queries with bounded phase evidence", async () => {
   const source = await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8");
   assertTitleAwareQueries(source);
+  assertPersonaCaptureWithoutRedundantStatic(source);
   assert.match(source, /How do you want to use YAWF Stream\?/);
   for (const phase of ["01-initial-welcome", "02-persona-choice", "03-quick-privacy", "04-postsetup-tour", "05-update-offer", "06-postupdate-state"]) {
     assert.match(source, new RegExp(`capturePhase\\("${phase}"`));
@@ -256,6 +267,7 @@ test("Swift AX source contracts independently reject critical selector regressio
   // Source-contract mutations, not XCTest execution or simulated UI proof.
   const source = await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8");
   const controls = [
+    ["redundant standalone Quick setup", assertPersonaCaptureWithoutRedundantStatic, 'capturePhase("02-persona-choice", in: app)', '_ = try uniqueStaticText(app.staticTexts, text: "Quick setup", timeout: 30)\n        capturePhase("02-persona-choice", in: app)'],
     ["title naming", assertTitleAwareQueries, 'title == %@ OR label == %@', 'label == %@'],
     ["Quick title and copy", assertTitleAwareQueries, '(title CONTAINS %@ AND title CONTAINS %@)', '(title CONTAINS %@)'],
     ["Installing value", assertTitleAwareQueries, '($0.value as? String)?.hasPrefix(prefix) == true', 'false'],
