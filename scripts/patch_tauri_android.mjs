@@ -1025,7 +1025,7 @@ function preGestureMainActivity(packageName) {
     val left = persistent.left.coerceAtLeast(0)`);
 }
 
-function patchedMainActivity(packageName) {
+function preColdRecoveryMainActivity(packageName) {
   let activity = preGestureMainActivity(packageName);
   const replacements = [
     [`@Keep
@@ -1076,6 +1076,105 @@ class YawfSafeAreaBridge(
     activity = activity.replace(before, after);
   }
   return activity;
+}
+
+// Register below Wry/Tauri's later navigation and custom-fullscreen callbacks.
+// This fallback has no JS entry point and can load only the fixed bundled UI.
+function patchedMainActivity(packageName) {
+  let activity = preColdRecoveryMainActivity(packageName);
+  const state = `
+  private var remoteRecoveryDialog: AlertDialog? = null
+  private val remoteRecoveryBack = object : OnBackPressedCallback(true) {
+    override fun handleOnBackPressed() {
+      if (remoteRecoveryDialog?.isShowing == true) return
+      val view = safeAreaWebView
+      if (view == null || !view.isAttachedToWindow || view.visibility != View.VISIBLE) {
+        passRemoteRecoveryBack()
+        return
+      }
+      val imeVisible = ViewCompat.getRootWindowInsets(view)?.isVisible(WindowInsetsCompat.Type.ime()) == true
+      if (imeVisible) {
+        WindowInsetsControllerCompat(window, view).hide(WindowInsetsCompat.Type.ime())
+        return
+      }
+      // Player/overlay routes already have app-history entries. Never replace
+      // their Back handling with the remote-root escape.
+      if (view.canGoBack()) {
+        view.goBack()
+        return
+      }
+      val page = view.url
+      if (page == null || !remoteRecoveryCanAct(view, page) || !hasWindowFocus()) {
+        passRemoteRecoveryBack()
+        return
+      }
+      showRemoteRecoveryDialog(view, page)
+    }
+  }
+`;
+  const methods = `  private fun passRemoteRecoveryBack() {
+    remoteRecoveryBack.isEnabled = false
+    try {
+      onBackPressedDispatcher.onBackPressed()
+    } finally {
+      remoteRecoveryBack.isEnabled = true
+    }
+  }
+
+  private fun remoteRecoveryCanAct(view: WebView, page: String): Boolean {
+    if (isFinishing || isDestroyed || safeAreaWebView !== view ||
+      !view.isAttachedToWindow || view.visibility != View.VISIBLE ||
+      view.url != page || view.canGoBack()) return false
+    val origin = currentTopOrigin(view) ?: return false
+    return origin != ServerPlayerOrigin("http", "tauri.localhost", 80)
+  }
+
+  private fun dismissRemoteRecoveryDialog() {
+    val previous = remoteRecoveryDialog
+    remoteRecoveryDialog = null
+    previous?.dismiss()
+  }
+
+  private fun showRemoteRecoveryDialog(view: WebView, page: String) {
+    if (remoteRecoveryDialog != null || !remoteRecoveryCanAct(view, page)) return
+    val dialog = AlertDialog.Builder(this)
+      .setTitle("Server navigation")
+      .setMessage("You are at the start of this server. Retry it, or return to the app's Local Mode without removing your saved server or profiles.")
+      .setPositiveButton("Retry server") { current, _ ->
+        if (remoteRecoveryDialog === current && remoteRecoveryCanAct(view, page)) view.reload()
+      }
+      .setNeutralButton("Use Local Mode") { current, _ ->
+        if (remoteRecoveryDialog === current && remoteRecoveryCanAct(view, page)) {
+          view.loadUrl("http://tauri.localhost/#yawf-local-mode")
+        }
+      }
+      .setNegativeButton("Cancel", null)
+      .create()
+    remoteRecoveryDialog = dialog
+    dialog.setOnDismissListener { if (remoteRecoveryDialog === dialog) remoteRecoveryDialog = null }
+    dialog.show()
+  }
+
+`;
+  const replacements = [
+    ['import androidx.activity.SystemBarStyle\n', 'import androidx.activity.SystemBarStyle\nimport androidx.activity.OnBackPressedCallback\n'],
+    ['import androidx.core.view.WindowInsetsCompat\n', 'import androidx.core.view.WindowInsetsCompat\nimport androidx.core.view.WindowInsetsControllerCompat\n'],
+    ['class MainActivity : TauriActivity() {\n', 'class MainActivity : TauriActivity() {\n' + state],
+    ['    super.onCreate(savedInstanceState)\n', '    onBackPressedDispatcher.addCallback(this, remoteRecoveryBack)\n    super.onCreate(savedInstanceState)\n'],
+    ['  override fun onWebViewCreate(webView: WebView) {\n', '  override fun onWebViewCreate(webView: WebView) {\n    dismissRemoteRecoveryDialog()\n'],
+    ['  override fun onPause() {\n', '  override fun onPause() {\n    dismissRemoteRecoveryDialog()\n'],
+    ['  override fun onDestroy() {\n', '  override fun onDestroy() {\n    remoteRecoveryBack.remove()\n    dismissRemoteRecoveryDialog()\n'],
+    ['  private fun inspectWebViewCompatibility()', methods + '  private fun inspectWebViewCompatibility()'],
+  ];
+  for (const [before, after] of replacements) {
+    if (activity.split(before).length !== 2) throw new Error("Unsupported Android remote-root recovery template.");
+    activity = activity.replace(before, after);
+  }
+  return activity;
+}
+
+export function previousColdRecoveryMainActivityForTest(packageName) {
+  return preColdRecoveryMainActivity(packageName);
 }
 
 const originalFullscreenShow = `  override fun onShowCustomView(view: View, callback: CustomViewCallback) {
@@ -1306,7 +1405,8 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
     activity === previousPatchedMainActivity(packageName) ||
     activity === preFullscreenMainActivity(packageName) ||
     activity === preImeMainActivity(packageName) ||
-    activity === preGestureMainActivity(packageName);
+    activity === preGestureMainActivity(packageName) ||
+    activity === preColdRecoveryMainActivity(packageName);
   if (!activityChanged && activity !== replacementActivity) {
     throw new Error(
       "Generated Android MainActivity.kt does not match the supported Tauri Android template. Refusing to patch generated sources.",
