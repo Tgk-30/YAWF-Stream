@@ -292,8 +292,10 @@ vi.mock("./components/LocalProfilePicker", () => ({
 }));
 
 let installPromptEligibleValue = false;
-vi.mock("./components/InstallPrompt", () => ({
+vi.mock("./lib/installPrompt", () => ({
   isInstallPromptEligible: () => installPromptEligibleValue,
+}));
+vi.mock("./components/InstallPrompt", () => ({
   InstallPrompt: ({ onDismiss }: { onDismiss: () => void }) => (
     <button type="button" data-testid="install-prompt" onClick={onDismiss}>
       install prompt
@@ -670,6 +672,33 @@ describe("App routing", () => {
 });
 
 describe("Setup nudge", () => {
+  it("places setup guidance in the main flow before route content without a floating reserve", async () => {
+    store = makeStore({ services: { debrid: null, indexers: { activeIndexers: [] } } });
+    const { container } = render(<App />);
+    const action = await screen.findByTestId("setup-nudge-start");
+    const region = action.closest(".app-setup-region");
+    const main = container.querySelector("main.app-content");
+    const route = container.querySelector(".route-frame");
+    expect(region?.parentElement).toBe(main);
+    expect(region?.compareDocumentPosition(route!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(container.querySelector(".app")).not.toHaveAttribute("data-install-prompt");
+    expect(container.querySelector(".app")).not.toHaveAttribute("data-setup-nudge");
+  });
+
+  it("keeps setup priority over an eligible install prompt, then reserves only that prompt", async () => {
+    installPromptEligibleValue = true;
+    store = makeStore({ services: { debrid: null, indexers: { activeIndexers: [] } } });
+    const { container } = render(<App />);
+    const dismiss = await screen.findByTestId("setup-nudge-dismiss");
+    expect(screen.queryByTestId("install-prompt")).toBeNull();
+    expect(container.querySelector(".app")).not.toHaveAttribute("data-install-prompt");
+    fireEvent.click(dismiss);
+    expect(await screen.findByTestId("install-prompt")).toBeInTheDocument();
+    expect(container.querySelector(".app")).toHaveAttribute("data-install-prompt", "true");
+    expect(container.querySelector(".app-setup-region")).toBeNull();
+    expect(localStorage.getItem("ds_setup_nudge_dismissed")).toBe("1");
+  });
+
   it("shows the finish-setup nudge when Local Mode has no debrid", async () => {
     store = makeStore({
       services: { debrid: null, indexers: { activeIndexers: [{}] } },
@@ -684,6 +713,15 @@ describe("Setup nudge", () => {
     });
     render(<App />);
     expect(await screen.findByTestId("setup-nudge-start")).toBeInTheDocument();
+  });
+
+  it("does not show local streaming setup in Server Mode even without local services", async () => {
+    serverModeValue = true;
+    store = makeStore({ services: { debrid: null, indexers: { activeIndexers: [] } } });
+    render(<App />);
+    await screen.findByTestId("screen-discover");
+    await act(async () => {});
+    expect(screen.queryByTestId("setup-nudge-start")).toBeNull();
   });
 
   it("hides the nudge once a debrid + source are configured", () => {

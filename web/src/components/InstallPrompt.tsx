@@ -8,13 +8,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
   deviceKind,
-  isMobileBrowser,
   isSecureContextForInstall,
-  isStandaloneDisplay,
 } from "../lib/platform";
-import { isAndroidAppUiContext } from "../lib/androidExternalPlayer";
-import { hasAndroidTVBridge } from "../lib/androidTV";
-import { isTauri } from "../lib/tauri";
 import {
   consumeInstallPrompt,
   getInstallPrompt,
@@ -23,16 +18,8 @@ import {
 import { Icon } from "./Icon";
 import "./InstallPrompt.css";
 
-/** Static platform gate: browser-only, never an app WebView or standalone. */
-export function isInstallPromptEligible(): boolean {
-  return (
-    !isTauri() &&
-    !isAndroidAppUiContext() &&
-    !hasAndroidTVBridge() &&
-    !isStandaloneDisplay() &&
-    isMobileBrowser()
-  );
-}
+// Compatibility export; the eager gate never imports this lazy card or its CSS.
+export { isInstallPromptEligible } from "../lib/installPrompt";
 
 export function InstallPrompt({ onDismiss }: { onDismiss: () => void }) {
   const kind = deviceKind(); // "ios" | "android" behind the eligibility gate

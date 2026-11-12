@@ -75,6 +75,7 @@ import { CaptionsMenu, type EmbeddedCaptions } from "./player/CaptionsMenu";
 import { EmbeddedPlayer } from "./EmbeddedPlayer";
 import { CastControls } from "./CastControls";
 import { PlaybackStarvation, STARVATION_WAIT_CONFIRMATION_MS, lowerStarvationQuality } from "../lib/playbackStarvation";
+import { bindServerHlsAudio, boundServerHlsAudioIndex, type ServerHlsAudioBinding } from "../lib/serverHlsAudioBinding";
 import { predictEpisodeEnd } from "../lib/endPredictor";
 import type { PlaybackPrefs } from "../storage/models";
 import {
@@ -2090,6 +2091,7 @@ export function VideoPlayer({
       positionIntent: ServerOptimizedPositionIntent = "follow-current",
       retainAudioPreference = false,
       purpose: ServerOptimizationPurpose = "ordinary",
+      claimAutomaticAttempt?: () => boolean,
     ): Promise<boolean> => {
       const owner = playbackOwner;
       if (
@@ -2102,7 +2104,8 @@ export function VideoPlayer({
       const blockedIntent = automaticAudioIntentFenceRef.current;
       if ((purpose === "remembered-audio" || purpose === "automatic-starvation" || purpose === "recovery") && blockedIntent?.owner === owner &&
         blockedIntent.intentEpoch === explicitOptimizationIntentRef.current) return false;
-      if (optimizationPendingRef.current?.owner === owner) {
+      if (optimizationPendingRef.current != null &&
+        (purpose === "automatic-starvation" || optimizationPendingRef.current.owner === owner)) {
         if (purpose === "native-hls-seek") {
           setServerOptimizationError(
             "Another playback change is still being prepared. Try seeking again.",
@@ -2113,6 +2116,12 @@ export function VideoPlayer({
       const position = Number.isFinite(absolutePositionSeconds)
         ? Math.max(0, absolutePositionSeconds)
         : 0;
+      // One authoritative admission point: a refused operation cannot spend
+      // the starvation budget, and no async gap separates claim from reserve.
+      if (purpose === "automatic-starvation" && (!automaticQualityIntent || serverLeaseExpired ||
+        manualRecoveryPending || webRecoveryPending || recoveryPendingRef.current != null ||
+        stallRecoveryPendingRef.current || currentWebviewSourceRef.current !== webviewSource ||
+        claimAutomaticAttempt == null || !claimAutomaticAttempt())) return false;
       const request = ++optimizationRequestSequenceRef.current;
       const intentEpoch = explicitOptimizationIntentRef.current;
       const source = currentWebviewSourceRef.current;
@@ -2346,6 +2355,7 @@ export function VideoPlayer({
       playbackOwner,
       rememberManualServerAudioPreference,
       serverOptimized,
+      automaticQualityIntent, serverLeaseExpired, manualRecoveryPending, webRecoveryPending, webviewSource,
     ],
   );
 
@@ -2474,17 +2484,14 @@ export function VideoPlayer({
     handoff: () => PlaybackHandoffState | null,
     audioTrack?: number,
     audioPreference?: AudioPreference,
+    claimAutomaticAttempt?: () => boolean,
   ) => {
-    if (!automaticQualityIntent || serverLeaseExpired || manualRecoveryPending || webRecoveryPending ||
-      recoveryPendingRef.current != null || stallRecoveryPendingRef.current || optimizationPendingRef.current != null ||
-      currentWebviewSourceRef.current !== webviewSource || playbackOwnerRef.current !== playbackOwner) return;
     const intentEpoch = explicitOptimizationIntentRef.current;
     void switchToServerOptimized(quality, latestAbsolutePositionRef.current, handoff, audioTrack,
-      audioPreference, "follow-current", false, "automatic-starvation").then((activated) => {
+      audioPreference, "follow-current", false, "automatic-starvation", claimAutomaticAttempt).then((activated) => {
         if (activated && playbackOwnerRef.current === playbackOwner && explicitOptimizationIntentRef.current === intentEpoch) setAutomaticReduction({ owner: playbackOwner, quality });
       });
-  }, [automaticQualityIntent, manualRecoveryPending, playbackOwner, serverLeaseExpired,
-    switchToServerOptimized, webRecoveryPending, webviewSource]);
+  }, [playbackOwner, switchToServerOptimized]);
 
   const updatePendingHandoffPaused = useCallback((paused: boolean) => {
     if (
@@ -3557,7 +3564,7 @@ function WebviewPlayer({
   starvationPolicy: PlaybackStarvation;
   automaticQualityIntent: boolean;
   onAutomaticQualityReduction: (quality: ServerTranscodeQuality, handoff: () => PlaybackHandoffState | null,
-    audioTrack?: number, audioPreference?: AudioPreference) => void;
+    audioTrack?: number, audioPreference?: AudioPreference, claimAutomaticAttempt?: () => boolean) => void;
   onPlaybackPendingChange: (pending: boolean) => void;
   onPendingHandoffPausedChange: (paused: boolean) => void;
   onVerifiedPlaybackProgress: () => void;
@@ -3972,6 +3979,16 @@ function WebviewPlayer({
   const [serverAudioInventoryStatus, setServerAudioInventoryStatus] = useState<
     "idle" | "loading" | "ready" | "unavailable"
   >("idle");
+  const serverAudioInventoryRef = useRef<{ owner: string; tracks: HlsAudioChoice[] }>({ owner: serverAudioOwner, tracks: [] });
+  const nativeAudioBindingRef = useRef<{ identity: typeof sourceIdentity; selection: string | null; started: boolean; retired: boolean }>({ identity: sourceIdentity, selection: null, started: false, retired: false });
+  useLayoutEffect(() => {
+    nativeAudioBindingRef.current = { identity: sourceIdentity, selection: null, started: false, retired: false };
+  }, [sourceIdentity, serverAudioOwner]);
+  const retireNativeAudioBinding = () => {
+    nativeAudioBindingRef.current.retired = true;
+    starvationPolicy.interrupt();
+    onCancelAutomaticQualityReduction();
+  };
   const serverAudioLoadSequenceRef = useRef(0);
   const serverAudioLoadPendingRef = useRef(false);
   const serverAudioLoadControllerRef = useRef<AbortController | null>(null);
@@ -4237,6 +4254,7 @@ function WebviewPlayer({
             logicalLabel: track.label?.trim() || null,
             isDefault: track.default,
           }));
+        serverAudioInventoryRef.current = { owner: serverAudioOwner, tracks: choices };
         setServerAudioTracks(choices);
         setServerAudioInventoryStatus("ready");
       },
@@ -4250,7 +4268,7 @@ function WebviewPlayer({
         }
       },
     );
-  }, [onServerSourceInfoKnown]);
+  }, [onServerSourceInfoKnown, serverAudioOwner]);
 
   useEffect(() => {
     serverAudioLoadControllerRef.current?.abort();
@@ -4269,6 +4287,7 @@ function WebviewPlayer({
       logicalLabel: track.label?.trim() || null,
       isDefault: track.default,
     }));
+    serverAudioInventoryRef.current = { owner: serverAudioOwner, tracks: choices };
     setServerAudioTracks(choices);
     setServerAudioInventoryStatus(
       initialServerAudioTracks != null ? "ready" : "idle",
@@ -6299,7 +6318,7 @@ function WebviewPlayer({
   }, [engine, sourceIdentity, suspended, url]);
 
   const needsServerPreparation = isHls && serverOptimized != null && isTrustedServerHlsManifestURL(url);
-  const [initialLeasePreparation, setInitialLeasePreparation] = useState<{ source: string; identity: typeof sourceIdentity; target: string | null } | null>(null);
+  const [initialLeasePreparation, setInitialLeasePreparation] = useState<{ source: string; identity: typeof sourceIdentity; target: string | null; audio: ServerHlsAudioBinding | null } | null>(null);
   const leasePreparationReady = !needsServerPreparation || preparedLeaseTarget !== undefined || (initialLeasePreparation?.source === url && initialLeasePreparation.identity === sourceIdentity);
   const leaseTarget = preparedLeaseTarget !== undefined
     ? preparedLeaseTarget
@@ -6338,7 +6357,10 @@ function WebviewPlayer({
           "Server optimized playback timed out.", () => controller.abort());
         if (!owns()) return;
         if (!manifest.startsWith("#EXTM3U")) throw new Error("The server did not return a playable HLS manifest.");
-        setInitialLeasePreparation({ source: url, identity: sourceIdentity, target: serverHlsLeaseTarget(url, manifest) });
+        setInitialLeasePreparation({ source: url, identity: sourceIdentity, target: serverHlsLeaseTarget(url, manifest),
+          audio: bindServerHlsAudio({ owner: serverAudioOwner, identity: sourceIdentity, url,
+            quality: activeServerOptimizedQuality, start: timelineOffsetRef.current }, manifest, response.headers),
+        });
         return;
       }
     })().catch((error: unknown) => {
@@ -6347,7 +6369,7 @@ function WebviewPlayer({
       }
     });
     return () => { active = false; controller.abort(); };
-  }, [needsServerPreparation, preparedLeaseTarget, sourceIdentity, url]);
+  }, [needsServerPreparation, preparedLeaseTarget, sourceIdentity, url, serverAudioOwner, activeServerOptimizedQuality]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -7452,15 +7474,27 @@ function WebviewPlayer({
       // Depletion can emit timeupdate at metadata readiness before waiting.
       // It is neither resumed decoded progress nor a new playback context.
       if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+      const binding = nativeAudioBindingRef.current;
+      if (!binding.started) { binding.started = true; binding.selection = selectionKey(); }
+      else if (binding.selection !== selectionKey()) {
+        binding.selection = selectionKey(); binding.retired = true;
+        cancelConfirmation(); starvationPolicy.interrupt(); onCancelAutomaticQualityReduction();
+      }
       starvationPolicy.progress(video.currentTime, true);
       if (video.readyState > HTMLMediaElement.HAVE_CURRENT_DATA) cancelConfirmation();
       else if (starvationPolicy.waitingConfirmation == null) clearConfirmationTimer();
       if (needsLocalAudioInventory() && serverAudioInventoryStatus === "idle" &&
         starvationPolicy.claimAudioInventoryLoad()) startServerAudioInventoryLoad(false);
     };
-    const reduce = () => {
+    const nativeSelection = () => {
+      const list = (video as BrowserAudioVideoElement).audioTracks;
+      return Array.from({ length: list?.length ?? 0 }, (_, index) => list?.[index] ?? list?.item?.(index) ?? null);
+    };
+    const selectionKey = () => JSON.stringify(nativeSelection().map(track =>
+      [track?.id ?? null, track?.language ?? null, track?.label ?? null, track?.enabled === true]));
+    const audioPlan = () => {
       const quality = lowerQuality();
-      if (quality == null) return;
+      if (quality == null || inventoryPending()) return null;
       // Native and hls.js IDs are local to the renderer, not source indices.
       // On Original, read the actual enabled native track rather than allowing
       // a server default to overwrite that decoder's independent selection.
@@ -7494,28 +7528,42 @@ function WebviewPlayer({
           localLabel === normalizedSourceAudioLabel(localPreference?.language) ||
           PLAYBACK_LANGUAGE_OPTIONS.some((language) => language.value === localLanguage &&
             normalizedSourceAudioLabel(language.label) === localLabel)));
-      const selected = localPreference != null
+      let selected = localPreference != null
         ? retainedServerAudioMatch({ ...localPreference, label: genericLocalLabel ? null : localPreference.label }, serverAudioTracks)
         : serverAudioTracks.find((track) => track.index === resolvedServerAudioTrack) ?? null;
+      if (selected == null && localPreference != null && !unresolvedLocalSelection &&
+        nativeHlsPlaybackRef.current && nativeList?.length === 1 && !nativeAudioBindingRef.current.retired &&
+        nativeAudioBindingRef.current.started && nativeAudioBindingRef.current.selection === selectionKey() &&
+        serverAudioInventoryStatus === "ready" && serverAudioInventoryRef.current.tracks === serverAudioTracks) {
+        const index = boundServerHlsAudioIndex(initialLeasePreparation?.audio ?? null,
+          { owner: serverAudioOwner, identity: sourceIdentity, url, quality: activeServerOptimizedQuality,
+            start: timelineOffsetRef.current, target: leaseTarget }, serverAudioInventoryRef.current,
+          nativeSelection().filter((track): track is BrowserAudioTrack => track != null));
+        selected = index == null ? null : serverAudioTracks.find(track => track.index === index) ?? null;
+      }
       const unmappedAudio = unresolvedLocalSelection || (localPreference != null && selected == null) ||
         (resolvedServerAudioTrack == null && selected == null &&
           (audioPreferenceRef.current.id != null || audioPreferenceRef.current.language != null));
       if (unmappedAudio) {
         setAutomaticReductionLimitation("Auto cannot safely match the selected audio track. Playback stays on the current stream. Check Audio in Playback settings, open an external player, or choose another source.");
-        return;
+        return null;
       }
       const sourceAudioTrack = selected?.index ?? resolvedServerAudioTrack;
-      onAutomaticQualityReduction(quality, () => {
-        if (!currentMediaEvent(video) || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.error != null || video.seeking ||
+      return Object.freeze({ quality, sourceAudioTrack, nativeSelection: selectionKey(), preference: sourceAudioTrack == null ? undefined : Object.freeze({
+        id: selected?.id ?? activeServerAudioPreference?.id ?? String(sourceAudioTrack),
+        language: selected?.language ?? activeServerAudioPreference?.language ?? null,
+        label: selected?.logicalLabel ?? activeServerAudioPreference?.label ?? null,
+      }) });
+    };
+    const reduce = (plan: NonNullable<ReturnType<typeof audioPlan>>) => {
+      setAutomaticReductionLimitation(null);
+      onAutomaticQualityReduction(plan.quality, () => {
+        if (!currentMediaEvent(video) || selectionKey() !== plan.nativeSelection || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.error != null || video.seeking ||
           rendererSeekingRef.current || recoveryClockWasReset(video) || terminalRecoveryOwns(video) || !Number.isFinite(video.currentTime)) return null;
         onAbsolutePositionChange(absolutePlaybackPosition());
         return playbackHandoffState();
-      }, sourceAudioTrack ?? undefined,
-        sourceAudioTrack == null ? undefined : {
-          id: selected?.id ?? activeServerAudioPreference?.id ?? String(sourceAudioTrack),
-          language: selected?.language ?? activeServerAudioPreference?.language ?? null,
-          label: selected?.logicalLabel ?? activeServerAudioPreference?.label ?? null,
-        });
+      }, plan.sourceAudioTrack ?? undefined, plan.preference,
+        () => starvationPolicy.claimAttempt(performance.now(), eligible()));
     };
     const scheduleConfirmation = () => {
       const pending = starvationPolicy.waitingConfirmation;
@@ -7524,9 +7572,11 @@ function WebviewPlayer({
         confirmationTimer = null;
         if (starvationPolicy.waitingConfirmation !== pending) { scheduleConfirmation(); return; }
         if (video.readyState > HTMLMediaElement.HAVE_CURRENT_DATA) { cancelConfirmation(); return; }
-        if (starvationPolicy.confirmWaiting(pending, performance.now(), video.currentTime,
-          playbackAttemptRef.current, eligible(), !inventoryPending())) reduce();
-        else scheduleConfirmation();
+        const plan = eligible() ? audioPlan() : null;
+        starvationPolicy.confirmWaiting(pending, performance.now(), video.currentTime,
+          playbackAttemptRef.current, eligible(), false);
+        if (plan != null) reduce(plan);
+        scheduleConfirmation();
       }, Math.max(1, Math.ceil(pending.at + STARVATION_WAIT_CONFIRMATION_MS - performance.now())));
     };
     const waiting = () => {
@@ -7539,23 +7589,36 @@ function WebviewPlayer({
           }
         }
       } catch { cancelConfirmation(); starvationPolicy.interrupt(); return; }
-      if (starvationPolicy.waiting(performance.now(), ahead, eligible(), !inventoryPending())) { clearConfirmationTimer(); reduce(); }
+      const plan = eligible() ? audioPlan() : null;
+      starvationPolicy.waiting(performance.now(), ahead, eligible(), false);
+      if (plan != null) reduce(plan);
       // Some decoders expose buffered timestamps beyond the last decodable
       // frame. Keep the fast depletion path, but corroborate such a wait with
       // two foreground seconds at this exact clock and no future frame data.
-      else if (Number.isFinite(ahead) && ahead > 0.5 && video.readyState <= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      if (Number.isFinite(ahead) && ahead > 0.5 && video.readyState <= HTMLMediaElement.HAVE_CURRENT_DATA) {
         starvationPolicy.beginWaitingConfirmation(performance.now(), video.currentTime, playbackAttemptRef.current, eligible());
       } else cancelConfirmation();
       scheduleConfirmation();
     };
-    // A bounded inventory probe can finish after the third episode. Complete
+    // A bounded inventory probe can finish after enough qualifying episodes. Complete
     // that already-earned decision without fabricating another waiting event.
-    if (!inventoryPending() && starvationPolicy.claimAttempt(performance.now(), eligible())) reduce();
+    const plan = eligible() ? audioPlan() : null;
+    if (plan != null) reduce(plan);
     scheduleConfirmation();
     const interrupt = () => { cancelConfirmation(); starvationPolicy.interrupt(); onCancelAutomaticQualityReduction(); };
     const seeking = interrupt;
     const nativeAudio = (video as BrowserAudioVideoElement).audioTracks;
-    nativeAudio?.addEventListener?.("change", interrupt);
+    const nativeAudioChanged = () => {
+      const binding = nativeAudioBindingRef.current;
+      if (!binding.started) return; // Expected startup discovery is not new audio intent.
+      if (binding.selection !== selectionKey()) {
+        binding.selection = selectionKey(); binding.retired = true;
+        interrupt();
+      }
+    };
+    nativeAudio?.addEventListener?.("change", nativeAudioChanged);
+    nativeAudio?.addEventListener?.("addtrack", nativeAudioChanged);
+    nativeAudio?.addEventListener?.("removetrack", nativeAudioChanged);
     video.addEventListener("timeupdate", progress);
     video.addEventListener("progress", progress);
     video.addEventListener("waiting", waiting);
@@ -7567,7 +7630,9 @@ function WebviewPlayer({
     window.addEventListener("pagehide", interrupt);
     return () => {
       clearConfirmationTimer();
-      nativeAudio?.removeEventListener?.("change", interrupt);
+      nativeAudio?.removeEventListener?.("change", nativeAudioChanged);
+      nativeAudio?.removeEventListener?.("addtrack", nativeAudioChanged);
+      nativeAudio?.removeEventListener?.("removetrack", nativeAudioChanged);
       video.removeEventListener("timeupdate", progress);
       video.removeEventListener("progress", progress);
       video.removeEventListener("waiting", waiting);
@@ -7582,7 +7647,8 @@ function WebviewPlayer({
     hlsAudioTracks, initialServerAudioTrackExplicit, onAbsolutePositionChange, onAutomaticQualityReduction,
     onCancelAutomaticQualityReduction, playbackHandoffState, resolvedServerAudioTrack,
     serverAudioInventoryStatus, serverAudioLoaderAvailable, serverAudioTracks, serverOptimized,
-    serverOptimizationPending, sourceIdentity, starvationPolicy, startServerAudioInventoryLoad]);
+    serverOptimizationPending, sourceIdentity, starvationPolicy, startServerAudioInventoryLoad,
+    initialLeasePreparation, leaseTarget, serverAudioOwner, url]);
 
   const selectServerOptimizedQuality = useCallback((quality: ServerTranscodeQuality) => {
     const selected = serverAudioTracks.find(
@@ -7657,6 +7723,7 @@ function WebviewPlayer({
   };
 
   const changeHlsAudioTrack = (next: number) => {
+    retireNativeAudioBinding();
     const hls = hlsRef.current;
     if (hls == null) return;
     hls.audioTrack = next;
@@ -7671,6 +7738,7 @@ function WebviewPlayer({
   };
 
   const changeBrowserAudioTrack = (next: number) => {
+    retireNativeAudioBinding();
     const video = videoRef.current as BrowserAudioVideoElement | null;
     const list = video?.audioTracks;
     if (list == null) return;
@@ -7696,6 +7764,7 @@ function WebviewPlayer({
   };
 
   const changeServerAudioTrack = (next: number) => {
+    retireNativeAudioBinding();
     const selected = serverAudioTracks.find((track) => track.index === next) ?? null;
     if (selected == null || serverOptimized == null) return;
     const quality = activeServerOptimizedQuality ?? serverOptimized.defaultQuality ?? "480p";

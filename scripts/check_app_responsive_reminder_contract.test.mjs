@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { validateReminderNavigationCss } from "./check_app_responsive_contract.mjs";
+import { validateReminderNavigationCss, validateSetupFlowLayout } from "./check_app_responsive_contract.mjs";
 
 const read = (name) => readFileSync(new URL(`../web/src/components/${name}.css`, import.meta.url), "utf8");
 const css = { navCss: read("NavRail"), setupNudgeCss: read("SetupNudge"), installPromptCss: read("InstallPrompt") };
@@ -12,13 +12,20 @@ test("reminders follow actual nav breakpoints, including914x411 and both boundar
   assert.deepEqual(validateReminderNavigationCss(css), []);
 });
 
-test("a correct stack-only query cannot conceal the old640px setup layout query", () => {
-  const setupNudgeCss = css.setupNudgeCss.replace(mobile, "@media (max-width: 640px)") +
-    `\n${mobile} { .setup-nudge { z-index: 29; } }`;
+test("a phone-only setup query cannot conceal missing short-landscape action geometry", () => {
+  const setupNudgeCss = css.setupNudgeCss.replace(mobile, "@media (max-width: 640px)");
   assert.notEqual(setupNudgeCss, css.setupNudgeCss);
   const failures = validateReminderNavigationCss({ ...css, setupNudgeCss });
-  assert.ok(failures.some((failure) => failure.includes("setup-nudge 914x411: bottom")));
+  assert.ok(failures.some((failure) => failure.includes("setup-nudge 914x411: bounded flow width")));
   assert.ok(failures.some((failure) => failure.includes("setup-nudge 641x800")));
+});
+
+test("floating or clipped setup guidance is rejected at every viewport", () => {
+  for (const declaration of ["position: fixed;", "max-height: 100px;", "overflow-y: auto;", "z-index: 40;"]) {
+    const setupNudgeCss = css.setupNudgeCss + `\n${mobile} { .setup-nudge { ${declaration} } }`;
+    assert.ok(validateReminderNavigationCss({ ...css, setupNudgeCss })
+      .some((failure) => failure.includes("setup-nudge 914x411:")), declaration);
+  }
 });
 
 test("old phone-only install layout is rejected in short landscape", () => {
@@ -45,10 +52,46 @@ test("clipped overflow or undersized dismiss targets cannot satisfy the mobile c
 
 test("legacy and dynamic viewport bounds are independently required", () => {
   for (const unit of ["vh", "dvh"]) {
-    const setupNudgeCss = css.setupNudgeCss.replace(`calc(100${unit} -`, "calc(200vh -");
-    assert.notEqual(setupNudgeCss, css.setupNudgeCss);
-    assert.ok(validateReminderNavigationCss({ ...css, setupNudgeCss })
-      .some((failure) => failure.includes("setup-nudge 914x411: max-height")));
+    const installPromptCss = css.installPromptCss.replace(`calc(100${unit} -`, "calc(200vh -");
+    assert.notEqual(installPromptCss, css.installPromptCss);
+    assert.ok(validateReminderNavigationCss({ ...css, installPromptCss })
+      .some((failure) => failure.includes("install-prompt 914x411: max-height")));
+  }
+});
+
+test("flow placement, fixed-search clearance and independent reserves reject individual regressions", () => {
+  const appSource = readFileSync(new URL("../web/src/App.tsx", import.meta.url), "utf8");
+  const appCss = readFileSync(new URL("../web/src/App.css", import.meta.url), "utf8");
+  assert.deepEqual(validateSetupFlowLayout({ appSource, appCss, setupNudgeCss: css.setupNudgeCss }), []);
+  assert.ok(validateSetupFlowLayout({ appSource, appCss: appCss + "\n.app-setup-region { padding: 0; }", setupNudgeCss: css.setupNudgeCss }).length > 0);
+  for (const [from, to] of [
+    ['const SetupNudge = lazy(', 'const SetupNudge = eager('],
+    ['const InstallPrompt = lazy(', 'const InstallPrompt = eager('],
+    ['from "./lib/installPrompt"', 'from "./components/InstallPrompt"'],
+    ['showInstallPrompt && (\n        <Suspense fallback={null}>', 'showInstallPrompt && (\n        <div>'],
+    ['className="app-setup-region"', 'className="floating-setup"'],
+    ['data-install-prompt={showInstallPrompt || undefined}', 'data-install-prompt={showSetupNudge || showInstallPrompt || undefined}'],
+  ]) {
+    const changed = appSource.replace(from, to);
+    assert.notEqual(changed, appSource);
+    assert.ok(validateSetupFlowLayout({ appSource: changed, appCss, setupNudgeCss: css.setupNudgeCss }).length > 0);
+  }
+  for (const [from, to] of [
+    [" + max(44px, calc(44px * var(--density-scale))) + var(--sp-md)", " + 0px + var(--sp-md)"],
+    ["padding-top: var(--sp-md);", "padding-top: 0;"],
+  ]) {
+    const changed = css.setupNudgeCss.replace(from, to);
+    assert.notEqual(changed, css.setupNudgeCss);
+    assert.ok(validateSetupFlowLayout({ appSource, appCss, setupNudgeCss: changed }).length > 0, from);
+  }
+  for (const [from, to] of [
+    [".app[data-install-prompt]", ".app[data-setup-nudge]"],
+    ["padding-bottom: var(--mobile-nav-reserve);", "padding-bottom: 0;"],
+    ["padding-bottom: calc(var(--mobile-nav-reserve) + calc(128px", "padding-bottom: calc(var(--mobile-nav-reserve) + calc(0px"],
+  ]) {
+    const changed = appCss.replace(from, to);
+    assert.notEqual(changed, appCss);
+    assert.ok(validateSetupFlowLayout({ appSource, appCss: changed, setupNudgeCss: css.setupNudgeCss }).length > 0, from);
   }
 });
 

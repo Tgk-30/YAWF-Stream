@@ -102,13 +102,27 @@ export function validateReminderNavigationCss({ navCss, setupNudgeCss, installPr
       for (const height of [320, 411, 500, 501, 800]) {
         for (const dynamicViewport of [false, true]) {
           const card = effective(`.${name}`, width, height, dynamicViewport);
-          if (!matches(navMobile.header, width, height)) {
-            if (card["z-index"] !== "40" || card.bottom === bottom) failures.push(`${name} ${width}x${height}: mobile layout leaked into desktop`);
+          const mobile = matches(navMobile.header, width, height);
+          const missing = [];
+          if (name === "setup-nudge") {
+            if (card.position !== "relative") missing.push("normal-flow position");
+            for (const key of ["top", "right", "bottom", "left", "z-index", "max-height", "overflow-y", "transform"]) {
+              if (card[key] != null) missing.push(key);
+            }
+            if (card.width !== (mobile ? "100%" : "min(680px,100%)")) missing.push("bounded flow width");
+          } else {
+            if (!mobile) {
+              if (card["z-index"] !== "40" || card.bottom === bottom) failures.push(`${name} ${width}x${height}: mobile layout leaked into desktop`);
+              continue;
+            }
+            const expected = { position: "fixed", bottom, "max-height": maxHeight(dynamicViewport ? "dvh" : "vh"), "overflow-y": "auto", "z-index": "29",
+              left: "max(var(--sp-sm),var(--safe-area-left))", right: "max(var(--sp-sm),var(--safe-area-right))", width: "auto", transform: "none" };
+            missing.push(...Object.keys(expected).filter((key) => card[key] !== expected[key]));
+          }
+          if (!mobile) {
+            if (missing.length > 0) failures.push(`${name} ${width}x${height}: ${missing.join(", ")}`);
             continue;
           }
-          const expected = { bottom, "max-height": maxHeight(dynamicViewport ? "dvh" : "vh"), "overflow-y": "auto", "z-index": "29",
-            left: "max(var(--sp-sm),var(--safe-area-left))", right: "max(var(--sp-sm),var(--safe-area-right))", width: "auto", transform: "none" };
-          const missing = Object.keys(expected).filter((key) => card[key] !== expected[key]);
           const dismiss = effective(`.${name}-dismiss`, width, height, dynamicViewport);
           if (dismiss.width !== "44px" || dismiss.height !== "44px") missing.push("44px dismiss");
           const button = effective(`.${name}-actions .btn`, width, height, dynamicViewport);
@@ -122,6 +136,29 @@ export function validateReminderNavigationCss({ navCss, setupNudgeCss, installPr
       }
     }
   }
+  return failures;
+}
+
+// Structural guard for the setup flow and independent install/nav reserves.
+export function validateSetupFlowLayout({ appSource, appCss, setupNudgeCss }) {
+  const failures = [];
+  if (/\.app-setup-region/.test(appCss) || !/const SetupNudge = lazy\(\(\) =>\s*import\("\.\/components\/SetupNudge"\)/.test(appSource)) failures.push("setup flow styles must remain component-lazy");
+  if (!/const InstallPrompt = lazy\(\(\) =>\s*import\("\.\/components\/InstallPrompt"\)/.test(appSource) ||
+      !/import \{ isInstallPromptEligible \} from "\.\/lib\/installPrompt"/.test(appSource) ||
+      !/showInstallPrompt && \(\s*<Suspense fallback=\{null\}>\s*<InstallPrompt/.test(appSource)) failures.push("install card must remain lazy and Suspense bounded with an eager pure gate");
+  const setupMobile = atRuleBlock(setupNudgeCss, "@media (max-width: 699px), (max-width: 950px) and (max-height: 500px)");
+  if (!/padding-top:\s*var\(--sp-md\)/.test(ruleBlock(setupMobile, ".app-setup-region[data-with-search]"))) failures.push("setup must retain sticky-search flow clearance");
+  const main = appSource.indexOf('id="main-content"');
+  const region = appSource.indexOf('className="app-setup-region"');
+  const route = appSource.indexOf('className="route-frame"');
+  if (!(main >= 0 && region > main && route > region)) failures.push("setup must precede route in main flow");
+  if (/data-setup-nudge/.test(appCss + appSource)) failures.push("setup must not add a floating reserve");
+  if (!/data-install-prompt=\{showInstallPrompt \|\| undefined\}/.test(appSource) ||
+      !/\.app\[data-install-prompt\] \.app-content/.test(appCss)) failures.push("install reserve must remain independent");
+  if (!/padding-top:\s*calc\(max\(var\(--sp-md\), var\(--safe-area-top\)\)[^;]+44px/.test(ruleBlock(setupNudgeCss, ".app-setup-region[data-with-search]"))) failures.push("setup must clear fixed search");
+  const mobile = atRuleBlock(appCss, "@media (max-width: 699px), (max-width: 950px) and (max-height: 500px)");
+  if (!/(?:[;{])\s*padding-bottom:\s*var\(--mobile-nav-reserve\)/.test(ruleBlock(mobile, ".app-content")) ||
+      !/(?:[;{])\s*padding-bottom:\s*calc\(var\(--mobile-nav-reserve\) \+ calc\(128px/.test(ruleBlock(mobile, ".app[data-install-prompt] .app-content"))) failures.push("navigation and install reserves must remain intact");
   return failures;
 }
 
@@ -515,27 +552,17 @@ check(
 );
 
 check(
-  "mobile setup reminder stays below the modal navigation stack",
-  /z-index:\s*40;/.test(setupNudgeBaseRule) &&
-    /z-index:\s*29;/.test(setupNudgeMobileStackRule) &&
-    /z-index:\s*30;/.test(mobileNavRule),
-  "SetupNudge.css must preserve desktop layer 40 but use layer 29 at the exact mobile NavRail breakpoint so the layer-30 More dialog remains modal.",
-);
-
-check(
-  "tablet and desktop setup reminder stays inside the available app content",
-  /left:\s*calc\(var\(--nav-safe-left\)\s*\+\s*var\(--sp-lg\)\)/.test(setupNudgeBaseRule) &&
-    /right:\s*var\(--sp-lg\)/.test(setupNudgeBaseRule) &&
+  "setup reminder stays in main flow ahead of the route without a floating reserve",
+  /position:\s*relative/.test(setupNudgeBaseRule) &&
     /margin-inline:\s*auto/.test(setupNudgeBaseRule) &&
-    /width:\s*min\(\s*680px,\s*calc\(\s*100%\s*-\s*var\(--nav-safe-left\)\s*-\s*var\(--sp-lg\)\s*-\s*var\(--sp-lg\)\s*\)\s*\)/.test(setupNudgeBaseRule) &&
-    /transform:\s*none/.test(setupNudgeBaseRule) &&
-    !/left:\s*50%/.test(setupNudgeBaseRule),
-  "SetupNudge.css must center the fixed reminder between the current nav-safe left edge and the right content edge without a viewport-centered transform.",
+    /width:\s*min\(680px,\s*100%\)/.test(setupNudgeBaseRule) &&
+    validateSetupFlowLayout({ appSource, appCss, setupNudgeCss }).length === 0,
+  "SetupNudge must precede the route in main flow, clear out-of-flow search chrome, and leave the independent floating InstallPrompt reserve intact.",
 );
 
 const reminderLayoutFailures = validateReminderNavigationCss({ navCss, setupNudgeCss, installPromptCss });
 check(
-  "mobile setup and install cards stay above navigation without clipping",
+  "flow setup and floating install cards retain reachable mobile actions",
   reminderLayoutFailures.length === 0,
   reminderLayoutFailures.join("; ") || "Reminder layout must follow the floating-nav breakpoint, native insets and reachable44px actions.",
 );

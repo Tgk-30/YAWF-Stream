@@ -26,6 +26,7 @@ export function Discover({ onSelect }: DiscoverProps) {
   const {
     services,
     navigate,
+    openSettingsSection,
     openBrowse,
     openDetail,
     continueWatching,
@@ -132,7 +133,7 @@ export function Discover({ onSelect }: DiscoverProps) {
                 : "No catalog key is configured. These are bundled sample titles, not live trending results."}
             </p>
           </div>
-          <button type="button" className="btn" onClick={() => navigate("settings")}>
+          <button type="button" className="btn" onClick={() => openSettingsSection("keys")}>
             Open metadata settings
           </button>
         </section>

@@ -81,10 +81,8 @@
   outline: none;
 }
 
-/* Room for the fixed SetupNudge card so the last row stays reachable while it
-   shows (App.tsx sets data-setup-nudge only while the card is mounted - zero
-   cost once dismissed or configured). */
-.app[data-setup-nudge] .app-content {
+/* The independent install card still floats and keeps its existing reserve. */
+.app[data-install-prompt] .app-content {
   padding-bottom: calc(96px * var(--density-scale) + var(--sp-lg));
   scroll-padding-bottom: calc(96px * var(--density-scale) + var(--sp-lg));
 }
@@ -143,8 +141,8 @@
     -webkit-overflow-scrolling: touch;
   }
 
-  /* On mobile the nudge wraps its action row, so reserve more. */
-  .app[data-setup-nudge] .app-content {
+  /* Only the floating install prompt adds to the single navigation reserve. */
+  .app[data-install-prompt] .app-content {
     padding-bottom: calc(var(--mobile-nav-reserve) + calc(128px * var(--density-scale)));
     scroll-padding-bottom: calc(var(--mobile-nav-reserve) + calc(128px * var(--density-scale)));
   }

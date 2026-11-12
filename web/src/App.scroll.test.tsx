@@ -44,6 +44,10 @@ vi.mock("./lib/tauri", () => ({ isTauri: () => false }));
 vi.mock("./lib/tvMode", () => ({ isTVMode: () => false }));
 vi.mock("./lib/firstRun", () => ({ isFirstRun: async () => false, devBypassesOnboarding: () => true, hasQuickSetupAcknowledgement: async () => true, needsKeyOnboarding: () => false }));
 vi.mock("./storage/KeychainSecretStore", () => ({ secretReadsFailedThisSession: () => false }));
+vi.mock("./lib/installPrompt", async (original) => ({
+  ...await original<typeof import("./lib/installPrompt")>(),
+  isInstallPromptEligible: () => false,
+}));
 vi.mock("./components/InstallPrompt", () => ({ InstallPrompt: () => null, isInstallPromptEligible: () => false }));
 vi.mock("./components/UpdateBanner", () => ({ UpdateBanner: () => null }));
 vi.mock("./components/HostAvailabilityBanner", () => ({ HostAvailabilityBanner: () => null }));
