@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -233,6 +235,32 @@ function assertCompactCheckBoxContract(source) {
   assert.match(persisted, /XCTAssertTrue\(pressed,/);
 }
 
+function assertSplitNoticeContract(source) {
+  const pure = source.split("// HOST_UPDATE_NOTICE_BEGIN")[1].split("// HOST_UPDATE_NOTICE_END")[0];
+  assert.match(pure, /let parts = \["Update v", expectedVersion, " available"\]/);
+  assert.match(pure, /node\.children\.indices\.filter/);
+  assert.match(pure, /Set\(textIndices\.flatMap \{ \$0 \}\)\.count == 3/);
+  assert.match(pure, /installIndices\.count == 1, dismissIndices\.count == 1, installIndices\[0\] != dismissIndices\[0\]/);
+  assert.match(pure, /guard matches\.count <= 1 else \{ throw NoticeWitnessError\.ambiguousNotice \}/);
+  assert.match(pure, /depth <= 32, visited < 1024/);
+  assert.match(pure, /window\.frame\.contains\(node\.frame\)/);
+  const query = swiftSection(source, "private func findUpdateOffer(", "private func textPrefixExists(");
+  assert.equal((query.match(/app\.snapshot\(\)/g) ?? []).length, 1);
+  assert.match(query, /element\.children\.map/);
+  assert.match(query, /depth <= 32, visited < 1024/);
+  assert.match(query, /prefix\(512\)/);
+  assert.match(query, /capturePhase\("update-offer-query-refused", in: app\)/);
+  assert.doesNotMatch(query, /allElementsBoundByIndex|firstMatch|value\(forKey/);
+  const flow = swiftSection(source, "var preInstallReopenUsed = false", "install.click()");
+  assert.ok(flow.indexOf('capturePhase("update-offer-before-first-query"') < flow.indexOf("findUpdateOffer("));
+  assert.equal((flow.match(/timeout: 180/g) ?? []).length, 2);
+  assert.match(flow, /guard let notice = try findUpdateOffer\(in: activeApp, expectedVersion: config\.expectedAfterVersion, timeout: 15\)/);
+  assert.match(flow, /named\(activeApp\.buttons, "Install"\)\.count == 1, install\.isHittable/);
+  assert.match(flow, /notice\.frame\.contains\(installFrame\), notice\.windowFrame\.contains\(installFrame\)/);
+  assert.match(flow, /installFrame == notice\.installFrame/);
+  assert.doesNotMatch(flow, /findUniqueStaticText|uniqueStaticText|Update v\\\(/);
+}
+
 function assertStaticTextContract(source) {
   const exact = swiftSection(source, "private func findUniqueStaticText(", "private func uniqueStaticText(");
   assert.match(exact, /for attribute in \["title", "label", "value"\]/);
@@ -354,6 +382,10 @@ test("Swift Compact role regression rejects seed and persisted-check reverts ind
   }
 });
 
+test("Swift scopes the split update notice to one immutable bounded group before Install", async () => {
+  assertSplitNoticeContract(await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8"));
+});
+
 test("Swift static text uses exact title then label then value and refuses ambiguity", async () => {
   assertStaticTextContract(await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8"));
 });
@@ -378,6 +410,10 @@ test("Swift AX source contracts independently reject critical selector regressio
   // Source-contract mutations, not XCTest execution or simulated UI proof.
   const source = await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8");
   const controls = [
+    ["fresh notice Install frame equality", assertSplitNoticeContract, 'installFrame == notice.installFrame', 'true'],
+    ["update notice distinct physical parts", assertSplitNoticeContract, 'Set(textIndices.flatMap { $0 }).count == 3', 'true'],
+    ["update notice ambiguity", assertSplitNoticeContract, 'guard matches.count <= 1 else', 'guard true else'],
+    ["update notice Install containment", assertSplitNoticeContract, 'notice.frame.contains(installFrame)', 'true'],
     ["watchlist checkbox role", assertScopedWatchlistToggle, 'NSNumber(value: XCUIElement.ElementType.checkBox.rawValue)', 'NSNumber(value: XCUIElement.ElementType.textField.rawValue)'],
     ["watchlist detail scope", assertScopedWatchlistToggle, 'detailQuery.firstMatch.descendants(matching: .any)', 'app.descendants(matching: .any)'],
     ["watchlist selected state", assertScopedWatchlistToggle, 'XCTAssertTrue(selectedValue == "1" || selectedValue == "true"', 'XCTAssertTrue(true || selectedValue == "true"'],
@@ -401,7 +437,7 @@ test("Swift AX source contracts independently reject critical selector regressio
     ["unique return", assertStaticTextContract, 'if count == 1, matches.firstMatch.exists', 'if count > 0, matches.firstMatch.exists'],
     ["probe before selector", assertInitialAttributeProbe, 'captureInitialPublicAttributes(in: activeApp)', 'captureInitialPublicAttributesAfterSelectors(in: activeApp)'],
     ["bounded probe", assertInitialAttributeProbe, 'data.count <= 64_000', 'data.count <= 640_000'],
-    ["no live diagnostic index list", assertInitialAttributeProbe, 'var visited = 0', 'var visited = 0; let live = app.buttons.allElementsBoundByIndex'],
+    ["no live diagnostic index list", assertInitialAttributeProbe, 'guard let snapshot = try? welcome.snapshot() else { return }', 'guard let snapshot = try? welcome.snapshot() else { return }; let live = app.buttons.allElementsBoundByIndex'],
     ["profile value", assertPreservedValueQueries, '(field.value as? String) == "You"', '(field.label as? String) == "You"'],
     ["profile element-relative center", assertPreservedValueQueries, 'field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()', 'field.click()'],
     ["profile contained frame", assertPreservedValueQueries, 'windowFrame.contains(fieldFrame)', 'true'],
@@ -429,4 +465,79 @@ test("receipt requires an exact relaunch, path, state, and normal quit", () => {
     { afterExecutablePath: "/Applications/YAWF Stream.app/Contents/MacOS/debridstreamer" },
     { profileName: "You" }, { density: "Comfortable" }, { watchlistTitle: "Other" }, { preInstallReopenUsed: "false" }, { normalQuitObserved: false },
   ]) assert.throws(() => validateReceipt({ ...receipt, ...mutation }, expected));
+});
+
+const runFile = promisify(execFile);
+const noticeHostCases = String.raw`
+    static func run(_ name: String) throws {
+        let groupFrame = CGRect(x: 660, y: 601, width: 340, height: 81)
+        let windowFrame = CGRect(x: 0, y: 0, width: 1024, height: 768)
+        func node(_ role: String, title: String = "", label: String = "", value: String? = nil, frame: CGRect = CGRect(x: 721, y: 616, width: 60, height: 16), children: [NoticeNode] = []) -> NoticeNode {
+            NoticeNode(role: role, title: title, label: label, value: value, frame: frame, children: children)
+        }
+        func parts(_ version: String = "2.3.102") -> [NoticeNode] { [node("staticText", value: "Update v"), node("staticText", value: version), node("staticText", value: " available")] }
+        func buttons() -> [NoticeNode] { [node("button", title: "Install", label: "Install", frame: CGRect(x: 884, y: 619, width: 67, height: 45)), node("button", title: "Dismiss update notification", label: "Dismiss update notification", frame: CGRect(x: 955, y: 627, width: 28, height: 29))] }
+        func group(_ children: [NoticeNode], frame: CGRect? = nil) -> NoticeNode { node("group", frame: frame ?? groupFrame, children: children) }
+        func app(_ groups: [NoticeNode]) -> NoticeNode { node("application", frame: windowFrame, children: [node("window", frame: windowFrame, children: groups)]) }
+        func check(_ condition: Bool) { if !condition { fatalError("Notice fixture assertion: \(name)") } }
+        let valid = group(parts() + buttons())
+        switch name {
+        case "valid-split": check(try updateNoticeWitness(app([valid]), expectedVersion: "2.3.102") != nil)
+        case "same-attribute-node-once":
+            let texts = [node("staticText", title: "Update v", label: "Update v", value: "Update v"), node("staticText", title: "2.3.102", label: "2.3.102", value: "2.3.102"), node("staticText", title: " available", label: " available", value: " available")]
+            check(try updateNoticeWitness(app([group(texts + buttons())]), expectedVersion: "2.3.102") != nil)
+        case "altered-version": check(try updateNoticeWitness(app([group(parts("2.3.101") + buttons())]), expectedVersion: "2.3.102") == nil)
+        case "missing-part": check(try updateNoticeWitness(app([group(Array(parts().prefix(2)) + buttons())]), expectedVersion: "2.3.102") == nil)
+        case "unscoped-group":
+            let p = parts(); let inner = group([p[1],p[2]], frame: CGRect(x: 710, y: 610, width: 160, height: 30))
+            check(try updateNoticeWitness(app([group([p[0],inner] + buttons())]), expectedVersion: "2.3.102") == nil)
+        case "ambiguous-group":
+            do { _ = try updateNoticeWitness(app([valid, valid]), expectedVersion: "2.3.102"); fatalError("Accepted ambiguous notice") }
+            catch NoticeWitnessError.ambiguousNotice { }
+        case "duplicated-part": check(try updateNoticeWitness(app([group(parts() + [parts()[1]] + buttons())]), expectedVersion: "2.3.102") == nil)
+        case "same-node-multiple-parts": check(try updateNoticeWitness(app([group([node("staticText", title: "Update v", label: "2.3.102", value: " available")] + buttons())]), expectedVersion: "2.3.102") == nil)
+        case "duplicated-install": check(try updateNoticeWitness(app([group(parts() + buttons() + [buttons()[0]])]), expectedVersion: "2.3.102") == nil)
+        case "outside-window": check(try updateNoticeWitness(app([group(parts()+buttons(), frame:CGRect(x:660,y:601,width:400,height:81))]), expectedVersion:"2.3.102") == nil)
+        case "zero-button": check(try updateNoticeWitness(app([group(parts()+[node("button",title:"Install",frame:.zero),buttons()[1]])]), expectedVersion:"2.3.102") == nil)
+        case "depth-bound":
+            var deep = valid; for _ in 0..<33 { deep = node("other",children:[deep]) }
+            do { _ = try updateNoticeWitness(app([deep]), expectedVersion:"2.3.102"); fatalError("Accepted depth overflow") } catch NoticeWitnessError.bounds { }
+        case "node-bound":
+            do { _ = try updateNoticeWitness(app([valid]+Array(repeating:node("other"),count:1025)),expectedVersion:"2.3.102");fatalError("Accepted node overflow") } catch NoticeWitnessError.bounds { }
+        default: fatalError("Unknown notice fixture")
+        }
+    }
+`;
+
+test("extracted Swift notice witness executes semantic fixtures and four causal controls", {
+  skip: process.env.DS_MAC_NOTICE_SKIP_SWIFT_HOST === "1",
+  timeout: 120_000,
+}, async () => {
+  const source = await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8");
+  const body = source.split("// HOST_UPDATE_NOTICE_BEGIN")[1].split("// HOST_UPDATE_NOTICE_END")[0];
+  const folder = await mkdtemp(path.join(os.tmpdir(), "mac-notice-pure-"));
+  const environment = { ...process.env, TMPDIR: folder, CLANG_MODULE_CACHE_PATH: path.join(folder,"modules") };
+  async function compile(body, name) {
+    const file = path.join(folder, name+".swift"), executable = path.join(folder,name);
+    await writeFile(file, "import Foundation\nimport CoreGraphics\nenum NoticeHost {\n"+body+noticeHostCases+"\n}\ntry NoticeHost.run(CommandLine.arguments[1])\n");
+    await runFile("/usr/bin/swiftc", ["-module-cache-path",path.join(folder,"modules"),file,"-o",executable], { env: environment, timeout:60_000, maxBuffer:1024*1024 });
+    return executable;
+  }
+  const executable = await compile(body, "notice-fixtures");
+  for (const name of ["valid-split","same-attribute-node-once","altered-version","missing-part","unscoped-group","ambiguous-group","duplicated-part","same-node-multiple-parts","duplicated-install","outside-window","zero-button","depth-bound","node-bound"]) {
+    await runFile(executable,[name],{env:environment,timeout:10_000,maxBuffer:1024*1024});
+  }
+  const textLine = 'let textIndices = parts.map { part in node.children.indices.filter { node.children[$0].role == "staticText" && exact(node.children[$0], part) } }';
+  const descendantLine = 'func descendantNodes(_ node: NoticeNode) -> [NoticeNode] { node.children.flatMap { [$0] + descendantNodes($0) } }; let textScope = descendantNodes(node); let textIndices = parts.map { part in textScope.indices.filter { textScope[$0].role == "staticText" && exact(textScope[$0], part) } }';
+  const controls = [
+    ["altered-version", 'let parts = ["Update v", expectedVersion, " available"]', 'let parts = ["Update v", "2.3.101", " available"]'],
+    ["missing-part", 'if textIndices.allSatisfy({ $0.count == 1 }), Set(textIndices.flatMap { $0 }).count == 3,', 'if true,'],
+    ["unscoped-group", textLine, descendantLine],
+    ["ambiguous-group", 'guard matches.count <= 1 else { throw NoticeWitnessError.ambiguousNotice }', 'guard true else { throw NoticeWitnessError.ambiguousNotice }'],
+  ];
+  for (const [name,before,after] of controls) {
+    assert.ok(body.includes(before));
+    const mutant = await compile(body.replace(before,after),"mutant-"+name);
+    await assert.rejects(runFile(mutant,[name],{env:environment,timeout:10_000,maxBuffer:1024*1024}),name);
+  }
 });

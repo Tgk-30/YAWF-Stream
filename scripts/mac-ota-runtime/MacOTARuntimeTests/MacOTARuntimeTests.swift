@@ -145,8 +145,9 @@ final class MacOTARuntimeTests: XCTestCase {
         try seedWatchlist(in: activeApp, title: "Inception")
 
         var preInstallReopenUsed = false
-        let updateOffer = "Update v\(config.expectedAfterVersion) available"
-        if try findUniqueStaticText(activeApp.staticTexts, text: updateOffer, timeout: 180) == nil {
+        capturePhase("update-offer-before-first-query", in: activeApp)
+        if try findUpdateOffer(in: activeApp, expectedVersion: config.expectedAfterVersion, timeout: 180) == nil {
+            capturePhase("update-offer-before-reopen", in: activeApp)
             preInstallReopenUsed = true
             activeApp.typeKey("q", modifierFlags: .command)
             XCTAssertTrue(activeApp.wait(for: .notRunning, timeout: 30), "The baseline app did not stop through its normal Quit command before retrying its launch check.")
@@ -155,11 +156,23 @@ final class MacOTARuntimeTests: XCTestCase {
             activeApp.launch()
             XCTAssertTrue(activeApp.wait(for: .runningForeground, timeout: 30))
             installOwner = try uniqueRunningApplication(at: appURL)
+            capturePhase("update-offer-after-reopen-before-query", in: activeApp)
+            guard try findUpdateOffer(in: activeApp, expectedVersion: config.expectedAfterVersion, timeout: 180) != nil else {
+                capturePhase("update-offer-missing-after-reopen", in: activeApp)
+                throw AdmissionError.refused("The exact split-text update notice was unavailable after the normal reopen.")
+            }
         }
-        _ = try uniqueStaticText(activeApp.staticTexts, text: updateOffer, timeout: 180)
         capturePhase("05-update-offer", in: activeApp)
         let beforeExecutablePath = try XCTUnwrap(installOwner.executableURL).path
         let install = try uniqueHittable(named(activeApp.buttons, "Install"), label: "Install", timeout: 15)
+        guard let notice = try findUpdateOffer(in: activeApp, expectedVersion: config.expectedAfterVersion, timeout: 15) else {
+            capturePhase("update-offer-missing-before-install", in: activeApp)
+            throw AdmissionError.refused("The update notice was not freshly witnessed before Install.")
+        }
+        let installFrame = install.frame
+        guard named(activeApp.buttons, "Install").count == 1, install.isHittable, Self.usableNoticeFrame(installFrame), installFrame == notice.installFrame, notice.frame.contains(installFrame), notice.windowFrame.contains(installFrame) else {
+            throw AdmissionError.refused("The unique Install control was not contained in the freshly witnessed update notice.")
+        }
         install.click()
         XCTAssertTrue(waitUntil(timeout: 600) {
             installOwner.isTerminated || self.textPrefixExists(activeApp.staticTexts, prefix: "Installing")
@@ -405,6 +418,89 @@ final class MacOTARuntimeTests: XCTestCase {
             throw AdmissionError.refused("Required unique static text was unavailable: \(text)")
         }
         return element
+    }
+
+    // HOST_UPDATE_NOTICE_BEGIN
+    private struct NoticeNode {
+        let role: String
+        let title: String
+        let label: String
+        let value: String?
+        let frame: CGRect
+        let children: [NoticeNode]
+    }
+    private struct UpdateNoticeWitness {
+        let frame: CGRect
+        let installFrame: CGRect
+        let dismissFrame: CGRect
+        let windowFrame: CGRect
+    }
+    private enum NoticeWitnessError: Error { case bounds, ambiguousWindow, ambiguousNotice }
+    private static func usableNoticeFrame(_ frame: CGRect) -> Bool {
+        !frame.isNull && !frame.isInfinite && frame.origin.x.isFinite && frame.origin.y.isFinite && frame.width.isFinite && frame.height.isFinite && frame.width > 0 && frame.height > 0
+    }
+    private static func updateNoticeWitness(_ root: NoticeNode, expectedVersion: String) throws -> UpdateNoticeWitness? {
+        var visited = 0
+        var windows: [NoticeNode] = []
+        func collectWindows(_ node: NoticeNode, depth: Int) throws {
+            guard depth <= 32, visited < 1024 else { throw NoticeWitnessError.bounds }
+            visited += 1
+            if node.role == "window" { windows.append(node) }
+            for child in node.children { try collectWindows(child, depth: depth + 1) }
+        }
+        try collectWindows(root, depth: 0)
+        guard windows.count <= 1 else { throw NoticeWitnessError.ambiguousWindow }
+        guard let window = windows.first, usableNoticeFrame(window.frame) else { return nil }
+        var matches: [UpdateNoticeWitness] = []
+        func exact(_ node: NoticeNode, _ text: String) -> Bool { node.title == text || node.label == text || node.value == text }
+        func visit(_ node: NoticeNode) {
+            if node.role == "group", usableNoticeFrame(node.frame), window.frame.contains(node.frame) {
+                let parts = ["Update v", expectedVersion, " available"]
+                let textIndices = parts.map { part in node.children.indices.filter { node.children[$0].role == "staticText" && exact(node.children[$0], part) } }
+                let installIndices = node.children.indices.filter { node.children[$0].role == "button" && exact(node.children[$0], "Install") }
+                let dismissIndices = node.children.indices.filter { node.children[$0].role == "button" && exact(node.children[$0], "Dismiss update notification") }
+                if textIndices.allSatisfy({ $0.count == 1 }), Set(textIndices.flatMap { $0 }).count == 3,
+                   installIndices.count == 1, dismissIndices.count == 1, installIndices[0] != dismissIndices[0] {
+                    let install = node.children[installIndices[0]], dismiss = node.children[dismissIndices[0]]
+                    if usableNoticeFrame(install.frame), usableNoticeFrame(dismiss.frame), node.frame.contains(install.frame), node.frame.contains(dismiss.frame), window.frame.contains(install.frame), window.frame.contains(dismiss.frame) {
+                        matches.append(UpdateNoticeWitness(frame: node.frame, installFrame: install.frame, dismissFrame: dismiss.frame, windowFrame: window.frame))
+                    }
+                }
+            }
+            for child in node.children { visit(child) }
+        }
+        visit(window)
+        guard matches.count <= 1 else { throw NoticeWitnessError.ambiguousNotice }
+        return matches.first
+    }
+    // HOST_UPDATE_NOTICE_END
+
+    @MainActor
+    private func findUpdateOffer(in app: XCUIApplication, expectedVersion: String, timeout: TimeInterval) throws -> UpdateNoticeWitness? {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if let snapshot = try? app.snapshot() {
+                var visited = 0
+                func copy(_ element: any XCUIElementSnapshot, depth: Int) throws -> NoticeNode {
+                    guard depth <= 32, visited < 1024 else { throw NoticeWitnessError.bounds }
+                    visited += 1
+                    let role: String
+                    switch element.elementType { case .window: role = "window"; case .group: role = "group"; case .staticText: role = "staticText"; case .button: role = "button"; default: role = "other" }
+                    let children = try element.children.map { try copy($0, depth: depth + 1) }
+                    return NoticeNode(role: role, title: String(element.title.prefix(512)), label: String(element.label.prefix(512)), value: (element.value as? String).map { String($0.prefix(512)) }, frame: element.frame, children: children)
+                }
+                do {
+                    let root = try copy(snapshot, depth: 0)
+                    if Date() > deadline { return nil }
+                    if let witness = try Self.updateNoticeWitness(root, expectedVersion: expectedVersion) { return witness }
+                } catch {
+                    capturePhase("update-offer-query-refused", in: app)
+                    throw error
+                }
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        } while Date() < deadline
+        return nil
     }
 
     @MainActor
