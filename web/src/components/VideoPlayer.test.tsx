@@ -17667,6 +17667,7 @@ describe("automatic starvation95 adaptation", () => {
     fail?: boolean; pending?: boolean; qualities?: ServerTranscodeQuality[]; lease?: boolean;
     sourceTracks?: ServerAudioTrack[]; audioChurn?: boolean; lazyAudio?: "pending" | "failed" | "ambiguous";
     unknownFile?: boolean; reused?: boolean; compatibility?: boolean; fixedUrl?: boolean;
+    snapshots?: number[]; snapshotGeneration?: string[]; snapshotEndlist?: boolean;
   } = {}) {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const manifest = deferred<Response>();
@@ -17693,12 +17694,23 @@ describe("automatic starvation95 adaptation", () => {
     });
     const request = vi.fn(async (quality: ServerTranscodeQuality, position: number, _audioTrack?: number) => {
       if (options.fail) throw new Error("Preparation unavailable95");
-      return { url: `https://server.example/api/stream/starvation95/index.m3u8?quality=${quality}&start=${position}`,
+      return { url: `https://server.example/api/stream/starvation95/index.m3u8?quality=${quality}&start=${position}${_audioTrack == null ? "" : `&audio=${_audioTrack}`}`,
         quality, timelineOffsetSeconds: position, startPositionSeconds: 0, audioTrack: undefined };
     });
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (options.lease && init?.method === "HEAD") return new Response(null, { status: leaseExpired ? 404 : 200 });
       if (String(input).includes("starvation95/index.m3u8")) {
+        if (options.snapshots != null) {
+          const frontier = options.snapshots.length > 1 ? options.snapshots.shift()! : options.snapshots[0]!;
+          const generation = options.snapshotGeneration != null && options.snapshotGeneration.length > 1
+            ? options.snapshotGeneration.shift()! : options.snapshotGeneration?.[0] ?? "transcode-test";
+          return new Response(`#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n480p.m3u8?generation=${generation}\n`, { headers: {
+            "x-yawf-hls-snapshot-version": "1", "x-yawf-hls-snapshot-generation": generation,
+            "x-yawf-hls-snapshot-frontier": String(frontier), "x-yawf-hls-snapshot-target": "6",
+            "x-yawf-hls-snapshot-endlist": options.snapshotEndlist ? "1" : "0", "x-yawf-transcode-quality": "480p",
+            "x-yawf-transcode-start": "106", "x-yawf-transcode-audio": options.audio ? "1" : "0",
+          } });
+        }
         if (options.pending) return manifest.promise;
         return new Response("#EXTM3U\n", { headers: options.audio || options.audioChurn || options.lazyAudio ? { "x-yawf-transcode-audio": "1" } : {} });
       }
@@ -18078,6 +18090,120 @@ describe("automatic starvation95 adaptation", () => {
     if (!["owner", "revision", "manual", "fixed-quality"].includes(intent)) expect(current).toBe(p.video);
     if (intent === "seek") expect(current.currentTime).toBe(45);
     if (intent === "pause") expect(current.paused).toBe(true);
+  });
+
+  it("[lead101] polls the same master without touching the reader until its live position has a reload-sized lead", async () => {
+    vi.useFakeTimers();
+    const p = await setup({ snapshots: [6, 12] });
+    const original = p.video.src;
+    p.episodes(); await settle();
+    p.video.currentTime = 107.894;
+    expect(p.request).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    expect(p.video.src).toBe(original);
+    expect(p.video.pause).not.toHaveBeenCalled();
+    expect(hlsInstances).toHaveLength(0);
+    await advance96(499);
+    expect(p.video.src).toBe(original);
+    expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("starvation95"))).toHaveLength(1);
+    await advance96(1);
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("starvation95/index.m3u8"));
+    expect(hlsInstances.at(-1)?.config.startPosition).toBeCloseTo(1.894);
+    const calls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("starvation95"));
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(calls.slice(0, 2).every(([url]) => String(url).includes("index.m3u8"))).toBe(true);
+  });
+
+  it("[lead101-rate] preserves the 2x reader through six and twelve second snapshots until eighteen seconds are published", async () => {
+    vi.useFakeTimers();
+    const p = await setup({ snapshots: [6, 12, 18] });
+    const original = p.video.src;
+    p.video.playbackRate = 2;
+    p.episodes(); await settle();
+    p.video.currentTime = 110;
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106);
+    const requests = () => vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("starvation95"));
+    const snapshots = () => requests().filter(([url]) => String(url).includes("index.m3u8"));
+    for (const expectedPolls of [1, 2]) {
+      if (expectedPolls === 2) await advance96(500);
+      expect(requests()).toHaveLength(expectedPolls);
+      expect(snapshots()).toHaveLength(expectedPolls);
+      expect(snapshots().every(([url]) => String(url).includes("index.m3u8"))).toBe(true);
+      expect(document.querySelector("video.player-video")).toBe(p.video);
+      expect(p.video.src).toBe(original);
+      expect(p.video.playbackRate).toBe(2);
+      expect(p.video.pause).not.toHaveBeenCalled();
+      expect(hlsInstances).toHaveLength(0);
+    }
+    await advance96(500);
+    expect(snapshots()).toHaveLength(3);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("starvation95/index.m3u8"));
+    expect(hlsInstances.at(-1)?.config.startPosition).toBeCloseTo(4);
+    expect(p.video.playbackRate).toBe(2);
+  });
+
+  it("[lead101] samples the live clock again when the first adequate snapshot is consumed", async () => {
+    vi.useFakeTimers(); const p = await setup({ snapshots: [6, 12, 18] }); const original = p.video.src;
+    p.episodes(); await settle(); p.video.currentTime = 112.1;
+    await advance96(500);
+    expect(p.video.src).toBe(original); expect(p.video.pause).not.toHaveBeenCalled();
+    expect(hlsInstances).toHaveLength(0);
+    await advance96(500);
+    expect(hlsInstances.at(-1)?.config.startPosition).toBeCloseTo(6.1);
+  });
+
+  it("[lead101] accepts a complete short rendition only while the live position is inside it", async () => {
+    vi.useFakeTimers(); const p = await setup({ snapshots: [6], snapshotEndlist: true });
+    p.episodes(); await settle();
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("starvation95/index.m3u8"));
+  });
+
+  it("[lead101] preserves a paused, rate-adjusted reader at guarded activation", async () => {
+    vi.useFakeTimers(); const p = await setup({ snapshots: [6, 12] });
+    p.episodes(); await settle(); p.setPaused(true); p.video.playbackRate = 1.5; p.video.currentTime = 107;
+    await advance96(500);
+    expect(hlsInstances.at(-1)?.config.startPosition).toBeCloseTo(1);
+    expect(p.video.paused).toBe(true); expect(p.video.playbackRate).toBe(1.5);
+  });
+
+  it("[lead101] preserves selected source audio through guarded activation", async () => {
+    vi.useFakeTimers(); nativeJapanese95();
+    const p = await setup({ snapshots: [6, 12], audio: true });
+    p.episodes(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 1);
+    await advance96(500);
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("starvation95/index.m3u8"));
+    p.settings(); expect(screen.getByRole("button", { name: "Japanese" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("[lead101] will not use a stale clock while the owned media is unready", async () => {
+    vi.useFakeTimers(); const p = await setup({ snapshots: [6, 12] }); p.episodes(); await settle();
+    Object.defineProperty(p.video, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_NOTHING });
+    await advance96(500); expect(hlsInstances).toHaveLength(0);
+    Object.defineProperty(p.video, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA });
+    p.video.currentTime = 107.894;
+    await advance96(500); expect(hlsInstances.at(-1)?.config.startPosition).toBeCloseTo(1.894);
+  });
+
+  it.each(["invalid", "generation change", "deadline", "unmount", "seek", "quality", "source", "audio"]) ("[lead101] never adopts after %s while polling", async scenario => {
+    vi.useFakeTimers();
+    const nativeAudio = scenario === "audio" ? nativeJapanese95() : null;
+    const p = await setup({ snapshots: scenario === "invalid" ? [Number.NaN] : scenario === "generation change" ? [6, 12] : [6],
+      ...(nativeAudio == null ? {} : { audio: true }),
+      ...(scenario === "generation change" ? { snapshotGeneration: ["transcode-one", "transcode-two"] } : {}) });
+    const original = p.video.src; p.episodes(); await settle();
+    if (scenario === "unmount") p.view.unmount();
+    if (scenario === "seek") { p.video.currentTime = 45; fireEvent.seeking(p.video); fireEvent.seeked(p.video); }
+    if (scenario === "quality") { p.settings(); fireEvent.click(screen.getByRole("button", { name: "Device Original" })); }
+    if (scenario === "source") p.view.rerender(<VideoPlayer {...p.props} url="https://server.example/api/stream/other-lead101/movie.mp4" />);
+    if (nativeAudio != null) { nativeAudio[0].enabled = true; nativeAudio[1].enabled = false; act(() => nativeAudio.dispatchEvent(new Event("change"))); }
+    if (scenario === "deadline") vi.setSystemTime(Date.now() + 45_001);
+    await advance96(1_000);
+    if (scenario === "deadline") { p.settings(); expect(screen.getByRole("alert")).toHaveTextContent("Server optimized playback timed out."); }
+    if (!["unmount", "quality", "source"].includes(scenario)) {
+      expect(p.video.src).toBe(original); expect(p.video.pause).not.toHaveBeenCalled();
+    }
+    expect(hlsInstances.some((hls) => hls.loadSource.mock.calls.some(([url]) => String(url).includes("starvation95")))).toBe(false);
   });
 
   it.each([false, true])("[starvation95] follows the live clock including quiet-clock=%s and confirmed audio with exact no-replay adoption", async quietClock => {

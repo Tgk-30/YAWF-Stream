@@ -1237,3 +1237,54 @@ export async function fetchServerAdminHealth(): Promise<{
 }> {
   return serverRequest("GET", "/api/admin/health");
 }
+
+export type ServerHlsSnapshot = {
+  generation: string; frontier: number; target: number; endlist: boolean; audio: number;
+};
+
+/** Legacy absence differs from advertised but unusable metadata. */
+export function parseServerHlsSnapshot(
+  url: string, manifest: string, headers: Headers, quality: ServerTranscodeQuality,
+  start: number, requestedAudio?: number,
+): ServerHlsSnapshot | "legacy" | null {
+  const version = headers.get("x-yawf-hls-snapshot-version");
+  const fields = ["generation", "frontier", "target", "endlist"].map((name) => headers.get(`x-yawf-hls-snapshot-${name}`));
+  if (version == null && fields.every((value) => value == null)) return "legacy";
+  if (version !== "1" || quality === "auto") return null;
+  const [generation, frontierText, targetText, endlist] = fields;
+  const targetURL = serverHlsLeaseTarget(url, manifest);
+  const allLines = manifest.split(/\r?\n/);
+  const lines = allLines.filter((line) => line && !line.startsWith("#"));
+  let query: URLSearchParams;
+  try { query = new URL(url).searchParams; } catch { return null; }
+  const childIndex = allLines.findIndex((line) => line === lines[0]);
+  const streams = allLines.filter((line) => line.startsWith("#EXT-X-STREAM-INF:"));
+  if (targetURL == null || allLines[0] !== "#EXTM3U" || lines.length !== 1 || streams.length !== 1 ||
+      childIndex < 1 || allLines[childIndex - 1] !== streams[0] ||
+      query.getAll("quality").length !== 1 || query.get("quality") !== quality ||
+      query.getAll("start").length > 1 || (query.get("start") ?? "0") !== String(start) ||
+      query.getAll("audio").length > 1 || (requestedAudio != null && query.get("audio") !== String(requestedAudio)) ||
+      generation == null || lines[0] !== `${quality}.m3u8?generation=${generation}` ||
+      !/^transcode-[A-Za-z0-9_-]{1,100}$/.test(generation) ||
+      headers.get("x-yawf-transcode-quality") !== quality ||
+      headers.get("x-yawf-transcode-start") !== String(start) ||
+      !/^(?:0|[1-9]|[12][0-9]|3[01])$/.test(headers.get("x-yawf-transcode-audio") ?? "") ||
+      (requestedAudio != null && headers.get("x-yawf-transcode-audio") !== String(requestedAudio)) ||
+      (query.has("audio") && query.get("audio") !== headers.get("x-yawf-transcode-audio")) ||
+      frontierText == null || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(frontierText) ||
+      targetText == null || !/^[1-9]\d*$/.test(targetText) ||
+      (endlist !== "0" && endlist !== "1")) return null;
+  const frontier = Number(frontierText); const target = Number(targetText);
+  if (!Number.isFinite(frontier) || frontier <= 0 || frontier > 604_800 ||
+      !Number.isSafeInteger(target) || target > 120) return null;
+  return { generation, frontier, target, endlist: endlist === "1", audio: Number(headers.get("x-yawf-transcode-audio")) };
+}
+
+export function serverHlsSnapshotAdmits(
+  snapshot: ServerHlsSnapshot, localStart: number, paused: boolean, rate: number, ageMs: number,
+): boolean {
+  if (!Number.isFinite(localStart) || localStart < 0 || !Number.isFinite(rate) || rate <= 0 ||
+      !Number.isFinite(ageMs) || ageMs < 0 || localStart >= snapshot.frontier) return false;
+  if (snapshot.endlist) return true;
+  return snapshot.frontier - localStart > snapshot.target * rate + (paused ? 0 : ageMs / 1000 * rate);
+}

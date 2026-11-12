@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isTranscodeAssetName,
+  parsePublishedTranscodeSnapshot,
   rewriteGeneratedWebVttForTimeline,
   rewriteTranscodeManifest,
 } from "../src/transcodeHls.js";
@@ -156,4 +157,26 @@ describe("transcode HLS assets", () => {
       "WEBVTT\r\nX-TIMESTAMP-MAP=LOCAL:00:00.000,MPEGTS:0\r\n",
     ));
   });
+});
+
+
+describe("published fixed rendition snapshots", () => {
+  const playlist = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-TARGETDURATION:6", "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:EVENT", "#EXTINF:6.000000,", "360p_seg_00000.ts", "#EXTINF:6.000000,", "360p_seg_00001.ts", ""].join("\n");
+  it("counts only contiguous closed segments and recognizes completion", () => {
+    expect(parsePublishedTranscodeSnapshot(playlist, "360p")).toEqual({ frontier: 12, target: 6, endlist: false, segments: ["360p_seg_00000.ts", "360p_seg_00001.ts"] });
+    expect(parsePublishedTranscodeSnapshot(playlist + "#EXT-X-ENDLIST\n", "360p")?.endlist).toBe(true);
+  });
+  it.each([
+    ["incomplete", playlist + "#EXTINF:6,\n"],
+    ["unfinalized", playlist.slice(0, -1)],
+    ["gap", playlist.replace("00001.ts", "00002.ts")],
+    ["sequence", playlist.replace("SEQUENCE:0", "SEQUENCE:1")],
+    ["duplicate version", playlist.replace("#EXT-X-VERSION:3", "#EXT-X-VERSION:3\n#EXT-X-VERSION:3")],
+    ["path", playlist.replace("360p_seg_00001.ts", "../360p_seg_00001.ts")],
+    ["duration", playlist.replace("6.000000,", "NaN,")],
+    ["zero duration", playlist.replace("6.000000,", "0,")],
+    ["discontinuity", playlist.replace("#EXTINF:6.000000,", "#EXT-X-DISCONTINUITY\n#EXTINF:6.000000,")],
+    ["oversize", playlist + "\n".repeat(1_048_576)],
+    ["after end", playlist + "#EXT-X-ENDLIST\n#EXTINF:6,\n360p_seg_00002.ts\n"],
+  ])("rejects %s", (_name, value) => expect(parsePublishedTranscodeSnapshot(value, "360p")).toBeNull());
 });

@@ -114,3 +114,52 @@ export function rewriteGeneratedWebVttForTimeline(
   const tail = webVtt.slice(signature[0].length);
   return `WEBVTT${newline}X-TIMESTAMP-MAP=LOCAL:00:00.000,MPEGTS:0${newline}${tail || newline}`;
 }
+
+/** Parse only the EVENT format produced by our fixed-rendition muxer. A
+ * published URI follows a closed segment; a trailing EXTINF is not one. */
+export function parsePublishedTranscodeSnapshot(
+  manifest: string,
+  quality: "1080p" | "720p" | "480p" | "360p",
+): { frontier: number; target: number; endlist: boolean; segments: string[] } | null {
+  if (Buffer.byteLength(manifest) > 1_048_576 || !manifest.endsWith("\n")) return null;
+  const lines = manifest.split(/\r?\n/);
+  if (lines.shift() !== "#EXTM3U") return null;
+  let target: number | null = null;
+  let sequence = false;
+  let version = false;
+  let playlistType = false;
+  let pending: number | null = null;
+  let frontier = 0;
+  let endlist = false;
+  const segments: string[] = [];
+  for (const line of lines) {
+    if (!line) continue;
+    if (endlist) return null;
+    if (pending != null) {
+      const expected = `${quality}_seg_${String(segments.length).padStart(5, "0")}.ts`;
+      if (line !== expected || segments.length >= 15_000) return null;
+      frontier += pending;
+      if (!Number.isFinite(frontier) || frontier > 604_800) return null;
+      segments.push(line);
+      pending = null;
+    } else if (/^#EXT-X-VERSION:[1-9]\d*$/.test(line) && !version && segments.length === 0) {
+      version = true;
+    } else if (/^#EXT-X-TARGETDURATION:[1-9]\d*$/.test(line) && target == null && segments.length === 0) {
+      target = Number(line.slice(22));
+      if (!Number.isSafeInteger(target) || target > 120) return null;
+    } else if (line === "#EXT-X-MEDIA-SEQUENCE:0" && !sequence && segments.length === 0) {
+      sequence = true;
+    } else if (line === "#EXT-X-PLAYLIST-TYPE:EVENT" && !playlistType && segments.length === 0) {
+      playlistType = true;
+    } else if (/^#EXTINF:(?:\d+)(?:\.\d+)?,[ \t]*$/.test(line) && target != null && sequence && playlistType) {
+      pending = Number(line.slice(8).split(",")[0]);
+      if (!Number.isFinite(pending) || pending <= 0 || pending > target + 0.5) return null;
+    } else if (line === "#EXT-X-ENDLIST" && segments.length > 0) {
+      endlist = true;
+    } else {
+      return null;
+    }
+  }
+  return pending == null && target != null && sequence && playlistType && segments.length > 0
+    ? { frontier, target, endlist, segments } : null;
+}
