@@ -1,0 +1,147 @@
+name: Finalize the scoped desktop102 draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Exact draft to finalize without rebuilding or publishing
+        required: true
+        type: choice
+        options: [v2.3.102-web]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: finalize-desktop102
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    if: github.repository == 'Tgk-30/YAWF-Stream' && github.ref == 'refs/heads/main' && inputs.release_tag == 'v2.3.102-web'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: v2.3.102-web
+      HELD_DESKTOP_TAG: ${{ vars.YAWF_RELEASE_DESKTOP_ONLY_TAG }}
+      RELEASE_WINDOWS: ${{ vars.YAWF_RELEASE_WINDOWS }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Check out immutable release tools
+        uses: actions/checkout@v4
+        with:
+          ref: 61b13db998f421bdd10c5b1949fa1af8fb2996c0
+          path: release-source
+          persist-credentials: false
+      - name: Observe both producer attempts and download only the pinned original assets
+        run: |
+          set -euo pipefail
+          mkdir evidence artifacts
+          release_api="https://api.github.com/repos/Tgk-30/YAWF-Stream/releases/443250250"
+          printf '%s\n' "$release_api" > evidence/release-api.txt
+          gh api "$release_api" > evidence/release-original.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/43246997392" > evidence/producer.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/43246997392/attempts/1/jobs?per_page=100" > evidence/jobs-attempt1.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/43246997392/attempts/2/jobs?per_page=100" > evidence/jobs-attempt2.json
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" > evidence/tag.json
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir artifacts
+          node scripts/admit_desktop102_finalization.mjs admit evidence/release-original.json evidence/producer.json evidence/jobs-attempt1.json evidence/jobs-attempt2.json evidence/tag.json "$PWD/artifacts" "$PWD/evidence/admission.json"
+      - name: Split feeds with the unchanged release-source implementation and bind the exact final inventory
+        run: |
+          set -euo pipefail
+          node release-source/scripts/split_desktop_updater_manifests.mjs artifacts/latest.json artifacts/latest.json artifacts/latest-macos11.json "$RELEASE_TAG"
+          test ! -e artifacts/latest.json.sig
+          (cd artifacts; find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\0' | sort -z | xargs -0 sha256sum) > artifacts/SHA256SUMS
+          (cd artifacts; sha256sum --check SHA256SUMS)
+          node scripts/admit_desktop102_finalization.mjs inventory "$PWD/artifacts" "$PWD/evidence/expected-final.json"
+      - name: Upload the two deterministic derived feeds and independently verify their remote bytes
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" artifacts/latest.json artifacts/latest-macos11.json --clobber --repo "$GITHUB_REPOSITORY"
+          mkdir remote-derived
+          gh api "$(cat evidence/release-api.txt)" > evidence/release-derived.json
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir remote-derived
+          node scripts/admit_desktop102_finalization.mjs verify-derived evidence/expected-final.json evidence/release-derived.json "$PWD/remote-derived" "$PWD/evidence/remote-derived-verification.json"
+      - name: Upload checksums and requery and rehash all finalized remote artifacts before attestation
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" artifacts/SHA256SUMS --repo "$GITHUB_REPOSITORY"
+          mkdir remote-final
+          gh api "$(cat evidence/release-api.txt)" > evidence/release-final.json
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir remote-final
+          node scripts/admit_desktop102_finalization.mjs verify-final evidence/expected-final.json evidence/release-final.json "$PWD/remote-final" "$PWD/evidence/remote-final-verification.json"
+      - name: Attest the exact re-downloaded finalized bytes without claiming a rebuild
+        uses: actions/attest@v4
+        with:
+          subject-path: remote-final/*
+      - name: Verify the remote inventory again after attestation
+        run: |
+          set -euo pipefail
+          mkdir remote-after-attestation
+          gh api "$(cat evidence/release-api.txt)" > evidence/release-after-attestation.json
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir remote-after-attestation
+          node scripts/admit_desktop102_finalization.mjs verify-final evidence/expected-final.json evidence/release-after-attestation.json "$PWD/remote-after-attestation" "$PWD/evidence/remote-after-attestation-verification.json"
+      - name: Retain exact admission, attempt failures and expected final inventory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop102-scoped-finalization
+          path: evidence
+          if-no-files-found: error
+
+  clean-install:
+    needs: finalize
+    permissions:
+      contents: write
+    uses: ./.github/workflows/clean-install.yml
+    with:
+      tag: v2.3.102-web
+      include_windows: false
+      include_android: false
+      include_server: false
+
+  verify-after-clean-install:
+    needs: [finalize, clean-install]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: v2.3.102-web
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop102-scoped-finalization
+          path: evidence
+      - name: Requery and re-download every finalized artifact after successful clean installs
+        run: |
+          set -euo pipefail
+          mkdir remote-after-clean-install
+          gh api "$(cat evidence/release-api.txt)" > evidence/release-after-clean-install.json
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir remote-after-clean-install
+          node scripts/admit_desktop102_finalization.mjs verify-final evidence/expected-final.json evidence/release-after-clean-install.json "$PWD/remote-after-clean-install" "$PWD/evidence/remote-after-clean-install-verification.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop102-after-clean-install
+          path: evidence
+          if-no-files-found: error
