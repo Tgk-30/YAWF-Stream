@@ -1,0 +1,116 @@
+name: macOS public 96 to 102 updater lifecycle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-public-ota102
+  cancel-in-progress: false
+
+jobs:
+  native-ota:
+    name: Public signed arm64 macOS updater lifecycle
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Admit disposable hosted runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = ARM64
+          test "$HOME" = /Users/runner
+          test "$RUNNER_TEMP" = /Users/runner/work/_temp
+          test "$(uname -m)" = arm64
+          test -d "$DEVELOPER_DIR"
+          mkdir -p "$RUNNER_TEMP/downloads" "$RUNNER_TEMP/reference102"
+          sw_vers
+          xcodebuild -version
+          node --test scripts/mac-ota-runtime/controller.test.mjs
+
+      - name: Verify exact public archives and attestations
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 2 --max-time 180 \
+            https://github.com/Tgk-30/YAWF-Stream/releases/download/v2.3.96-web/YAWF.Stream_aarch64.app.tar.gz \
+            --output "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.96_aarch64.app.tar.gz"
+          curl --fail --location --retry 2 --max-time 180 \
+            https://github.com/Tgk-30/YAWF-Stream/releases/download/v2.3.102-web/YAWF.Stream_aarch64.app.tar.gz \
+            --output "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.102_aarch64.app.tar.gz"
+          cd "$RUNNER_TEMP/downloads"
+          printf '%s\n' \
+            '32d1b9041c0ddc5ef9201edc9420028bb764be5aa6046071164d6b646ca89901  YAWF.Stream_2.3.96_aarch64.app.tar.gz' \
+            'a6faf88930b95d119e356fe34311319ab983129a3e37b86138f9a637abde7bd5  YAWF.Stream_2.3.102_aarch64.app.tar.gz' \
+            | shasum --algorithm 256 --check
+          test "$(stat -f %z YAWF.Stream_2.3.96_aarch64.app.tar.gz)" = 95584873
+          test "$(stat -f %z YAWF.Stream_2.3.102_aarch64.app.tar.gz)" = 95584951
+          gh attestation verify YAWF.Stream_2.3.96_aarch64.app.tar.gz \
+            --repo Tgk-30/YAWF-Stream --format json > "$RUNNER_TEMP/downloads/attestation96.json"
+          gh attestation verify YAWF.Stream_2.3.102_aarch64.app.tar.gz \
+            --repo Tgk-30/YAWF-Stream \
+            --signer-workflow Tgk-30/YAWF-Stream/.github/workflows/finalize-desktop102.yml \
+            --signer-digest 4447da335169ad3122526338a2a1e824ad9a5b60 \
+            --format json > "$RUNNER_TEMP/downloads/attestation102.json"
+          tar -xzf YAWF.Stream_2.3.102_aarch64.app.tar.gz -C "$RUNNER_TEMP/reference102"
+          codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/reference102/YAWF Stream.app"
+          spctl -a -vv -t exec "$RUNNER_TEMP/reference102/YAWF Stream.app"
+
+      - name: Prepare exact signed private baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/mac-ota-runtime/controller.mjs prepare \
+            --archive96 "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.96_aarch64.app.tar.gz" \
+            --runRoot "$RUNNER_TEMP/mac-ota102"
+
+      - name: Build only the independent UI test runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild build-for-testing \
+            -project scripts/mac-ota-runtime/MacOTARuntime.xcodeproj \
+            -scheme MacOTARuntime \
+            -configuration Release \
+            -derivedDataPath "$RUNNER_TEMP/mac-ota-derived" \
+            -destination 'platform=macOS,arch=arm64'
+
+      - name: Exercise ordinary public updater and verify persisted state
+        shell: bash
+        run: |
+          set -euo pipefail
+          xctestrun="$(find "$RUNNER_TEMP/mac-ota-derived/Build/Products" -maxdepth 1 -name '*.xctestrun' -type f -print)"
+          test -n "$xctestrun"
+          test "$(printf '%s\n' "$xctestrun" | wc -l | tr -d ' ')" = 1
+          node scripts/mac-ota-runtime/controller.mjs execute \
+            --runRoot "$RUNNER_TEMP/mac-ota102" \
+            --xctestrun "$xctestrun" \
+            --expected102App "$RUNNER_TEMP/reference102/YAWF Stream.app"
+
+      - name: Retain bounded test evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-public96-to102-native-ota-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/mac-ota102/MacOTARuntime.xcresult
+            ${{ runner.temp }}/mac-ota102/prepared.json
+            ${{ runner.temp }}/mac-ota102/ui-receipt.json
+            ${{ runner.temp }}/mac-ota102/verified.json
+            ${{ runner.temp }}/downloads/attestation96.json
+            ${{ runner.temp }}/downloads/attestation102.json
+            ${{ runner.temp }}/mac-ota-derived/Build/Products/*.xctestrun
