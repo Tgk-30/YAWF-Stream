@@ -1,6 +1,8 @@
 import type { ServerTranscodeQuality } from "./serverApi";
 
 const CLOCK_REGRESSION_TOLERANCE_SECONDS = 0.05;
+const STARVATION_EPISODE_WINDOW_MS = 5 * 60_000;
+const STARVATION_EPISODES_BEFORE_REDUCTION = 2;
 export const STARVATION_WAIT_CONFIRMATION_MS = 2_000;
 const WAIT_CONFIRMATION_MAX_AGE_MS = 5_000;
 type WaitingConfirmation = Readonly<{ at: number; position: number; playbackIntent: number }>;
@@ -34,8 +36,8 @@ export class PlaybackStarvation {
 
   claimAttempt(now: number, eligible: boolean): boolean {
     if (!eligible) { this.interrupt(); return false; }
-    this.episodes = this.episodes.filter((at) => now >= at && now - at <= 45_000);
-    if (this.attempted || this.episodes.length < 3) return false;
+    this.episodes = this.episodes.filter((at) => now >= at && now - at <= STARVATION_EPISODE_WINDOW_MS);
+    if (this.attempted || this.episodes.length < STARVATION_EPISODES_BEFORE_REDUCTION) return false;
     this.attempted = true;
     return true;
   }
@@ -94,7 +96,7 @@ export class PlaybackStarvation {
     this.confirmation = null;
     this.progressed = false;
     this.resumePosition = this.lastPosition;
-    this.episodes = this.episodes.filter((at) => now >= at && now - at <= 45_000);
+    this.episodes = this.episodes.filter((at) => now >= at && now - at <= STARVATION_EPISODE_WINDOW_MS);
     this.episodes.push(now);
     return attemptReady && this.claimAttempt(now, true);
   }

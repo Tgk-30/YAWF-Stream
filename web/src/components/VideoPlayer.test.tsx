@@ -17749,7 +17749,9 @@ describe("automatic starvation95 adaptation", () => {
     const progress = () => { time += 1; fireEvent.timeUpdate(video); };
     const playing = () => { fireEvent.play(video); fireEvent.playing(video); };
     const episode = () => { playing(); progress(); progress(); fireEvent.waiting(video); };
-    const episodes = () => { episode(); episode(); episode(); };
+    // Preserve the existing handoff fixtures' absolute clock while exercising
+    // exactly two starvation episodes, preceded by healthy decoded progress.
+    const episodes = () => { playing(); progress(); progress(); episode(); episode(); };
     const settings = () => fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
     if (options.reused) {
       playing(); progress(); progress(); fireMediaError(video, 2); await settle();
@@ -17777,6 +17779,34 @@ describe("automatic starvation95 adaptation", () => {
     beginConfirmedEpisode96(p); await advance96(2_000);
   }
 
+  it.each([40_000, 150_000])("[native200] native Safari480 preserves audio0 and requests360 on the second starvation spaced %sms apart", async spacing => {
+    vi.useFakeTimers();
+    const restoreUA = replaceProperty(navigator, "userAgent", "iPad");
+    deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    const list = nativeJapanese95(); list[0].enabled = true; list[1].enabled = false;
+    try {
+      const p = await setup({ compatibility: true, height: 480, pending: true, sourceTracks: [
+        { index: 0, label: "English", language: "eng", default: true },
+        { index: 1, label: "Japanese", language: "jpn", default: false },
+      ] });
+      const source = p.video.src;
+      expect(hlsInstances).toHaveLength(0);
+      p.setAhead(0.121); p.episode(); await settle();
+      expect(p.request).not.toHaveBeenCalled();
+      Object.defineProperty(p.video, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_FUTURE_DATA });
+      fireEvent.canPlay(p.video); p.playing();
+      for (let elapsed = 0; elapsed < spacing; elapsed += 5_000) {
+        p.video.currentTime += 5; fireEvent.timeUpdate(p.video); await advance96(5_000);
+      }
+      Object.defineProperty(p.video, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA });
+      p.setAhead(0.124); fireEvent.waiting(p.video); await settle();
+      expect(p.request).toHaveBeenCalledExactlyOnceWith("360p", p.clock(), 0);
+      expect(p.video.src).toBe(source);
+      expect(document.querySelector("video.player-video")).toBe(p.video);
+    } finally { restoreUA(); }
+  });
+
   it.each([false, true])("[starvation96] confirms actual Android waiting2 unchanged-timeupdate2 canplay4 order for Auto=%s", async auto => {
     vi.useFakeTimers();
     const p = await setup({ auto, height: 720, pending: true });
@@ -17784,7 +17814,7 @@ describe("automatic starvation95 adaptation", () => {
     Object.defineProperty(p.video, "readyState", { configurable: true, get: () => ready });
     p.playing(); p.video.currentTime = 69.583; fireEvent.timeUpdate(p.video);
     p.video.currentTime = 70.645; fireEvent.timeUpdate(p.video);
-    for (const [i, sample] of [[71.475, 2.514], [77.536, 2.325], [83.615, 2.373]].entries()) {
+    for (const [i, sample] of [[71.475, 2.514], [77.536, 2.325]].entries()) {
       ready = HTMLMediaElement.HAVE_FUTURE_DATA;
       p.video.currentTime = sample[0] - 0.4; fireEvent.timeUpdate(p.video);
       ready = HTMLMediaElement.HAVE_CURRENT_DATA; p.setAhead(sample[1]);
@@ -17793,13 +17823,13 @@ describe("automatic starvation95 adaptation", () => {
       for (let duplicate = 0; duplicate < 3; duplicate++) fireEvent.waiting(p.video);
       await advance96(1_737); expect(p.request).not.toHaveBeenCalled();
       await advance96(1);
-      if (i < 2) {
+      if (i < 1) {
         expect(p.request).not.toHaveBeenCalled(); await advance96(4_000);
         ready = HTMLMediaElement.HAVE_FUTURE_DATA; p.video.currentTime = sample[0] + 0.29;
         fireEvent.canPlay(p.video); p.playing(); fireEvent.timeUpdate(p.video);
       }
     }
-    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 83.615);
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 77.536);
     expect(document.querySelector("video.player-video")).toBe(p.video);
   });
 
@@ -17809,7 +17839,7 @@ describe("automatic starvation95 adaptation", () => {
   ] as const)("[starvation97] Auto=%s preserves a single waiting timer across %ss backward settling", async (auto, regression) => {
     vi.useFakeTimers(); const p = await setup({ auto, height: 720, pending: true });
     let lastWaitingPosition = 0;
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 2; i++) {
       beginConfirmedEpisode96(p);
       lastWaitingPosition = p.clock();
       await advance96(262);
@@ -17818,7 +17848,7 @@ describe("automatic starvation95 adaptation", () => {
       // No second waiting event may be needed to keep this same stall armed.
       await advance96(1_737); expect(p.request).not.toHaveBeenCalled();
       await advance96(1);
-      if (i < 2) {
+      if (i < 1) {
         expect(p.request).not.toHaveBeenCalled();
         await advance96(4_000);
         fireEvent.canPlay(p.video); p.playing(); p.progress();
@@ -17830,20 +17860,20 @@ describe("automatic starvation95 adaptation", () => {
 
   it("[starvation96] changed-clock waiting replaces a probe without losing the later confirmation deadline", async () => {
     vi.useFakeTimers(); const p = await setup({ pending: true });
-    await confirmedEpisode96(p); await confirmedEpisode96(p);
+    await confirmedEpisode96(p);
     beginConfirmedEpisode96(p); await advance96(1_000);
     p.video.currentTime += 0.5; fireEvent.waiting(p.video);
     await advance96(1_000); expect(p.request).not.toHaveBeenCalled();
     await advance96(999); expect(p.request).not.toHaveBeenCalled();
     await advance96(1);
-    expect(p.clock()).toBe(106.5);
-    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106);
+    expect(p.clock()).toBe(104.5);
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 104);
   });
 
   it.each(["timeupdate", "quiet clock", "future data", "canplay", "playing", "network progress"])(
     "[starvation96] cancels unconfirmed %s without erasing earlier genuine episodes", async reason => {
       vi.useFakeTimers(); const p = await setup({ pending: true });
-      await confirmedEpisode96(p); await confirmedEpisode96(p);
+      await confirmedEpisode96(p);
       beginConfirmedEpisode96(p); await advance96(500);
       if (reason === "timeupdate") p.progress();
       if (reason === "quiet clock") p.video.currentTime += 0.001;
@@ -17866,7 +17896,7 @@ describe("automatic starvation95 adaptation", () => {
     "[starvation96] retires a pending timer and prior episodes for newer %s context", async reason => {
       vi.useFakeTimers(); const list = reason === "native audio" ? nativeJapanese95() : null;
       const p = await setup({ pending: true, ...(list == null ? {} : { audio: true }) });
-      await confirmedEpisode96(p); await confirmedEpisode96(p); beginConfirmedEpisode96(p);
+      await confirmedEpisode96(p); beginConfirmedEpisode96(p);
       if (reason === "pause") { p.setPaused(true); fireEvent.pause(p.video); p.setPaused(false); p.playing(); }
       if (reason === "seek") { p.video.currentTime -= 0.001; fireEvent.seeking(p.video); fireEvent.seeked(p.video); }
       if (reason === "scrub") { fireEvent.pointerDown(screen.getByTestId("scrub-bar")); fireEvent.pointerUp(screen.getByTestId("scrub-bar")); }
@@ -17877,27 +17907,27 @@ describe("automatic starvation95 adaptation", () => {
       if (reason === "pagehide") { fireEvent(window, new Event("pagehide")); fireEvent(window, new Event("pageshow")); }
       if (list != null) { list[0].enabled = true; list[1].enabled = false; act(() => list.dispatchEvent(new Event("change"))); }
       await advance96(2_000); expect(p.request).not.toHaveBeenCalled();
-      for (let i = 0; i < 3; i++) { await confirmedEpisode96(p); if (i < 2) expect(p.request).not.toHaveBeenCalled(); }
+      for (let i = 0; i < 2; i++) { await confirmedEpisode96(p); if (i < 1) expect(p.request).not.toHaveBeenCalled(); }
       expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", p.clock(), ...(list == null ? [] : [0]));
     },
   );
 
   it("[starvation96] newer explicit Pause then Play wins even when neither native event arrives", async () => {
     vi.useFakeTimers(); const p = await setup({ pending: true });
-    await confirmedEpisode96(p); await confirmedEpisode96(p); beginConfirmedEpisode96(p);
+    await confirmedEpisode96(p); beginConfirmedEpisode96(p);
     vi.mocked(p.video.pause).mockImplementation(() => { p.setPaused(true); });
     vi.mocked(p.video.play).mockImplementation(async () => { p.setPaused(false); });
     const toggle = screen.getByRole("button", { name: "Pause" });
     fireEvent.click(toggle); fireEvent.click(toggle);
     expect(p.video.paused).toBe(false);
     await advance96(2_000); expect(p.request).not.toHaveBeenCalled();
-    for (let i = 0; i < 3; i++) { await confirmedEpisode96(p); if (i < 2) expect(p.request).not.toHaveBeenCalled(); }
+    for (let i = 0; i < 2; i++) { await confirmedEpisode96(p); if (i < 1) expect(p.request).not.toHaveBeenCalled(); }
     expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", p.clock());
   });
 
   it.each(["future data", "canplay"])("[starvation96] explicit no-event Pause then Play retires history before %s cancels the probe", async reason => {
     vi.useFakeTimers(); const p = await setup({ pending: true });
-    await confirmedEpisode96(p); await confirmedEpisode96(p); beginConfirmedEpisode96(p);
+    await confirmedEpisode96(p); beginConfirmedEpisode96(p);
     vi.mocked(p.video.pause).mockImplementation(() => { p.setPaused(true); });
     vi.mocked(p.video.play).mockImplementation(async () => { p.setPaused(false); });
     const toggle = screen.getByRole("button", { name: "Pause" });
@@ -17906,13 +17936,13 @@ describe("automatic starvation95 adaptation", () => {
     else fireEvent.canPlay(p.video);
     await advance96(2_000); expect(p.request).not.toHaveBeenCalled();
     Object.defineProperty(p.video, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA });
-    for (let i = 0; i < 3; i++) { await confirmedEpisode96(p); if (i < 2) expect(p.request).not.toHaveBeenCalled(); }
+    for (let i = 0; i < 2; i++) { await confirmedEpisode96(p); if (i < 1) expect(p.request).not.toHaveBeenCalled(); }
     expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", p.clock());
   });
 
   it.each(["source", "revision", "unmount"])("[starvation96] disposes delayed ownership across %s without touching the next reader", async reason => {
     vi.useFakeTimers(); const p = await setup({ pending: true });
-    await confirmedEpisode96(p); await confirmedEpisode96(p); beginConfirmedEpisode96(p);
+    await confirmedEpisode96(p); beginConfirmedEpisode96(p);
     if (reason === "source") p.view.rerender(<VideoPlayer {...p.props} url="https://server.example/api/stream/new96/movie.mp4" />);
     if (reason === "revision") p.view.rerender(<VideoPlayer {...p.props} sourceRevision={1} />);
     if (reason === "unmount") { p.view.unmount(); expect(vi.getTimerCount()).toBe(0); }
@@ -17920,12 +17950,12 @@ describe("automatic starvation95 adaptation", () => {
     expect(p.request).not.toHaveBeenCalled();
     if (reason !== "unmount") p.view.unmount();
     const next = await setup({ pending: true });
-    for (let i = 0; i < 3; i++) await confirmedEpisode96(next);
+    for (let i = 0; i < 2; i++) await confirmedEpisode96(next);
     expect(next.request).toHaveBeenCalledExactlyOnceWith("480p", next.clock());
     expect(p.request).not.toHaveBeenCalled();
   });
 
-  it("[starvation96] startup noise and future-data waits cannot replace a source before three confirmed episodes", async () => {
+  it("[starvation96] startup noise and future-data waits cannot replace a source before two confirmed episodes", async () => {
     vi.useFakeTimers(); const p = await setup({ pending: true }); p.setAhead(10);
     for (let i = 0; i < 3; i++) { fireEvent.waiting(p.video); await advance96(2_000); }
     expect(p.request).not.toHaveBeenCalled();
@@ -17933,7 +17963,7 @@ describe("automatic starvation95 adaptation", () => {
     for (let i = 0; i < 3; i++) { p.episode(); await advance96(2_000); }
     expect(p.request).not.toHaveBeenCalled();
     Object.defineProperty(p.video, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA });
-    for (let i = 0; i < 3; i++) { await confirmedEpisode96(p); if (i < 2) expect(p.request).not.toHaveBeenCalled(); }
+    for (let i = 0; i < 2; i++) { await confirmedEpisode96(p); if (i < 1) expect(p.request).not.toHaveBeenCalled(); }
     expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", p.clock());
   });
 
@@ -17946,14 +17976,14 @@ describe("automatic starvation95 adaptation", () => {
       { index: 1, label: "Japanese", language: "jpn", default: true },
     ]); }); await settle();
     await advance96(1_000); expect(p.request).not.toHaveBeenCalled();
-    await confirmedEpisode96(p); expect(p.request).not.toHaveBeenCalled(); await confirmedEpisode96(p);
+    await confirmedEpisode96(p);
     expect(p.loadAudioTracks).toHaveBeenCalledTimes(1);
     expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", p.clock(), 1);
   });
 
-  it("[starvation96] three confirmed waits can await idle audio inventory and still preserve its unique source track", async () => {
+  it("[starvation96] two confirmed waits can await idle audio inventory and still preserve its unique source track", async () => {
     vi.useFakeTimers(); nativeJapanese95(); const p = await setup({ lazyAudio: "pending", pending: true });
-    for (let i = 0; i < 3; i++) await confirmedEpisode96(p);
+    for (let i = 0; i < 2; i++) await confirmedEpisode96(p);
     expect(p.request).not.toHaveBeenCalled(); expect(p.loadAudioTracks).toHaveBeenCalledTimes(1);
     await act(async () => { p.inventory.resolve([
       { index: 0, label: "English", language: "eng", default: false },
@@ -17965,18 +17995,17 @@ describe("automatic starvation95 adaptation", () => {
   it("[starvation96] bounds failed delayed adaptation to one attempt without changing the live reader", async () => {
     vi.useFakeTimers(); const p = await setup({ fail: true }); const original = p.video.src;
     for (let i = 0; i < 6; i++) await confirmedEpisode96(p);
-    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106);
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 104);
     expect(document.querySelector("video.player-video")).toBe(p.video); expect(p.video.src).toBe(original);
   });
 
-  it.each([false, true])("[starvation95] adapts default-direct/Auto=%s after three genuine episodes, not duplicates", async auto => {
+  it.each([false, true])("[starvation95] adapts default-direct/Auto=%s after two genuine episodes, not duplicates", async auto => {
     const p = await setup({ auto });
     p.episode();
     for (let i = 0; i < 5; i++) fireEvent.waiting(p.video);
     await settle(); expect(p.request).not.toHaveBeenCalled();
-    p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
     p.episode(); await settle();
-    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106);
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 104);
     expect(document.querySelector("video.player-video")).toBe(p.video);
     expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("/starvation95/index.m3u8"));
     expect(screen.getByText("Auto reduced playback to 480p to help with repeated buffering.")).toBeInTheDocument();
@@ -18312,10 +18341,10 @@ describe("automatic starvation95 adaptation", () => {
     p.settings();
     expect(screen.getByRole("button", { name: "Auto" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "Device Original" })).toHaveAttribute("aria-pressed", "false");
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 2; i++) {
       time += 1; fireEvent.timeUpdate(next); time += 1; fireEvent.timeUpdate(next); fireEvent.waiting(next); fireEvent.playing(next);
     }
-    await settle(); expect(p.request).toHaveBeenLastCalledWith("480p", 206);
+    await settle(); expect(p.request).toHaveBeenLastCalledWith("480p", 204);
   });
 
   it("[starvation95] preserves episodes through equivalent descriptor callbacks and genuinely replaced track objects", async () => {
@@ -18328,21 +18357,21 @@ describe("automatic starvation95 adaptation", () => {
       qualities: descriptor.qualities.map(quality => quality),
       request: (...args) => descriptor.request(...args),
     }} />); await settle();
-    p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
+    p.episode(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 104, 1);
     p.view.rerender(<VideoPlayer {...p.props} serverOptimized={{ ...descriptor,
       qualities: descriptor.qualities.slice(), request: (...args) => descriptor.request(...args),
     }} />); await settle();
-    p.episode(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 1);
+    p.episode(); await settle(); expect(p.request).toHaveBeenCalledTimes(1);
   });
 
   it("[starvation95] retires episodes for a genuinely changed source-audio inventory", async () => {
     const p = await setup({ audioChurn: true }); p.settings(); await settle();
     fireEvent.click(screen.getByRole("button", { name: "Retry audio tracks" })); await settle();
-    p.episode(); p.episode(); await settle();
+    p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
     p.updateAudioInfo([{ index: 0, label: "English", language: "eng", default: false },
       { index: 1, label: "Japanese Main", language: "jpn", default: true }]); await settle();
     p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
-    p.episode(); p.episode(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 110, 1);
+    p.episode(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 1);
   });
 
   function nativeJapanese95() {
@@ -18392,7 +18421,7 @@ describe("automatic starvation95 adaptation", () => {
     expect(document.querySelector("video.player-video")).toBe(p.video); expect(list[0].enabled).toBe(true);
   });
 
-  it.each([false, true])("[starvation95] loads idle native-audio inventory once without settings for Auto-HLS=%s and preserves all three episodes while it warms", async auto => {
+  it.each([false, true])("[starvation95] loads idle native-audio inventory once without settings for Auto-HLS=%s and preserves both episodes while it warms", async auto => {
     nativeJapanese95(); const p = await setup({ lazyAudio: "pending", auto });
     expect(p.loadAudioTracks).not.toHaveBeenCalled();
     p.episodes(); await settle();
@@ -18421,13 +18450,13 @@ describe("automatic starvation95 adaptation", () => {
   it.each([[false, false], [false, true], [true, false], [true, true]])("[starvation95] counts owned starvation at readyState1 after progress2 with reused=%s metadata-timeupdate=%s", async (reused, metadataTimeupdate) => {
     const p = await setup({ reused }); let ready: number = HTMLMediaElement.HAVE_CURRENT_DATA;
     Object.defineProperty(p.video, "readyState", { configurable: true, get: () => ready });
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 2; i++) {
       ready = HTMLMediaElement.HAVE_CURRENT_DATA; p.playing(); p.progress(); p.progress();
       ready = HTMLMediaElement.HAVE_METADATA;
       if (metadataTimeupdate) fireEvent.timeUpdate(p.video);
       fireEvent.waiting(p.video); fireEvent.waiting(p.video);
       await settle();
-      if (i < 2) expect(p.request).not.toHaveBeenCalled();
+      if (i < 1) expect(p.request).not.toHaveBeenCalled();
     }
     expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", p.clock());
   });
@@ -18485,7 +18514,7 @@ describe("automatic starvation95 adaptation", () => {
 
   it.each([[false, 0.001], [false, 0.033], [true, 0.001], [true, 0.033]] as const)("[starvation95] adapts default-direct/Auto=%s despite native %ss settling after each waiting episode", async (auto, regression) => {
     const p = await setup({ auto });
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 1; i++) {
       p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
       p.video.currentTime -= regression; fireEvent.timeUpdate(p.video);
       fireEvent.waiting(p.video); await settle(); expect(p.request).not.toHaveBeenCalled();
@@ -18497,9 +18526,8 @@ describe("automatic starvation95 adaptation", () => {
   });
 
   it.each([false, true])("[starvation95] explicit tiny seek clears prior episodes in default-direct/Auto=%s", async auto => {
-    const p = await setup({ auto }); p.episode(); p.episode(); await settle();
+    const p = await setup({ auto }); p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
     p.video.currentTime -= 0.001; fireEvent.seeking(p.video); fireEvent.seeked(p.video); await settle();
-    p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
     p.episode(); await settle(); expect(p.request).not.toHaveBeenCalled();
     p.episode(); await settle(); expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", p.clock());
   });

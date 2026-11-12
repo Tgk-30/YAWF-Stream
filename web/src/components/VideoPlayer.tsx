@@ -7548,7 +7548,7 @@ function WebviewPlayer({
       } else cancelConfirmation();
       scheduleConfirmation();
     };
-    // A bounded inventory probe can finish after the third episode. Complete
+    // A bounded inventory probe can finish after enough qualifying episodes. Complete
     // that already-earned decision without fabricating another waiting event.
     if (!inventoryPending() && starvationPolicy.claimAttempt(performance.now(), eligible())) reduce();
     scheduleConfirmation();
