@@ -6,7 +6,6 @@ import XCTest
 final class MacOTARuntimeTests: XCTestCase {
     private struct Configuration: Decodable {
         let appPath: String
-        let receiptPath: String
         let expectedBeforeVersion: String
         let expectedAfterVersion: String
     }
@@ -37,14 +36,17 @@ final class MacOTARuntimeTests: XCTestCase {
     }
 
     private func runtimeAdmissionRefusal(environment: [String: String]) -> String? {
-        guard environment["CI"] == "true",
-              environment["GITHUB_ACTIONS"] == "true",
-              environment["RUNNER_ENVIRONMENT"] == "github-hosted",
-              environment["RUNNER_OS"] == "macOS",
-              environment["RUNNER_ARCH"] == "ARM64",
-              environment["RUNNER_TEMP"] == "/Users/runner/work/_temp",
-              environment["HOME"] == "/Users/runner" else {
-            return "GitHub-hosted runner environment admission failed."
+        let environmentChecks = [
+            "CI": environment["CI"] == "true",
+            "GITHUB_ACTIONS": environment["GITHUB_ACTIONS"] == "true",
+            "RUNNER_ENVIRONMENT": environment["RUNNER_ENVIRONMENT"] == "github-hosted",
+            "RUNNER_OS": environment["RUNNER_OS"] == "macOS",
+            "RUNNER_ARCH": environment["RUNNER_ARCH"] == "ARM64",
+            "RUNNER_TEMP": environment["RUNNER_TEMP"] == "/Users/runner/work/_temp",
+        ]
+        let failedEnvironmentChecks = environmentChecks.filter { !$0.value }.map { "\($0.key)=false" }.sorted()
+        guard failedEnvironmentChecks.isEmpty else {
+            return "GitHub-hosted runner environment admission failed: \(failedEnvironmentChecks.joined(separator: ", "))."
         }
 #if os(macOS) && arch(arm64)
         let version = ProcessInfo.processInfo.operatingSystemVersion
@@ -182,7 +184,7 @@ final class MacOTARuntimeTests: XCTestCase {
             preInstallReopenUsed: preInstallReopenUsed,
             normalQuitObserved: true
         )
-        try writeReceipt(receipt, to: config.receiptPath)
+        try attachReceipt(receipt)
     }
 
     @MainActor
@@ -303,7 +305,6 @@ final class MacOTARuntimeTests: XCTestCase {
         let root = "/Users/runner/work/_temp/mac-ota102"
         let expectedConfigPath = "\(root)/test-config.json"
         let expectedAppPath = "\(root)/private-app/YAWF Stream.app"
-        let expectedReceiptPath = "\(root)/ui-receipt.json"
         let configuredPath = try XCTUnwrap(ProcessInfo.processInfo.environment["YAWF_OTA_CONFIG_PATH"])
         guard configuredPath == expectedConfigPath else {
             throw AdmissionError.refused("The test configuration must use the fixed private run root.")
@@ -314,14 +315,9 @@ final class MacOTARuntimeTests: XCTestCase {
         }
         let configuration = try JSONDecoder().decode(Configuration.self, from: Data(contentsOf: configuredURL))
         guard configuration.appPath == expectedAppPath,
-              configuration.receiptPath == expectedReceiptPath,
               configuration.expectedBeforeVersion == "2.3.96",
               configuration.expectedAfterVersion == "2.3.102" else {
             throw AdmissionError.refused("The lifecycle configuration does not match the fixed public OTA scenario.")
-        }
-        let receiptParent = URL(fileURLWithPath: configuration.receiptPath).deletingLastPathComponent().standardizedFileURL
-        guard receiptParent == receiptParent.resolvingSymlinksInPath().standardizedFileURL else {
-            throw AdmissionError.refused("The receipt path has a symlinked ancestor.")
         }
         return configuration
     }
@@ -361,8 +357,13 @@ final class MacOTARuntimeTests: XCTestCase {
         return condition()
     }
 
-    private func writeReceipt(_ receipt: Receipt, to path: String) throws {
-        let data = try JSONEncoder().encode(receipt)
-        try data.write(to: URL(fileURLWithPath: path), options: [.atomic])
+    @MainActor
+    private func attachReceipt(_ receipt: Receipt) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let attachment = XCTAttachment(data: try encoder.encode(receipt), uniformTypeIdentifier: "public.json")
+        attachment.name = "MacOTARuntimeReceipt"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 }

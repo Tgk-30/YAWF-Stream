@@ -2,7 +2,7 @@
 
 This is a narrow, destructive XCUITest for a disposable GitHub-hosted `macos-15` arm64 runner. It launches an exact private copy of the signed public 2.3.96 app, uses only its visible UI and embedded public updater feed, installs 2.3.102, observes the updater-owned relaunch at the same private path, verifies ordinary user state survived, then quits through Command-Q.
 
-Never execute the UI test on a real user's login or on a self-hosted runner. Local use is limited to host unit tests, project parsing, and `build-for-testing`. The controller and XCTest independently require the GitHub markers plus actual Darwin arm64, macOS 15, Darwin 24, the `runner` account returned by the operating system, its physical `/Users/runner` home, and the fixed physical `$RUNNER_TEMP`. Environment variables alone cannot admit execution.
+Never execute the UI test on a real user's login or on a self-hosted runner. Local use is limited to host unit tests, project parsing, and `build-for-testing`. The controller and XCTest independently require the GitHub markers plus actual Darwin arm64, macOS 15, Darwin 24, the `runner` account returned by the operating system, its physical `/Users/runner` home, and the fixed physical `$RUNNER_TEMP`. Environment variables alone cannot admit execution. XCTest may replace its sandboxed `HOME`, so Swift verifies the current account with `getpwuid(getuid())` and does not trust or require the `HOME` environment value.
 
 ## Evidence boundary
 
@@ -48,7 +48,7 @@ Never execute the UI test on a real user's login or on a self-hosted runner. Loc
      --expected102App "$RUNNER_TEMP/reference102/YAWF Stream.app"
    ```
 
-8. Upload the `.xcresult`, `prepared.json`, `ui-receipt.json`, and `verified.json` even on failure. Never upload browser data, keychains, credentials, or the app's user-data directory.
+8. The sandboxed XCTest runner emits the lifecycle receipt as the keep-always attachment named `MacOTARuntimeReceipt`. Xcode 26.3 exports that name as `MacOTARuntimeReceipt_0_<UUID>.json`; the controller requires this anchored SDK naming form rather than guessing a filename. It exports attachments for the exact testcase, requires one exact manifest row and one exact named bounded JSON file, validates the receipt, records its SHA-256 in `verified.json`, and never asks XCTest to write outside its sandbox. Upload the `.xcresult`, `prepared.json`, `receipt-attachments`, and `verified.json` even on failure when present. Never upload browser data, keychains, credentials, or the app's user-data directory.
 
 Success requires all of these observations: exact baseline archive and private path with no symlinked ancestor; no preexisting process with the product bundle identifier; Quick setup with no provider account; the visible Welcome tour dismissed normally; Compact density, profile name `OTA Runner`, and fixture title `Inception` added through unique hittable controls; an exact 2.3.102 offer; Install clicked once; installation progress or the old PID exit observed; a different PID relaunched from the same exact path; version 2.3.102; all three state markers persisted; normal Command-Q completed; strict signature and notarization remained valid; and the installed bundle's content manifest matched the independently downloaded public 2.3.102 app. If the offer is no longer visible after seeding, the test permits one normal Command-Q and launch to repeat the normal launch check, and records that branch in its receipt.
 
