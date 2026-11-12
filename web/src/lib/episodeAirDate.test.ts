@@ -8,14 +8,24 @@ const validDates = [
   "2000-02-29", "2024-02-29", "2024-03-01", "2024-03-10", "2024-11-03",
 ];
 
-function inTimeZone(timeZone: string, locale = "en_CA.UTF-8") {
+function inTimeZone(timeZone: string, locale?: string) {
   const modulePath = fileURLToPath(new URL("./episodeAirDate.ts", import.meta.url));
   const script = `
     import { pathToFileURL } from 'node:url';
+    const NativeDateTimeFormat = Intl.DateTimeFormat;
+    const locale = ${JSON.stringify(locale)};
+    // Simulate only the default locale; Windows ICU ignores POSIX locale variables.
+    if (locale !== undefined) {
+      Intl.DateTimeFormat = new Proxy(NativeDateTimeFormat, {
+        construct(Target, args) {
+          return Reflect.construct(Target, [args[0] === undefined ? locale : args[0], args[1]]);
+        },
+      });
+    }
     const { episodeAirDateLabel } = await import(pathToFileURL(${JSON.stringify(modulePath)}));
     const dates = ${JSON.stringify(validDates)};
     const options = { month: 'short', day: 'numeric', year: 'numeric' };
-    const formatter = new Intl.DateTimeFormat(undefined, { ...options, timeZone: 'UTC' });
+    const formatter = new NativeDateTimeFormat(locale, { ...options, timeZone: 'UTC' });
     const actual = dates.map(episodeAirDateLabel);
     const expected = dates.map((value) => {
       const [year, month, day] = value.split('-').map(Number);
@@ -25,11 +35,11 @@ function inTimeZone(timeZone: string, locale = "en_CA.UTF-8") {
       .format(new Date('2022-10-09T00:00:00Z'));
     console.log(JSON.stringify({ actual, expected, predecessorControl,
       zone: new Intl.DateTimeFormat().resolvedOptions().timeZone,
-      locale: formatter.resolvedOptions().locale }));
+      locale: new Intl.DateTimeFormat().resolvedOptions().locale }));
   `;
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
     encoding: "utf8",
-    env: { ...process.env, TZ: timeZone, LANG: locale, LC_ALL: locale, LC_TIME: locale },
+    env: { ...process.env, TZ: timeZone },
   });
   expect(result.status, result.stderr).toBe(0);
   return JSON.parse(result.stdout) as {
@@ -53,10 +63,10 @@ describe("episodeAirDateLabel", () => {
     },
   );
 
-  it.each(["fr_CA.UTF-8", "ja_JP.UTF-8"])("retains the environment locale %s", (locale) => {
+  it.each(["fr-CA", "ja-JP"])("retains the default locale %s", (locale) => {
     const result = inTimeZone("America/Halifax", locale);
     expect(result.actual).toEqual(result.expected);
-    expect(result.locale.toLowerCase()).toBe(locale.split(".")[0].replace("_", "-").toLowerCase());
+    expect(result.locale).toBe(locale);
   });
 
   it.each([
