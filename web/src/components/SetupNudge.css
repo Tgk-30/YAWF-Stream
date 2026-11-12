@@ -1,3 +1,13 @@
+/* Setup guidance participates in scrolling instead of covering route actions. */
+.app-setup-region {
+  padding: var(--sp-lg) max(var(--sp-lg), var(--safe-area-right)) var(--sp-lg) max(var(--sp-lg), var(--safe-area-left));
+}
+
+/* Non-phone search/profile chrome is out of flow. Clear its complete touch target. */
+.app-setup-region[data-with-search] {
+  padding-top: calc(max(var(--sp-md), var(--safe-area-top)) - var(--app-content-safe-top-consumed, 0px) + max(44px, calc(44px * var(--density-scale))) + var(--sp-md));
+}
+
 /* Dismissible setup guidance stays in the app scroll flow, never above route CTAs. */
 .setup-nudge {
   position: relative;
@@ -62,6 +72,13 @@
 }
 
 @media (max-width: 699px), (max-width: 950px) and (max-height: 500px) {
+  /* Sticky phone search already contributes its height to normal flow. */
+  .app-setup-region,
+  .app-setup-region[data-with-search] {
+    padding-top: var(--sp-md);
+    padding-inline: max(var(--sp-sm), var(--safe-area-left)) max(var(--sp-sm), var(--safe-area-right));
+  }
+
   .setup-nudge {
     align-items: flex-start;
     width: 100%;

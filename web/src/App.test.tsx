@@ -292,8 +292,10 @@ vi.mock("./components/LocalProfilePicker", () => ({
 }));
 
 let installPromptEligibleValue = false;
-vi.mock("./components/InstallPrompt", () => ({
+vi.mock("./lib/installPrompt", () => ({
   isInstallPromptEligible: () => installPromptEligibleValue,
+}));
+vi.mock("./components/InstallPrompt", () => ({
   InstallPrompt: ({ onDismiss }: { onDismiss: () => void }) => (
     <button type="button" data-testid="install-prompt" onClick={onDismiss}>
       install prompt

@@ -4,6 +4,22 @@
 // add their own listeners.
 
 import type { BeforeInstallPromptEvent } from "./platform";
+import { isMobileBrowser, isStandaloneDisplay } from "./platform";
+import { isAndroidAppUiContext } from "./androidExternalPlayer";
+import { hasAndroidTVBridge } from "./androidTV";
+import { isTauri } from "./tauri";
+
+/** Static platform gate: browser-only, never an app WebView or standalone. */
+export function isInstallPromptEligible(): boolean {
+  return (
+    !isTauri() &&
+    !isAndroidAppUiContext() &&
+    !hasAndroidTVBridge() &&
+    !isStandaloneDisplay() &&
+    isMobileBrowser()
+  );
+}
+
 
 let deferred: BeforeInstallPromptEvent | null = null;
 let initialized = false;

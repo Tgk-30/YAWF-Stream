@@ -140,8 +140,14 @@ export function validateReminderNavigationCss({ navCss, setupNudgeCss, installPr
 }
 
 // Structural guard for the setup flow and independent install/nav reserves.
-export function validateSetupFlowLayout({ appSource, appCss }) {
+export function validateSetupFlowLayout({ appSource, appCss, setupNudgeCss }) {
   const failures = [];
+  if (/\.app-setup-region/.test(appCss) || !/const SetupNudge = lazy\(\(\) =>\s*import\("\.\/components\/SetupNudge"\)/.test(appSource)) failures.push("setup flow styles must remain component-lazy");
+  if (!/const InstallPrompt = lazy\(\(\) =>\s*import\("\.\/components\/InstallPrompt"\)/.test(appSource) ||
+      !/import \{ isInstallPromptEligible \} from "\.\/lib\/installPrompt"/.test(appSource) ||
+      !/showInstallPrompt && \(\s*<Suspense fallback=\{null\}>\s*<InstallPrompt/.test(appSource)) failures.push("install card must remain lazy and Suspense bounded with an eager pure gate");
+  const setupMobile = atRuleBlock(setupNudgeCss, "@media (max-width: 699px), (max-width: 950px) and (max-height: 500px)");
+  if (!/padding-top:\s*var\(--sp-md\)/.test(ruleBlock(setupMobile, ".app-setup-region[data-with-search]"))) failures.push("setup must retain sticky-search flow clearance");
   const main = appSource.indexOf('id="main-content"');
   const region = appSource.indexOf('className="app-setup-region"');
   const route = appSource.indexOf('className="route-frame"');
@@ -149,7 +155,7 @@ export function validateSetupFlowLayout({ appSource, appCss }) {
   if (/data-setup-nudge/.test(appCss + appSource)) failures.push("setup must not add a floating reserve");
   if (!/data-install-prompt=\{showInstallPrompt \|\| undefined\}/.test(appSource) ||
       !/\.app\[data-install-prompt\] \.app-content/.test(appCss)) failures.push("install reserve must remain independent");
-  if (!/padding-top:\s*calc\(max\(var\(--sp-md\), var\(--safe-area-top\)\)[^;]+44px/.test(ruleBlock(appCss, ".app-setup-region[data-with-search]"))) failures.push("setup must clear fixed search");
+  if (!/padding-top:\s*calc\(max\(var\(--sp-md\), var\(--safe-area-top\)\)[^;]+44px/.test(ruleBlock(setupNudgeCss, ".app-setup-region[data-with-search]"))) failures.push("setup must clear fixed search");
   const mobile = atRuleBlock(appCss, "@media (max-width: 699px), (max-width: 950px) and (max-height: 500px)");
   if (!/(?:[;{])\s*padding-bottom:\s*var\(--mobile-nav-reserve\)/.test(ruleBlock(mobile, ".app-content")) ||
       !/(?:[;{])\s*padding-bottom:\s*calc\(var\(--mobile-nav-reserve\) \+ calc\(128px/.test(ruleBlock(mobile, ".app[data-install-prompt] .app-content"))) failures.push("navigation and install reserves must remain intact");
@@ -550,7 +556,7 @@ check(
   /position:\s*relative/.test(setupNudgeBaseRule) &&
     /margin-inline:\s*auto/.test(setupNudgeBaseRule) &&
     /width:\s*min\(680px,\s*100%\)/.test(setupNudgeBaseRule) &&
-    validateSetupFlowLayout({ appSource, appCss }).length === 0,
+    validateSetupFlowLayout({ appSource, appCss, setupNudgeCss }).length === 0,
   "SetupNudge must precede the route in main flow, clear out-of-flow search chrome, and leave the independent floating InstallPrompt reserve intact.",
 );
 

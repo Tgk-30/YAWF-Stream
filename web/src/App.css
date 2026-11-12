@@ -81,16 +81,6 @@
   outline: none;
 }
 
-/* Setup guidance participates in scrolling instead of covering route actions. */
-.app-setup-region {
-  padding: var(--sp-lg) max(var(--sp-lg), var(--safe-area-right)) var(--sp-lg) max(var(--sp-lg), var(--safe-area-left));
-}
-
-/* Non-phone search/profile chrome is out of flow. Clear its complete touch target. */
-.app-setup-region[data-with-search] {
-  padding-top: calc(max(var(--sp-md), var(--safe-area-top)) - var(--app-content-safe-top-consumed, 0px) + max(44px, calc(44px * var(--density-scale))) + var(--sp-md));
-}
-
 /* The independent install card still floats and keeps its existing reserve. */
 .app[data-install-prompt] .app-content {
   padding-bottom: calc(96px * var(--density-scale) + var(--sp-lg));
@@ -149,13 +139,6 @@
     scroll-padding-bottom: var(--mobile-nav-reserve);
     overscroll-behavior-y: contain;
     -webkit-overflow-scrolling: touch;
-  }
-
-  /* Sticky phone search already contributes its height to normal flow. */
-  .app-setup-region,
-  .app-setup-region[data-with-search] {
-    padding-top: var(--sp-md);
-    padding-inline: max(var(--sp-sm), var(--safe-area-left)) max(var(--sp-sm), var(--safe-area-right));
   }
 
   /* Only the floating install prompt adds to the single navigation reserve. */

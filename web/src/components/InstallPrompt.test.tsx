@@ -31,7 +31,8 @@ const getInstallPromptMock = vi.fn<() => BeforeInstallPromptEvent | null>(
   () => null,
 );
 const consumeInstallPrompt = vi.fn();
-vi.mock("../lib/installPrompt", () => ({
+vi.mock("../lib/installPrompt", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lib/installPrompt")>(),
   getInstallPrompt: () => getInstallPromptMock(),
   subscribeInstallPrompt: () => () => {},
   consumeInstallPrompt: () => consumeInstallPrompt(),

@@ -60,7 +60,7 @@ import { UpdateBanner } from "./components/UpdateBanner";
 import { BrowserUpdateBanner } from "./components/BrowserUpdateBanner";
 import { BandwidthWarningBanner } from "./components/BandwidthWarningBanner";
 import { HostAvailabilityBanner } from "./components/HostAvailabilityBanner";
-import { InstallPrompt, isInstallPromptEligible } from "./components/InstallPrompt";
+import { isInstallPromptEligible } from "./lib/installPrompt";
 import { LocalPlayerHost } from "./components/LocalPlayerHost";
 // Eager (not lazy): the lock screen must paint in the SAME commit as the app
 // shell, or a code-split chunk load would flash a protected profile's content
@@ -143,7 +143,7 @@ const TVPairingDock = lazy(() =>
 // bytes - and ServerSetupWizard's QRCode dependency - stay out of first paint.
 // Full-app onboarding gates use a labeled viewport boot shell while their chunks
 // load. Optional overlays lower in App retain an empty modal fallback. InstallPrompt
-// stays eager: it shares a module with the eligibility predicate used during render.
+// is lazy too; its pure eligibility gate remains eager in lib/installPrompt.
 const FirstRunWizard = lazy(() =>
   import("./components/FirstRunWizard").then((m) => ({ default: m.FirstRunWizard })),
 );
@@ -161,6 +161,9 @@ const WelcomeGuide = lazy(() =>
 );
 const KeyboardShortcuts = lazy(() =>
   import("./components/KeyboardShortcuts").then((m) => ({ default: m.KeyboardShortcuts })),
+);
+const InstallPrompt = lazy(() =>
+  import("./components/InstallPrompt").then((m) => ({ default: m.InstallPrompt })),
 );
 const SetupNudge = lazy(() =>
   import("./components/SetupNudge").then((m) => ({ default: m.SetupNudge })),
@@ -837,7 +840,11 @@ export function App() {
         {firstRunOpen && <FirstRunWizard onDone={() => setFirstRunOpen(false)} />}
       </Suspense>
 
-      {showInstallPrompt && <InstallPrompt onDismiss={dismissInstall} />}
+      {showInstallPrompt && (
+        <Suspense fallback={null}>
+          <InstallPrompt onDismiss={dismissInstall} />
+        </Suspense>
+      )}
 
       {/* Desktop auto-update toast. Runs the launch-time check itself and is a
           no-op in a plain browser (isTauri-gated in updater.ts). */}

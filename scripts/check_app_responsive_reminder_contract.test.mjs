@@ -62,24 +62,36 @@ test("legacy and dynamic viewport bounds are independently required", () => {
 test("flow placement, fixed-search clearance and independent reserves reject individual regressions", () => {
   const appSource = readFileSync(new URL("../web/src/App.tsx", import.meta.url), "utf8");
   const appCss = readFileSync(new URL("../web/src/App.css", import.meta.url), "utf8");
-  assert.deepEqual(validateSetupFlowLayout({ appSource, appCss }), []);
+  assert.deepEqual(validateSetupFlowLayout({ appSource, appCss, setupNudgeCss: css.setupNudgeCss }), []);
+  assert.ok(validateSetupFlowLayout({ appSource, appCss: appCss + "\n.app-setup-region { padding: 0; }", setupNudgeCss: css.setupNudgeCss }).length > 0);
   for (const [from, to] of [
+    ['const SetupNudge = lazy(', 'const SetupNudge = eager('],
+    ['const InstallPrompt = lazy(', 'const InstallPrompt = eager('],
+    ['from "./lib/installPrompt"', 'from "./components/InstallPrompt"'],
+    ['showInstallPrompt && (\n        <Suspense fallback={null}>', 'showInstallPrompt && (\n        <div>'],
     ['className="app-setup-region"', 'className="floating-setup"'],
     ['data-install-prompt={showInstallPrompt || undefined}', 'data-install-prompt={showSetupNudge || showInstallPrompt || undefined}'],
   ]) {
     const changed = appSource.replace(from, to);
     assert.notEqual(changed, appSource);
-    assert.ok(validateSetupFlowLayout({ appSource: changed, appCss }).length > 0);
+    assert.ok(validateSetupFlowLayout({ appSource: changed, appCss, setupNudgeCss: css.setupNudgeCss }).length > 0);
+  }
+  for (const [from, to] of [
+    [" + max(44px, calc(44px * var(--density-scale))) + var(--sp-md)", " + 0px + var(--sp-md)"],
+    ["padding-top: var(--sp-md);", "padding-top: 0;"],
+  ]) {
+    const changed = css.setupNudgeCss.replace(from, to);
+    assert.notEqual(changed, css.setupNudgeCss);
+    assert.ok(validateSetupFlowLayout({ appSource, appCss, setupNudgeCss: changed }).length > 0, from);
   }
   for (const [from, to] of [
     [".app[data-install-prompt]", ".app[data-setup-nudge]"],
-    [" + max(44px, calc(44px * var(--density-scale))) + var(--sp-md)", " + 0px + var(--sp-md)"],
     ["padding-bottom: var(--mobile-nav-reserve);", "padding-bottom: 0;"],
     ["padding-bottom: calc(var(--mobile-nav-reserve) + calc(128px", "padding-bottom: calc(var(--mobile-nav-reserve) + calc(0px"],
   ]) {
     const changed = appCss.replace(from, to);
     assert.notEqual(changed, appCss);
-    assert.ok(validateSetupFlowLayout({ appSource, appCss: changed }).length > 0, from);
+    assert.ok(validateSetupFlowLayout({ appSource, appCss: changed, setupNudgeCss: css.setupNudgeCss }).length > 0, from);
   }
 });
 
