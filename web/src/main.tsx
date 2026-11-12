@@ -9,7 +9,7 @@ import { installAttentionGate } from "./lib/attention";
 import { initInstallPromptCapture } from "./lib/installPrompt";
 import { installExternalLinkHandler } from "./lib/externalLinks";
 import { installMobileSafeAreaInsets } from "./lib/mobileSafeArea";
-import { followServerURL } from "./lib/serverMode";
+import { consumeAndroidLocalModeEntry, followServerURL } from "./lib/serverMode";
 import {
   installTVSpatialNavigation,
   isPhoneRemoteRoute,
@@ -26,6 +26,7 @@ installStaleAssetFailureCapture();
 // origin. Follow that choice across launches: when the app boots back on its
 // own origin (tauri://localhost, dev server, the local install), go straight to
 // the remembered server instead of asking for the address every launch.
+consumeAndroidLocalModeEntry();
 try {
   const follow = followServerURL();
   if (follow != null && new URL(follow).origin !== window.location.origin) {
