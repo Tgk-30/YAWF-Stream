@@ -39,7 +39,9 @@
   overscroll-behavior: contain;
   padding: clamp(var(--sp-xl), 4.5vw, calc(52px * var(--density-scale)));
   border-radius: var(--r-lg);
-  background: var(--glass-tint-hero);
+  background:
+    linear-gradient(var(--glass-tint-hero), var(--glass-tint-hero)),
+    var(--bg-2, rgb(12, 13, 18));
   border: 0.75px solid var(--glass-border);
   box-shadow: 0 48px 120px -30px rgba(0, 0, 0, 0.74),
     inset 0 1px 0 rgba(255, 255, 255, 0.07);
