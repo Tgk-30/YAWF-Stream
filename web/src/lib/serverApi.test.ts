@@ -1438,8 +1438,25 @@ describe("published HLS handoff metadata", () => {
     const base = {generation: "transcode-one", frontier: 6, target: 6, endlist: false, audio: 1};
     expect(api.serverHlsSnapshotAdmits(base, 1.894, false, 1, 0)).toBe(false);
     expect(api.serverHlsSnapshotAdmits({...base, frontier: 12}, 5, false, 2, 600)).toBe(false);
-    expect(api.serverHlsSnapshotAdmits({...base, frontier: 12}, 5, true, 2, 600)).toBe(true);
+    expect(api.serverHlsSnapshotAdmits({...base, frontier: 12}, 5, true, 2, 600)).toBe(false);
     expect(api.serverHlsSnapshotAdmits({...base, endlist: true}, 5.9, false, 1, 1000)).toBe(true);
     expect(api.serverHlsSnapshotAdmits({...base, endlist: true}, 6, false, 1, 0)).toBe(false);
+  });
+  it("[lead101-rate] scales the wall-clock reload interval at twice-speed playback", () => {
+    const base = {generation: "transcode-one", frontier: 12, target: 6, endlist: false, audio: 1};
+    expect(api.serverHlsSnapshotAdmits(base, 4, false, 2, 0)).toBe(false);
+    expect(api.serverHlsSnapshotAdmits({...base, frontier: 16}, 4, false, 2, 0)).toBe(false);
+    expect(api.serverHlsSnapshotAdmits({...base, frontier: 18}, 4, false, 2, 0)).toBe(true);
+  });
+  it("[lead101-rate] adds moving snapshot age to the rate-scaled reload interval", () => {
+    const base = {generation: "transcode-one", frontier: 18, target: 6, endlist: false, audio: 1};
+    expect(api.serverHlsSnapshotAdmits(base, 4, false, 2, 1_000)).toBe(false);
+    expect(api.serverHlsSnapshotAdmits(base, 4, false, 2, 0)).toBe(true);
+    expect(api.serverHlsSnapshotAdmits({...base, frontier: 19}, 4, false, 2, 1_000)).toBe(true);
+  });
+  it("[lead101-rate] scales paused reload reserve without charging snapshot age", () => {
+    const base = {generation: "transcode-one", frontier: 12, target: 6, endlist: false, audio: 1};
+    expect(api.serverHlsSnapshotAdmits(base, 4, true, 2, 60_000)).toBe(false);
+    expect(api.serverHlsSnapshotAdmits({...base, frontier: 18}, 4, true, 2, 60_000)).toBe(true);
   });
 });

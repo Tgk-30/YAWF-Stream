@@ -18114,6 +18114,35 @@ describe("automatic starvation95 adaptation", () => {
     expect(calls.slice(0, 2).every(([url]) => String(url).includes("index.m3u8"))).toBe(true);
   });
 
+  it("[lead101-rate] preserves the 2x reader through six and twelve second snapshots until eighteen seconds are published", async () => {
+    vi.useFakeTimers();
+    const p = await setup({ snapshots: [6, 12, 18] });
+    const original = p.video.src;
+    p.video.playbackRate = 2;
+    p.episodes(); await settle();
+    p.video.currentTime = 110;
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106);
+    const requests = () => vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("starvation95"));
+    const snapshots = () => requests().filter(([url]) => String(url).includes("index.m3u8"));
+    for (const expectedPolls of [1, 2]) {
+      if (expectedPolls === 2) await advance96(500);
+      expect(requests()).toHaveLength(expectedPolls);
+      expect(snapshots()).toHaveLength(expectedPolls);
+      expect(snapshots().every(([url]) => String(url).includes("index.m3u8"))).toBe(true);
+      expect(document.querySelector("video.player-video")).toBe(p.video);
+      expect(p.video.src).toBe(original);
+      expect(p.video.playbackRate).toBe(2);
+      expect(p.video.pause).not.toHaveBeenCalled();
+      expect(hlsInstances).toHaveLength(0);
+    }
+    await advance96(500);
+    expect(snapshots()).toHaveLength(3);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("starvation95/index.m3u8"));
+    expect(hlsInstances.at(-1)?.config.startPosition).toBeCloseTo(4);
+    expect(p.video.playbackRate).toBe(2);
+  });
+
   it("[lead101] samples the live clock again when the first adequate snapshot is consumed", async () => {
     vi.useFakeTimers(); const p = await setup({ snapshots: [6, 12, 18] }); const original = p.video.src;
     p.episodes(); await settle(); p.video.currentTime = 112.1;

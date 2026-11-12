@@ -1286,5 +1286,5 @@ export function serverHlsSnapshotAdmits(
   if (!Number.isFinite(localStart) || localStart < 0 || !Number.isFinite(rate) || rate <= 0 ||
       !Number.isFinite(ageMs) || ageMs < 0 || localStart >= snapshot.frontier) return false;
   if (snapshot.endlist) return true;
-  return snapshot.frontier - localStart > snapshot.target + (paused ? 0 : ageMs / 1000 * rate);
+  return snapshot.frontier - localStart > snapshot.target * rate + (paused ? 0 : ageMs / 1000 * rate);
 }
