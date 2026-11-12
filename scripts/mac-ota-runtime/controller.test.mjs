@@ -216,6 +216,23 @@ function assertSettingsCategoryContract(source) {
   assert.doesNotMatch(select, /setValue|typeText|evaluateJavaScript|app\.buttons/);
 }
 
+function assertCompactCheckBoxContract(source) {
+  for (const [start, end] of [
+    ["private func seedCompactDensity(", "private func seedProfileName("],
+    ["private func assertCompactDensity(", "private func assertWatchlist("],
+  ]) {
+    const phase = swiftSection(source, start, end);
+    assert.match(phase, /uniqueExisting\(named\(app\.groups, "Appearance styles"\)/);
+    assert.match(phase, /uniqueHittable\(named\(styles\.checkBoxes, "Apply Compact control style"\)/);
+    assert.doesNotMatch(phase, /named\(app\.buttons, "Apply Compact control style"/);
+  }
+  const seed = swiftSection(source, "private func seedCompactDensity(", "private func seedProfileName(");
+  assert.match(seed, /compact\.click\(\)/);
+  const persisted = swiftSection(source, "private func assertCompactDensity(", "private func assertWatchlist(");
+  assert.match(persisted, /stringValue == "1"/);
+  assert.match(persisted, /XCTAssertTrue\(pressed,/);
+}
+
 function assertStaticTextContract(source) {
   const exact = swiftSection(source, "private func findUniqueStaticText(", "private func uniqueStaticText(");
   assert.match(exact, /for attribute in \["title", "label", "value"\]/);
@@ -275,6 +292,23 @@ test("Swift source follows title-aware AX first-run queries with bounded phase e
 
 test("Swift uses the observed responsive Settings category popup through normal menu UI", async () => {
   assertSettingsCategoryContract(await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8"));
+});
+
+test("Swift Compact preset uses the observed CheckBox inside its unique Appearance styles group", async () => {
+  assertCompactCheckBoxContract(await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8"));
+});
+
+test("Swift Compact role regression rejects seed and persisted-check reverts independently", async () => {
+  const source = await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8");
+  for (const [start, end] of [
+    ["private func seedCompactDensity(", "private func seedProfileName("],
+    ["private func assertCompactDensity(", "private func assertWatchlist("],
+  ]) {
+    const phase = swiftSection(source, start, end);
+    const reverted = source.replace(phase, phase.replace('styles.checkBoxes, "Apply Compact control style"', 'app.buttons, "Apply Compact control style"'));
+    assert.notEqual(reverted, source);
+    assert.throws(() => assertCompactCheckBoxContract(reverted), { name: "AssertionError" }, start);
+  }
 });
 
 test("Swift static text uses exact title then label then value and refuses ambiguity", async () => {

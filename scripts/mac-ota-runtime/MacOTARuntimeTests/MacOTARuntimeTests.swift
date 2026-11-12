@@ -263,7 +263,8 @@ final class MacOTARuntimeTests: XCTestCase {
     private func seedCompactDensity(in app: XCUIApplication) throws {
         try clickUniqueButton("Settings", in: app)
         try selectSettingsCategory("Appearance", in: app)
-        let compact = try uniqueHittable(named(app.buttons, "Apply Compact control style"), label: "Apply Compact control style", timeout: 30)
+        let styles = try uniqueExisting(named(app.groups, "Appearance styles"), label: "Appearance styles group", timeout: 30)
+        let compact = try uniqueHittable(named(styles.checkBoxes, "Apply Compact control style"), label: "Apply Compact control style", timeout: 30)
         compact.click()
         try saveSettingsIfEnabled(in: app)
         try assertCompactDensity(in: app)
@@ -309,7 +310,8 @@ final class MacOTARuntimeTests: XCTestCase {
     private func assertCompactDensity(in app: XCUIApplication) throws {
         try clickUniqueButton("Settings", in: app)
         try selectSettingsCategory("Appearance", in: app)
-        let compact = try uniqueHittable(named(app.buttons, "Apply Compact control style"), label: "Apply Compact control style", timeout: 30)
+        let styles = try uniqueExisting(named(app.groups, "Appearance styles"), label: "Appearance styles group", timeout: 30)
+        let compact = try uniqueHittable(named(styles.checkBoxes, "Apply Compact control style"), label: "Apply Compact control style", timeout: 30)
         let stringValue = (compact.value as? String)?.lowercased()
         let pressed = stringValue == "1" || stringValue == "true" || (compact.value as? NSNumber)?.boolValue == true || compact.isSelected
         XCTAssertTrue(pressed, "Compact density was not selected after the lifecycle transition.")
