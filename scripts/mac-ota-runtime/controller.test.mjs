@@ -5,13 +5,13 @@ import { mkdtemp, mkdir, readFile, realpath, symlink, writeFile } from "node:fs/
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { admitHostedRunner, admitOwnedPath, bundleManifest, loadReceiptAttachment, patchXCTestRun, pathsOverlap, validateReceipt } from "./controller.mjs";
+import { BASELINE, TARGET, validateTargetAttestation, admitHostedRunner, admitOwnedPath, bundleManifest, loadReceiptAttachment, patchXCTestRun, pathsOverlap, validateReceipt } from "./controller.mjs";
 
 const admitted = { CI: "true", GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted", RUNNER_OS: "macOS", RUNNER_ARCH: "ARM64", RUNNER_TEMP: "/Users/runner/work/_temp", HOME: "/Users/runner" };
 const runtime = { platform: "darwin", arch: "arm64", machine: "arm64", type: "Darwin", kernelRelease: "24.6.0", macOSVersion: "15.7.1", username: "runner", homedir: "/Users/runner", homedirRealpath: "/Users/runner", uid: 501, processUid: 501 };
 const receiptFileName = "12345678-1234-1234-1234-1234567890AB.json";
-const testIdentifier = "MacOTARuntimeTests/testPublic96To102ThroughNormalUpdaterUI()";
-const testIdentifierURL = "test://com.apple.xcode/MacOTARuntime/MacOTARuntimeTests/MacOTARuntimeTests/testPublic96To102ThroughNormalUpdaterUI";
+const testIdentifier = "MacOTARuntimeTests/testPublic96To103ThroughNormalUpdaterUI()";
+const testIdentifierURL = "test://com.apple.xcode/MacOTARuntime/MacOTARuntimeTests/MacOTARuntimeTests/testPublic96To103ThroughNormalUpdaterUI";
 
 async function makeAttachmentFixture() {
   const runnerTemp = await realpath(await mkdtemp(path.join(os.tmpdir(), "mac-ota-attachment-")));
@@ -272,7 +272,7 @@ function assertStaticTextContract(source) {
 }
 
 function assertInitialAttributeProbe(source) {
-  const flow = swiftSection(source, "func testPublic96To102ThroughNormalUpdaterUI()", "private func dismissInitialWelcome(");
+  const flow = swiftSection(source, "func testPublic96To103ThroughNormalUpdaterUI()", "private func dismissInitialWelcome(");
   assert.ok(flow.indexOf("captureInitialPublicAttributes(in: activeApp)") >= 0);
   assert.ok(flow.indexOf("captureInitialPublicAttributes(in: activeApp)") < flow.indexOf("try dismissInitialWelcome(in: activeApp)"));
   const probe = swiftSection(source, "private func captureInitialPublicAttributes(", "private func uniqueHittable(");
@@ -455,7 +455,7 @@ test("receipt requires an exact relaunch, path, state, and normal quit", () => {
   const receipt = {
     appPath: expected.appPath, beforePID: 10, afterPID: 11,
     beforeExecutablePath: expected.executablePath, afterExecutablePath: expected.executablePath,
-    beforeVersion: "2.3.96", afterVersion: "2.3.102", profileName: "OTA Runner",
+    beforeVersion: "2.3.96", afterVersion: "2.3.103", profileName: "OTA Runner",
     density: "Compact", watchlistTitle: "Inception", normalQuitObserved: true,
     preInstallReopenUsed: false,
   };
@@ -475,35 +475,35 @@ const noticeHostCases = String.raw`
         func node(_ role: String, title: String = "", label: String = "", value: String? = nil, frame: CGRect = CGRect(x: 721, y: 616, width: 60, height: 16), children: [NoticeNode] = []) -> NoticeNode {
             NoticeNode(role: role, title: title, label: label, value: value, frame: frame, children: children)
         }
-        func parts(_ version: String = "2.3.102") -> [NoticeNode] { [node("staticText", value: "Update v"), node("staticText", value: version), node("staticText", value: " available")] }
+        func parts(_ version: String = "2.3.103") -> [NoticeNode] { [node("staticText", value: "Update v"), node("staticText", value: version), node("staticText", value: " available")] }
         func buttons() -> [NoticeNode] { [node("button", title: "Install", label: "Install", frame: CGRect(x: 884, y: 619, width: 67, height: 45)), node("button", title: "Dismiss update notification", label: "Dismiss update notification", frame: CGRect(x: 955, y: 627, width: 28, height: 29))] }
         func group(_ children: [NoticeNode], frame: CGRect? = nil) -> NoticeNode { node("group", frame: frame ?? groupFrame, children: children) }
         func app(_ groups: [NoticeNode]) -> NoticeNode { node("application", frame: windowFrame, children: [node("window", frame: windowFrame, children: groups)]) }
         func check(_ condition: Bool) { if !condition { fatalError("Notice fixture assertion: \(name)") } }
         let valid = group(parts() + buttons())
         switch name {
-        case "valid-split": check(try updateNoticeWitness(app([valid]), expectedVersion: "2.3.102") != nil)
+        case "valid-split": check(try updateNoticeWitness(app([valid]), expectedVersion: "2.3.103") != nil)
         case "same-attribute-node-once":
-            let texts = [node("staticText", title: "Update v", label: "Update v", value: "Update v"), node("staticText", title: "2.3.102", label: "2.3.102", value: "2.3.102"), node("staticText", title: " available", label: " available", value: " available")]
-            check(try updateNoticeWitness(app([group(texts + buttons())]), expectedVersion: "2.3.102") != nil)
-        case "altered-version": check(try updateNoticeWitness(app([group(parts("2.3.101") + buttons())]), expectedVersion: "2.3.102") == nil)
-        case "missing-part": check(try updateNoticeWitness(app([group(Array(parts().prefix(2)) + buttons())]), expectedVersion: "2.3.102") == nil)
+            let texts = [node("staticText", title: "Update v", label: "Update v", value: "Update v"), node("staticText", title: "2.3.103", label: "2.3.103", value: "2.3.103"), node("staticText", title: " available", label: " available", value: " available")]
+            check(try updateNoticeWitness(app([group(texts + buttons())]), expectedVersion: "2.3.103") != nil)
+        case "altered-version": check(try updateNoticeWitness(app([group(parts("2.3.101") + buttons())]), expectedVersion: "2.3.103") == nil)
+        case "missing-part": check(try updateNoticeWitness(app([group(Array(parts().prefix(2)) + buttons())]), expectedVersion: "2.3.103") == nil)
         case "unscoped-group":
             let p = parts(); let inner = group([p[1],p[2]], frame: CGRect(x: 710, y: 610, width: 160, height: 30))
-            check(try updateNoticeWitness(app([group([p[0],inner] + buttons())]), expectedVersion: "2.3.102") == nil)
+            check(try updateNoticeWitness(app([group([p[0],inner] + buttons())]), expectedVersion: "2.3.103") == nil)
         case "ambiguous-group":
-            do { _ = try updateNoticeWitness(app([valid, valid]), expectedVersion: "2.3.102"); fatalError("Accepted ambiguous notice") }
+            do { _ = try updateNoticeWitness(app([valid, valid]), expectedVersion: "2.3.103"); fatalError("Accepted ambiguous notice") }
             catch NoticeWitnessError.ambiguousNotice { }
-        case "duplicated-part": check(try updateNoticeWitness(app([group(parts() + [parts()[1]] + buttons())]), expectedVersion: "2.3.102") == nil)
-        case "same-node-multiple-parts": check(try updateNoticeWitness(app([group([node("staticText", title: "Update v", label: "2.3.102", value: " available")] + buttons())]), expectedVersion: "2.3.102") == nil)
-        case "duplicated-install": check(try updateNoticeWitness(app([group(parts() + buttons() + [buttons()[0]])]), expectedVersion: "2.3.102") == nil)
-        case "outside-window": check(try updateNoticeWitness(app([group(parts()+buttons(), frame:CGRect(x:660,y:601,width:400,height:81))]), expectedVersion:"2.3.102") == nil)
-        case "zero-button": check(try updateNoticeWitness(app([group(parts()+[node("button",title:"Install",frame:.zero),buttons()[1]])]), expectedVersion:"2.3.102") == nil)
+        case "duplicated-part": check(try updateNoticeWitness(app([group(parts() + [parts()[1]] + buttons())]), expectedVersion: "2.3.103") == nil)
+        case "same-node-multiple-parts": check(try updateNoticeWitness(app([group([node("staticText", title: "Update v", label: "2.3.103", value: " available")] + buttons())]), expectedVersion: "2.3.103") == nil)
+        case "duplicated-install": check(try updateNoticeWitness(app([group(parts() + buttons() + [buttons()[0]])]), expectedVersion: "2.3.103") == nil)
+        case "outside-window": check(try updateNoticeWitness(app([group(parts()+buttons(), frame:CGRect(x:660,y:601,width:400,height:81))]), expectedVersion:"2.3.103") == nil)
+        case "zero-button": check(try updateNoticeWitness(app([group(parts()+[node("button",title:"Install",frame:.zero),buttons()[1]])]), expectedVersion:"2.3.103") == nil)
         case "depth-bound":
             var deep = valid; for _ in 0..<33 { deep = node("other",children:[deep]) }
-            do { _ = try updateNoticeWitness(app([deep]), expectedVersion:"2.3.102"); fatalError("Accepted depth overflow") } catch NoticeWitnessError.bounds { }
+            do { _ = try updateNoticeWitness(app([deep]), expectedVersion:"2.3.103"); fatalError("Accepted depth overflow") } catch NoticeWitnessError.bounds { }
         case "node-bound":
-            do { _ = try updateNoticeWitness(app([valid]+Array(repeating:node("other"),count:1025)),expectedVersion:"2.3.102");fatalError("Accepted node overflow") } catch NoticeWitnessError.bounds { }
+            do { _ = try updateNoticeWitness(app([valid]+Array(repeating:node("other"),count:1025)),expectedVersion:"2.3.103");fatalError("Accepted node overflow") } catch NoticeWitnessError.bounds { }
         default: fatalError("Unknown notice fixture")
         }
     }
@@ -565,19 +565,19 @@ func version(_ value: Any) throws { try put(["CFBundleIdentifier": "com.yawf.hos
 try version("2.3.96")
 if kind == "replacement" {
     guard try bundleVersion(app) == "2.3.96" else { fatalError("initial version") }
-    try version("2.3.102")
+    try version("2.3.103")
     let disk = try PropertyListSerialization.propertyList(from: Data(contentsOf: info), options: [], format: nil) as! [String: Any]
-    guard disk["CFBundleShortVersionString"] as? String == "2.3.102" else { fatalError("disk fixture") }
-    guard try bundleVersion(app) == "2.3.102" else { fatalError("STALE_BUNDLE_VERSION") }
-    print("replacement96to102")
+    guard disk["CFBundleShortVersionString"] as? String == "2.3.103" else { fatalError("disk fixture") }
+    guard try bundleVersion(app) == "2.3.103" else { fatalError("STALE_BUNDLE_VERSION") }
+    print("replacement96to103")
 } else {
     switch kind {
     case "oversize": try Data(repeating: 32, count: 64_001).write(to: info)
-    case "array": try put(["2.3.102"])
+    case "array": try put(["2.3.103"])
     case "number": try version(102)
     case "malformed": try Data("not a plist".utf8).write(to: info)
     case "missing-version": try put(["CFBundleIdentifier": "com.yawf.host.version"])
-    case "invalid-version": try version("2.3.102 extra")
+    case "invalid-version": try version("2.3.103 extra")
     case "missing-file": try FileManager.default.removeItem(at: info)
     case "symlink-file":
         let elsewhere = root.appendingPathComponent("elsewhere.plist")
@@ -606,7 +606,7 @@ if kind == "replacement" {
   const executable = await compile(reader, "uncached-reader");
   for (const kind of ["replacement", "oversize", "array", "number", "malformed", "missing-version", "invalid-version", "missing-file", "symlink-file", "symlink-contents"]) {
     const result = await execute(executable, kind);
-    assert.match(result.stdout, new RegExp(kind === "replacement" ? "replacement96to102" : "refused-" + kind));
+    assert.match(result.stdout, new RegExp(kind === "replacement" ? "replacement96to103" : "refused-" + kind));
   }
   const oldReader = `func bundleVersion(_ url: URL) throws -> String {
     let bundle = try XCTUnwrap(Bundle(url: url))
@@ -614,4 +614,120 @@ if kind == "replacement" {
   }\n`;
   const reverted = await compile(oldReader, "original-bundle-reader");
   await assert.rejects(execute(reverted, "replacement"), error => /STALE_BUNDLE_VERSION/.test(error.stderr));
+});
+
+function targetProof() {
+  return [{ verificationResult: {
+    mediaType: "application/vnd.dev.sigstore.verificationresult+json;version=0.1",
+    verifiedIdentity: { runnerEnvironment: "github-hosted" },
+    statement: {
+      _type: "https://in-toto.io/Statement/v1",
+      subject: [{ name: "YAWF.Stream_aarch64.app.tar.gz", digest: { sha256: "14b2d959277782f7defb3d934e7dc9e4f82b6b60fbe6951ca9625c840b5c9ec2" } }],
+      predicateType: "https://slsa.dev/provenance/v1",
+      predicate: {
+        buildDefinition: {
+          buildType: "https://actions.github.io/buildtypes/workflow/v1",
+          externalParameters: { workflow: { repository: "https://github.com/Tgk-30/YAWF-Stream", path: ".github/workflows/web-release.yml", ref: "refs/tags/v2.3.103-web" } },
+          internalParameters: { github: { runner_environment: "github-hosted" } },
+          resolvedDependencies: [{ uri: "git+https://github.com/Tgk-30/YAWF-Stream@refs/tags/v2.3.103-web", digest: { gitCommit: "6463c35757b69a4143386497c755648259d25e7f" } }],
+        },
+        runDetails: { builder: { id: "https://github.com/Tgk-30/YAWF-Stream/.github/workflows/web-release.yml@refs/tags/v2.3.103-web" } },
+      },
+    },
+  } }];
+}
+
+test("public103 qualification pins exact shipping bytes and preserves public96 baseline", () => {
+  assert.equal(BASELINE.version, "2.3.96");
+  assert.equal(BASELINE.archiveSha256, "32d1b9041c0ddc5ef9201edc9420028bb764be5aa6046071164d6b646ca89901");
+  assert.equal(BASELINE.archiveSize, 95584873);
+  assert.equal(BASELINE.targetVersion, "2.3.103");
+  assert.equal(TARGET.archiveSha256, "14b2d959277782f7defb3d934e7dc9e4f82b6b60fbe6951ca9625c840b5c9ec2");
+  assert.equal(TARGET.archiveSize, 95577725);
+  assert.equal(TARGET.source, "6463c35757b69a4143386497c755648259d25e7f");
+  assert.doesNotThrow(() => validateTargetAttestation(targetProof()));
+});
+
+const proofMutations = {
+  empty: () => [],
+  duplicateResult: proof => [...proof, ...proof],
+  unverifiedPayload: proof => [{ attestation: { statement: proof[0].verificationResult.statement } }],
+  wrongFormat: proof => { proof[0].verificationResult.mediaType = "unknown"; return proof; },
+  runner: proof => { proof[0].verificationResult.verifiedIdentity.runnerEnvironment = "self-hosted"; return proof; },
+  buildRunner: proof => { proof[0].verificationResult.statement.predicate.buildDefinition.internalParameters.github.runner_environment = "self-hosted"; return proof; },
+  signer: proof => { proof[0].verificationResult.statement.predicate.buildDefinition.externalParameters.workflow.path = ".github/workflows/finalize-desktop102.yml"; return proof; },
+  ref: proof => { proof[0].verificationResult.statement.predicate.buildDefinition.externalParameters.workflow.ref = "refs/heads/main"; return proof; },
+  repository: proof => { proof[0].verificationResult.statement.predicate.buildDefinition.externalParameters.workflow.repository += "-other"; return proof; },
+  builder: proof => { proof[0].verificationResult.statement.predicate.runDetails.builder.id += "-other"; return proof; },
+  source: proof => { proof[0].verificationResult.statement.predicate.buildDefinition.resolvedDependencies[0].digest.gitCommit = "0".repeat(40); return proof; },
+  dependencyURI: proof => { proof[0].verificationResult.statement.predicate.buildDefinition.resolvedDependencies[0].uri += "-other"; return proof; },
+  emptySubject: proof => { proof[0].verificationResult.statement.subject = []; return proof; },
+  missingSubject: proof => { delete proof[0].verificationResult.statement.subject; return proof; },
+  duplicateSubject: proof => { proof[0].verificationResult.statement.subject.push(structuredClone(proof[0].verificationResult.statement.subject[0])); return proof; },
+  subjectName: proof => { proof[0].verificationResult.statement.subject[0].name = "YAWF.Stream_x64.app.tar.gz"; return proof; },
+  digest: proof => { proof[0].verificationResult.statement.subject[0].digest.sha256 = "0".repeat(64); return proof; },
+};
+for (const [name, mutate] of Object.entries(proofMutations)) {
+  test(`public103 verified attestation refuses ${name}`, () => {
+    assert.throws(() => validateTargetAttestation(mutate(targetProof())));
+  });
+}
+
+function assertPublic103Workflow(workflow, controller, swift) {
+  assert.match(workflow, /releases\/download\/v2\.3\.103-web\/YAWF\.Stream_aarch64\.app\.tar\.gz/);
+  assert.match(workflow, /14b2d959277782f7defb3d934e7dc9e4f82b6b60fbe6951ca9625c840b5c9ec2/);
+  assert.match(workflow, /= 95577725/);
+  assert.match(workflow, /--signer-workflow Tgk-30\/YAWF-Stream\/\.github\/workflows\/web-release\.yml/);
+  assert.match(workflow, /--signer-digest 6463c35757b69a4143386497c755648259d25e7f/);
+  assert.match(workflow, /controller\.mjs" verify-target/);
+  assert.ok(workflow.indexOf('controller.mjs" verify-target') < workflow.indexOf("tar -xzf YAWF.Stream_2.3.103"));
+  assert.match(workflow, /--targetAttestation "\$RUNNER_TEMP\/downloads\/attestation103\.json"/);
+  assert.match(controller, /async function execute\(options\) \{\n  await verifyTarget\(options\);/);
+  assert.match(controller, /info\.size !== TARGET\.archiveSize \|\| await sha256\(archive\) !== TARGET\.archiveSha256/);
+  assert.match(swift, /func testPublic96To103ThroughNormalUpdaterUI\(\)/);
+  assert.match(swift, /expectedAfterVersion == "2\.3\.103"/);
+  assert.match(swift, /\/Users\/runner\/work\/_temp\/mac-ota103/);
+}
+
+test("public103 workflow binds verified shipping source before extraction and UI", async () => {
+  const workflow = await readFile(new URL("../../.github/workflows/macos-public-ota103.yml", import.meta.url), "utf8");
+  const controller = await readFile(new URL("./controller.mjs", import.meta.url), "utf8");
+  const swift = await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8");
+  assertPublic103Workflow(workflow, controller, swift);
+  for (const [before, after] of [
+    ["--signer-workflow Tgk-30/YAWF-Stream/.github/workflows/web-release.yml", "--signer-workflow other.yml"],
+    ["--signer-digest 6463c35757b69a4143386497c755648259d25e7f", "--signer-digest wrong"],
+    ['controller.mjs" verify-target', 'controller.mjs" prepare'],
+    ["= 95577725", "= 95584951"],
+  ]) {
+    assert.ok(workflow.includes(before));
+    assert.throws(() => assertPublic103Workflow(workflow.replace(before, after), controller, swift), before);
+  }
+  assert.throws(() => assertPublic103Workflow(workflow, controller.replace("  await verifyTarget(options);", ""), swift));
+  assert.throws(() => assertPublic103Workflow(workflow, controller.replace("info.size !== TARGET.archiveSize || await sha256(archive) !== TARGET.archiveSha256", "false"), swift));
+  assert.throws(() => assertPublic103Workflow(workflow, controller, swift.replace('expectedAfterVersion == "2.3.103"', 'expectedAfterVersion == "2.3.102"')));
+});
+
+test("public103 attestation admission independently kills source, signer, runner and subject guard reverts", () => {
+  const actual = validateTargetAttestation.toString();
+  const controls = [
+    ["duplicateResult", "document.length !== 1", "document.length < 1"],
+    ["runner", 'result?.verifiedIdentity?.runnerEnvironment !== "github-hosted"', "false"],
+    ["buildRunner", 'definition?.internalParameters?.github?.runner_environment !== "github-hosted"', "false"],
+    ["signer", "workflow?.path !== TARGET.workflow", "false"],
+    ["ref", "workflow?.ref !== TARGET.ref", "false"],
+    ["repository", "workflow?.repository !== TARGET.repository", "false"],
+    ["builder", "statement?.predicate?.runDetails?.builder?.id !== `${TARGET.repository}/${TARGET.workflow}@${TARGET.ref}`", "false"],
+    ["source", "dependencies[0]?.digest?.gitCommit !== TARGET.source", "false"],
+    ["dependencyURI", "dependencies[0]?.uri !== `git+${TARGET.repository}@${TARGET.ref}`", "false"],
+    ["duplicateSubject", "matches.length !== 1", "matches.length < 1"],
+    ["digest", "matches[0]?.digest?.sha256 !== TARGET.archiveSha256", "false"],
+  ];
+  for (const [name, before, after] of controls) {
+    assert.equal(actual.split(before).length, 2, name);
+    const mutant = new Function("TARGET", "fail", `return (${actual.replace(before, after)});`)(TARGET, message => { throw new Error(message); });
+    const bad = proofMutations[name](targetProof());
+    assert.throws(() => validateTargetAttestation(bad), name);
+    assert.doesNotThrow(() => mutant(bad), `Causal guard removal must expose ${name}`);
+  }
 });

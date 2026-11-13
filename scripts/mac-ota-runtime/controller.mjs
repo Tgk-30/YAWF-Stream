@@ -13,17 +13,62 @@ export const BASELINE = Object.freeze({
   archiveSize: 95584873,
   bundleIdentifier: "com.tgk30.debridstreamer",
   version: "2.3.96",
-  targetVersion: "2.3.102",
+  targetVersion: "2.3.103",
+});
+export const TARGET = Object.freeze({
+  archiveSha256: "14b2d959277782f7defb3d934e7dc9e4f82b6b60fbe6951ca9625c840b5c9ec2",
+  archiveSize: 95577725,
+  subjectName: "YAWF.Stream_aarch64.app.tar.gz",
+  source: "6463c35757b69a4143386497c755648259d25e7f",
+  repository: "https://github.com/Tgk-30/YAWF-Stream",
+  workflow: ".github/workflows/web-release.yml",
+  ref: "refs/tags/v2.3.103-web",
 });
 export const RECEIPT_ATTACHMENT = Object.freeze({
   name: "MacOTARuntimeReceipt",
-  testIdentifier: "MacOTARuntimeTests/testPublic96To102ThroughNormalUpdaterUI()",
-  testIdentifierURL: "test://com.apple.xcode/MacOTARuntime/MacOTARuntimeTests/MacOTARuntimeTests/testPublic96To102ThroughNormalUpdaterUI",
+  testIdentifier: "MacOTARuntimeTests/testPublic96To103ThroughNormalUpdaterUI()",
+  testIdentifierURL: "test://com.apple.xcode/MacOTARuntime/MacOTARuntimeTests/MacOTARuntimeTests/testPublic96To103ThroughNormalUpdaterUI",
 });
 const receiptSuggestedNamePattern = /^MacOTARuntimeReceipt_0_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/i;
 
 const fail = (message) => { throw new Error(message); };
 const sha256 = async (file) => createHash("sha256").update(await readFile(file)).digest("hex");
+
+// Consume gh's VERIFIED statement, never an unverified DSSE payload.
+export function validateTargetAttestation(document) {
+  if (!Array.isArray(document) || document.length !== 1) fail("one verified target attestation required");
+  const result = document[0]?.verificationResult;
+  const statement = result?.statement;
+  const definition = statement?.predicate?.buildDefinition;
+  const workflow = definition?.externalParameters?.workflow;
+  const dependencies = definition?.resolvedDependencies;
+  const subjects = statement?.subject;
+  if (result?.mediaType !== "application/vnd.dev.sigstore.verificationresult+json;version=0.1" ||
+      result?.verifiedIdentity?.runnerEnvironment !== "github-hosted" ||
+      statement?._type !== "https://in-toto.io/Statement/v1" ||
+      statement?.predicateType !== "https://slsa.dev/provenance/v1" ||
+      definition?.buildType !== "https://actions.github.io/buildtypes/workflow/v1" ||
+      definition?.internalParameters?.github?.runner_environment !== "github-hosted") fail("verified hosted SLSA target statement required");
+  if (workflow?.repository !== TARGET.repository || workflow?.path !== TARGET.workflow || workflow?.ref !== TARGET.ref ||
+      statement?.predicate?.runDetails?.builder?.id !== `${TARGET.repository}/${TARGET.workflow}@${TARGET.ref}`) fail("target signer workflow/ref mismatch");
+  if (!Array.isArray(dependencies) || dependencies.length !== 1 ||
+      dependencies[0]?.uri !== `git+${TARGET.repository}@${TARGET.ref}` ||
+      dependencies[0]?.digest?.gitCommit !== TARGET.source) fail("target source dependency mismatch");
+  if (!Array.isArray(subjects) || subjects.length < 1 || subjects.length > 64) fail("nonempty bounded target subjects required");
+  const matches = subjects.filter(subject => subject?.name === TARGET.subjectName);
+  if (matches.length !== 1 || matches[0]?.digest?.sha256 !== TARGET.archiveSha256) fail("exact target subject digest required");
+}
+
+async function verifyTarget(options) {
+  if (!options.targetArchive || !options.targetAttestation) fail("exact target archive and verified attestation required");
+  const archive = await admitOwnedPath(options.targetArchive, process.env.RUNNER_TEMP);
+  const attestation = await admitOwnedPath(options.targetAttestation, process.env.RUNNER_TEMP);
+  const info = await lstat(archive);
+  if (!info.isFile() || info.size !== TARGET.archiveSize || await sha256(archive) !== TARGET.archiveSha256) fail("target archive hash/size mismatch");
+  const proof = await lstat(attestation);
+  if (!proof.isFile() || proof.size < 1 || proof.size > 2 * 1024 * 1024) fail("target attestation file bounds invalid");
+  validateTargetAttestation(JSON.parse(await readFile(attestation, "utf8")));
+}
 
 export function readRuntimeFacts() {
   const account = os.userInfo();
@@ -217,7 +262,7 @@ async function admitBundle(appPath, version) {
 }
 
 async function prepare(options) {
-  if (options.runRoot !== path.join(process.env.RUNNER_TEMP, "mac-ota102")) fail("prepare requires the fixed private run root");
+  if (options.runRoot !== path.join(process.env.RUNNER_TEMP, "mac-ota103")) fail("prepare requires the fixed private run root");
   const archive = await admitOwnedPath(options.archive96, process.env.RUNNER_TEMP);
   const archiveInfo = await stat(archive);
   if (archiveInfo.size !== BASELINE.archiveSize || await sha256(archive) !== BASELINE.archiveSha256) fail("public v2.3.96 archive identity mismatch");
@@ -244,15 +289,16 @@ async function prepare(options) {
 }
 
 async function execute(options) {
-  if (!options.runRoot || !options.xctestrun || !options.expected102App) fail("execute requires --runRoot, --xctestrun, and --expected102App");
-  if (options.runRoot !== path.join(process.env.RUNNER_TEMP, "mac-ota102")) fail("execute requires the fixed private run root");
+  await verifyTarget(options);
+  if (!options.runRoot || !options.xctestrun || !options.expected103App) fail("execute requires --runRoot, --xctestrun, and --expected103App");
+  if (options.runRoot !== path.join(process.env.RUNNER_TEMP, "mac-ota103")) fail("execute requires the fixed private run root");
   const runRoot = await admitOwnedPath(options.runRoot, process.env.RUNNER_TEMP);
   const prepared = JSON.parse(await readFile(path.join(runRoot, "prepared.json"), "utf8"));
   const admittedPreparedPath = await admitOwnedPath(prepared.appPath, process.env.RUNNER_TEMP);
   if (admittedPreparedPath !== prepared.appPath) fail("prepared app path changed");
   await admitBundle(prepared.appPath, BASELINE.version);
   if (await bundleManifest(prepared.appPath) !== prepared.bundleManifestSha256) fail("baseline bundle changed after preparation");
-  const reference = await admitOwnedPath(options.expected102App, process.env.RUNNER_TEMP);
+  const reference = await admitOwnedPath(options.expected103App, process.env.RUNNER_TEMP);
   if (pathsOverlap(prepared.appPath, reference)) fail("reference and candidate app trees overlap");
   await admitBundle(reference, BASELINE.targetVersion);
   const expectedDigest = await bundleManifest(reference);
@@ -284,7 +330,7 @@ async function execute(options) {
     "-xctestrun", patchedPath,
     "-destination", "platform=macOS,arch=arm64",
     "-parallel-testing-enabled", "NO",
-    "-only-testing:MacOTARuntimeTests/MacOTARuntimeTests/testPublic96To102ThroughNormalUpdaterUI",
+    "-only-testing:MacOTARuntimeTests/MacOTARuntimeTests/testPublic96To103ThroughNormalUpdaterUI",
     "-resultBundlePath", resultBundlePath,
   ], { timeout: 25 * 60 * 1000 });
 
@@ -301,8 +347,8 @@ async function execute(options) {
   await admitBundle(prepared.appPath, BASELINE.targetVersion);
   await admitBundle(reference, BASELINE.targetVersion);
   const [actualDigest, finalReferenceDigest] = await Promise.all([bundleManifest(prepared.appPath), bundleManifest(reference)]);
-  if (finalReferenceDigest !== expectedDigest) fail("independent public v2.3.102 reference changed during the UI test");
-  if (actualDigest !== expectedDigest) fail("OTA-installed bundle differs from the independently downloaded public v2.3.102 bundle");
+  if (finalReferenceDigest !== expectedDigest) fail("independent public v2.3.103 reference changed during the UI test");
+  if (actualDigest !== expectedDigest) fail("OTA-installed bundle differs from the independently downloaded public v2.3.103 bundle");
   receipt.bundleManifestSha256 = actualDigest;
   receipt.receiptAttachmentSha256 = attachmentReceipt.sha256;
   receipt.receiptAttachmentExportedFileName = attachmentReceipt.exportedFileName;
@@ -322,9 +368,10 @@ function parseArgs(argv) {
 async function main() {
   admitHostedRunner(process.env);
   const { command, options } = parseArgs(process.argv.slice(2));
+  if (command === "verify-target") return verifyTarget(options);
   if (command === "prepare") return prepare(options);
   if (command === "execute") return execute(options);
-  fail("usage: controller.mjs prepare|execute ...");
+  fail("usage: controller.mjs verify-target|prepare|execute ...");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((error) => { console.error(error.message); process.exitCode = 1; });
