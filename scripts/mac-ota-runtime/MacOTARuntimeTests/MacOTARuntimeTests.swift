@@ -108,7 +108,7 @@ final class MacOTARuntimeTests: XCTestCase {
     }
 
     @MainActor
-    func testPublic96To102ThroughNormalUpdaterUI() throws {
+    func testPublic96To103ThroughNormalUpdaterUI() throws {
         let config = try loadConfiguration()
         let configuredAppURL = URL(fileURLWithPath: config.appPath, isDirectory: true).standardizedFileURL
         let appURL = configuredAppURL.resolvingSymlinksInPath().standardizedFileURL
@@ -579,7 +579,7 @@ final class MacOTARuntimeTests: XCTestCase {
     }
 
     private func loadConfiguration() throws -> Configuration {
-        let root = "/Users/runner/work/_temp/mac-ota102"
+        let root = "/Users/runner/work/_temp/mac-ota103"
         let expectedConfigPath = "\(root)/test-config.json"
         let expectedAppPath = "\(root)/private-app/YAWF Stream.app"
         let configuredPath = try XCTUnwrap(ProcessInfo.processInfo.environment["YAWF_OTA_CONFIG_PATH"])
@@ -593,7 +593,7 @@ final class MacOTARuntimeTests: XCTestCase {
         let configuration = try JSONDecoder().decode(Configuration.self, from: Data(contentsOf: configuredURL))
         guard configuration.appPath == expectedAppPath,
               configuration.expectedBeforeVersion == "2.3.96",
-              configuration.expectedAfterVersion == "2.3.102" else {
+              configuration.expectedAfterVersion == "2.3.103" else {
             throw AdmissionError.refused("The lifecycle configuration does not match the fixed public OTA scenario.")
         }
         return configuration

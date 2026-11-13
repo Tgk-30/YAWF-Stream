@@ -1,6 +1,6 @@
 # macOS public updater lifecycle qualification
 
-This is a narrow, destructive XCUITest for a disposable GitHub-hosted `macos-15` arm64 runner. It launches an exact private copy of the signed public 2.3.96 app, uses only its visible UI and embedded public updater feed, installs 2.3.102, observes the updater-owned relaunch at the same private path, verifies ordinary user state survived, then quits through Command-Q.
+This is a narrow, destructive XCUITest for a disposable GitHub-hosted `macos-15` arm64 runner. It launches an exact private copy of the signed public 2.3.96 app, uses only its visible UI and embedded public updater feed, installs 2.3.103, observes the updater-owned relaunch at the same private path, verifies ordinary user state survived, then quits through Command-Q.
 
 Never execute the UI test on a real user's login or on a self-hosted runner. Local use is limited to host unit tests, project parsing, and `build-for-testing`. The controller and XCTest independently require the GitHub markers plus actual Darwin arm64, macOS 15, Darwin 24, the `runner` account returned by the operating system, its physical `/Users/runner` home, and the fixed physical `$RUNNER_TEMP`. Environment variables alone cannot admit execution. XCTest may replace its sandboxed `HOME`, so Swift verifies the current account with `getpwuid(getuid())` and does not trust or require the `HOME` environment value.
 
@@ -28,8 +28,8 @@ Host verification: 37 tests pass, including all 32 unchanged controller/security
 ## Root-owned workflow recipe
 
 1. Use one `macos-15` arm64 GitHub-hosted job with a 30 minute job timeout. Do not reuse a self-hosted runner or run this job under a local account.
-2. Download the exact public 2.3.96 archive and independently obtain the public 2.3.102 macOS 11 archive. Verify their published hashes, sizes, GitHub attestations, strict code signatures, and notarization before this harness.
-3. Extract the 2.3.102 archive beneath `$RUNNER_TEMP/reference102/YAWF Stream.app`. Keep every input and derived output beneath `$RUNNER_TEMP`. The controller admits and hashes this disjoint reference before UI launch, rejects overlap with the private candidate, and verifies that the reference did not change during the test.
+2. Download the exact public 2.3.96 archive and independently obtain the public 2.3.103 macOS 11 archive. Verify their published hashes, sizes, GitHub attestations, strict code signatures, and notarization before this harness.
+3. Extract the 2.3.103 archive beneath `$RUNNER_TEMP/reference103/YAWF Stream.app`. Keep every input and derived output beneath `$RUNNER_TEMP`. The controller admits and hashes this disjoint reference before UI launch, rejects overlap with the private candidate, and verifies that the reference did not change during the test.
 4. Run `node --test scripts/mac-ota-runtime/controller.test.mjs`.
 5. Run the controller's `prepare` command. It rechecks the pinned 2.3.96 archive identity, creates a new private app directory, and verifies the private app before launch:
 
@@ -37,7 +37,7 @@ Host verification: 37 tests pass, including all 32 unchanged controller/security
    export RUNNER_ENVIRONMENT=github-hosted
    node scripts/mac-ota-runtime/controller.mjs prepare \
      --archive96 "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.96_aarch64.app.tar.gz" \
-     --runRoot "$RUNNER_TEMP/mac-ota102"
+     --runRoot "$RUNNER_TEMP/mac-ota103"
    ```
 
 6. Compile only the ad hoc test helper. This does not build or modify either candidate app:
@@ -57,16 +57,18 @@ Host verification: 37 tests pass, including all 32 unchanged controller/security
    XCTESTRUN="$(find "$RUNNER_TEMP/mac-ota-derived/Build/Products" -name '*.xctestrun' -type f -print -quit)"
    test -n "$XCTESTRUN"
    node scripts/mac-ota-runtime/controller.mjs execute \
-     --runRoot "$RUNNER_TEMP/mac-ota102" \
+     --runRoot "$RUNNER_TEMP/mac-ota103" \
      --xctestrun "$XCTESTRUN" \
-     --expected102App "$RUNNER_TEMP/reference102/YAWF Stream.app"
+     --targetArchive "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.103_aarch64.app.tar.gz" \
+     --targetAttestation "$RUNNER_TEMP/downloads/attestation103.json" \
+     --expected103App "$RUNNER_TEMP/reference103/YAWF Stream.app"
    ```
 
 8. The sandboxed XCTest runner emits the lifecycle receipt as the keep-always attachment named `MacOTARuntimeReceipt`. Xcode 26.3 exports that name as `MacOTARuntimeReceipt_0_<UUID>.json`; the controller requires this anchored SDK naming form rather than guessing a filename. It exports attachments for the exact testcase, requires one exact manifest row and one exact named bounded JSON file, validates the receipt, records its SHA-256 in `verified.json`, and never asks XCTest to write outside its sandbox. Six fixed normal-UI boundaries also retain a window screenshot and an accessibility hierarchy capped at 64,000 characters. These fresh Quick setup screens contain no credentials. Upload the `.xcresult`, `prepared.json`, `receipt-attachments`, and `verified.json` even on failure when present. Never upload browser data, keychains, credentials, or the app's user-data directory.
 
-Success requires all of these observations: exact baseline archive and private path with no symlinked ancestor; no preexisting process with the product bundle identifier; the initial tier Welcome group dismissed through its scoped Skip control; the exact Quick setup semantic card chosen from the persona screen; its privacy and reliability acknowledgement retained; the separate post-setup Welcome tour dismissed normally; Compact density, profile name `OTA Runner`, and fixture title `Inception` added through unique hittable controls; an exact 2.3.102 offer; Install clicked once; installation progress or the old PID exit observed; a different PID relaunched from the same exact path; version 2.3.102; all three state markers persisted; normal Command-Q completed; strict signature and notarization remained valid; and the installed bundle's content manifest matched the independently downloaded public 2.3.102 app. If the offer is no longer visible after seeding, the test permits one normal Command-Q and launch to repeat the normal launch check, and records that branch in its receipt.
+Success requires all of these observations: exact baseline archive and private path with no symlinked ancestor; no preexisting process with the product bundle identifier; the initial tier Welcome group dismissed through its scoped Skip control; the exact Quick setup semantic card chosen from the persona screen; its privacy and reliability acknowledgement retained; the separate post-setup Welcome tour dismissed normally; Compact density, profile name `OTA Runner`, and fixture title `Inception` added through unique hittable controls; an exact 2.3.103 offer; Install clicked once; installation progress or the old PID exit observed; a different PID relaunched from the same exact path; version 2.3.103; all three state markers persisted; normal Command-Q completed; strict signature and notarization remained valid; and the installed bundle's content manifest matched the independently downloaded public 2.3.103 app. If the offer is no longer visible after seeding, the test permits one normal Command-Q and launch to repeat the normal launch check, and records that branch in its receipt.
 
-This proves only one public signed arm64 macOS 15 manual Install lifecycle under a fresh hosted identity. It does not prove automatic installation, weekly cadence, Intel, older macOS versions, an existing user's data, provider authentication, followed-server behavior, or any Android, Windows, Linux, iOS, or server path.
+A fully passing hosted run would qualify only one public signed arm64 macOS 15 manual Install lifecycle under a fresh hosted identity. It does not prove automatic installation, weekly cadence, Intel, older macOS versions, an existing user's data, provider authentication, followed-server behavior, or any Android, Windows, Linux, iOS, or server path.
 
 ## Fourth hosted harness failure and immutable diagnostic snapshot
 
@@ -140,3 +142,16 @@ A pure host reproduction extracted the actual old version helper, created an iso
 The QA helper now reads the admitted nonsymlink app/Contents/Info.plist through a fresh FileHandle, at most 64,001 bytes, requiring a regular file of 1 through 64,000 bytes, matching read length, a property-list dictionary and a bounded string release version. It does not use Bundle's cached info dictionary. The existing exact before/after version expectations, admitted app path, replacement process, isolation, updater relaunch, archive and persisted-state checks are unchanged. There is no delay, retry or version-expectation relaxation.
 
 Host verification compiles the ACTUAL extracted replacement helper. The atomic 96-to-102 disk replacement passes; nine negative fixtures refuse oversized, array-root, numeric-version, malformed, missing-version, invalid-version, missing-file, symlink-file and symlink-Contents inputs. Separately compiling and restoring the exact original Bundle helper causes the replacement case to fail with STALE_BUNDLE_VERSION. These are Foundation/filesystem checks, not native updater qualification. Root owns SDK compilation and any next hosted run.
+
+
+## Public 96-to-103 successor, host-only preparation
+
+The new `.github/workflows/macos-public-ota103.yml` targets the actual public arm64 2.3.103 archive: 95,577,725 bytes, SHA-256 `14b2d959277782f7defb3d934e7dc9e4f82b6b60fbe6951ca9625c840b5c9ec2`, source `6463c35757b69a4143386497c755648259d25e7f`, tag `v2.3.103-web`. The old 102 workflow is retained byte-for-byte as historical input, not retargeted. The shared harness now admits 103 only, so the old workflow is not a supported runnable entrypoint for these new harness bytes. Prior failed 102 runs and their evidence above are not relabeled as 103 runs or passes.
+
+Before extraction, `gh attestation verify` must cryptographically verify the exact archive with the official `web-release.yml` signer and exact source digest. The controller's `verify-target` then rechecks the archive size/hash and consumes only the verified structured SLSA statement (not the raw DSSE payload): one verified result, hosted identity and build runner, exact repository/workflow/tag, exact resolved source dependency and builder, and one exact named archive subject with its matching digest. Execute repeats this admission before any UI. The parser is an additional fail-closed QA identity contract, not an independent cryptographic verifier. Its field contract was checked against root's actual published103 structured attestation. Empty, ambiguous, wrong-source/signer/ref/runner/subject proofs refuse; no fallback to an older target exists.
+
+The signed96 baseline tuple, paste-only fake state seed, visible updater interaction, process isolation and replacement, uncached current-disk version check, exact final public bundle comparison, three persisted states and normal quit guards remain unchanged. No native103 lifecycle is claimed by source, host tests or actionlint. Root alone builds and dispatches the prospective hosted workflow; native AX changes, exact103 offer availability and actual persistence remain runtime uncertainties. The test never builds either product or changes its updater feed.
+
+Final successor host verification: official Node22 ran all65 tests, zero failures/skips, including both extracted Swift host tests. The existing13 notice semantic fixtures/four compiled causal mutants and uncached-version replacement/negative fixtures/original-helper revert remain green. New controls independently expose11 actual attestation-validator guard removals and7 workflow/controller/target-version source reverts. New103 actionlint and the root-retained actual103 structured-statement parser check pass. These remain host/source evidence only.
+
+The first attempted lightweight filter accidentally launched host Swift compiler work during root's separate255 observation. It was stopped, not treated as a passing full suite; observed file timestamps bound compiler activity to at least06:09:39 through06:10:16UTC, with exact descendant stop times unavailable. Root was notified and retained the concurrent-load limitation. The final full65-test run occurred only after root confirmed255 terminal. Local commands created no native103 app/UI/runtime evidence.
