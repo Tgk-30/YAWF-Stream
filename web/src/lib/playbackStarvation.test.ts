@@ -366,3 +366,40 @@ describe("lowerStarvationQuality", () => {
     expect(lowerStarvationQuality(height, offered)).toBe(expected);
   });
 });
+
+describe("shared sustained clock budget107", () => {
+  function hold(policy: PlaybackStarvation, start: number) {
+    policy.sampleClockStall(start, 0, 0, 1, true);
+    policy.sampleClockStall(start + 500, 1, 15, 1, true);
+    for (let at = start + 1000; at <= start + 12500; at += 500) policy.sampleClockStall(at, 1, 15, 1, true);
+    return start + 12500;
+  }
+  it("[clock107-ladder] admits an offered first 360p rung from current 480p without hardcoding attempt order", () => {
+    const policy = new PlaybackStarvation();
+    const at = hold(policy, 0);
+    expect(policy.claimClockStall(at, 1, 15, 1, true, "360p")).toBe(true);
+    policy.adoptFirstAttempt("360p");
+    const next = hold(policy, 20000);
+    expect(policy.claimClockStall(next, 1, 15, 1, true, "360p")).toBe(false);
+    expect(policy.claimClockStall(next, 1, 15, 1, true, "480p")).toBe(false);
+  });
+
+  it("[clock107-budget] shares two attempts and only rearms after adopted first plus fresh progress", () => {
+    const policy = new PlaybackStarvation();
+    let at = hold(policy, 0);
+    expect(policy.claimClockStall(at, 1, 15, 1, true, "auto")).toBe(false);
+    expect(policy.claimClockStall(at, 1, 15, 1, true, "480p")).toBe(true);
+    at = hold(policy, 20000);
+    expect(policy.claimClockStall(at, 1, 15, 1, true, "360p")).toBe(false);
+    policy.adoptFirstAttempt("480p");
+    expect(policy.claimClockStall(at, 1, 15, 1, true, "360p")).toBe(false);
+    at = hold(policy, 40000);
+    expect(policy.claimClockStall(at, 1, 15, 1, true, "360p")).toBe(true);
+    policy.adoptFirstAttempt("360p");
+    at = hold(policy, 60000);
+    expect(policy.claimClockStall(at, 1, 15, 1, true, "360p")).toBe(false);
+    policy.progress(5, true); policy.progress(6, true); policy.waiting(at, 0, true, false);
+    policy.progress(7, true); policy.waiting(at + 1, 0, true, false);
+    expect(policy.claimAttempt(at + 1, true, "360p")).toBe(false);
+  });
+});

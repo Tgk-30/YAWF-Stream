@@ -17972,6 +17972,164 @@ describe("automatic starvation95 adaptation", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
     await settle();
   }
+  const restoreClockProperties107: (() => void)[] = [];
+  afterEach(() => { while (restoreClockProperties107.length) restoreClockProperties107.pop()!(); });
+  async function clockSetup107(options: Parameters<typeof setup>[0] = {}) {
+    vi.useFakeTimers();
+    restoreClockProperties107.push(replaceProperty(document, "visibilityState", "visible"),
+      replaceProperty(document, "fullscreenElement", null));
+    const focus = vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    restoreClockProperties107.push(() => focus.mockRestore());
+    const p = await setup(options);
+    Object.defineProperty(p.video, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_FUTURE_DATA });
+    let frames = 250;
+    Object.defineProperty(p.video, "getVideoPlaybackQuality", { configurable: true,
+      value: () => ({ totalVideoFrames: frames }) });
+    Object.defineProperty(p.video, "webkitDecodedFrameCount", { configurable: true, get: () => frames });
+    const advance = async () => { await advance96(500); frames += 15; p.progress(); await settle(); };
+    p.playing();
+    await advance(); await advance(); await advance();
+    const freeze = async (ms = 12_000) => {
+      for (let elapsed = 0; elapsed < ms; elapsed += 500) {
+        p.setAhead(3 + elapsed / 200); fireEvent.progress(p.video); await advance96(500);
+      }
+    };
+    return { ...p, advance, freeze, frame: () => { frames += 1; } };
+  }
+
+  it.each([false, true])("[clock107-render] real progress then frozen clock/frames with growing ready3 buffer reduces without invented waits (native events %s)", async nativeEvents => {
+    if (nativeEvents) { deviceKindMock.mockReturnValue("ios"); vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably"); }
+    const p = await clockSetup107({ attestedDefaultAudio: 0 });
+    if (nativeEvents) {
+      Object.defineProperty(p.video, "readyState", { configurable: true, value: 2 });
+      p.setAhead(0.033); fireEvent.waiting(p.video);
+      Object.defineProperty(p.video, "readyState", { configurable: true, value: 3 });
+      fireEvent.canPlay(p.video); fireEvent.playing(p.video);
+    }
+    await p.freeze(11_500); expect(p.request).not.toHaveBeenCalled();
+    await p.freeze(500);
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 103);
+    Object.defineProperty(p.video, "videoHeight", { configurable: true, value: 480 });
+    p.video.currentTime = 0;
+    act(() => hlsInstances.at(-1)?.emit("hlsMediaAttached"));
+    fireEvent.loadStart(p.video); fireEvent.loadedMetadata(p.video); fireEvent.loadedData(p.video);
+    fireEvent.seeked(p.video); fireEvent.canPlay(p.video); p.playing();
+    await p.advance(); await p.advance(); await p.advance(); await p.freeze();
+    expect(p.request).toHaveBeenCalledTimes(2);
+    expect(p.request).toHaveBeenLastCalledWith("360p", 106, 0);
+    await p.freeze(20_000); expect(p.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("[clock107-ladder] current native 480p HLS sustained hold chooses first 360p with its audio and absolute handoff", async () => {
+    nativeJapanese95(); deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    const p = await clockSetup107({ compatibility: true, height: 480, audio: true, currentAudio: 1 });
+    expect(hlsInstances).toHaveLength(0);
+    p.video.volume = 0.42; p.video.muted = true; p.video.playbackRate = 1.5;
+    await p.freeze();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("360p", 103, 1);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    expect(p.video.volume).toBeCloseTo(0.42); expect(p.video.muted).toBe(true); expect(p.video.playbackRate).toBe(1.5);
+    await p.freeze(15_000); expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[clock107-render] short holds and continuing clock progress never reduce", async () => {
+    const p = await clockSetup107();
+    for (let cycle = 0; cycle < 3; cycle++) { await p.freeze(11_000); await p.advance(); }
+    expect(p.request).not.toHaveBeenCalled();
+  });
+
+  it("[clock107-render] a late sample cannot turn suspended time into a hold", async () => {
+    const p = await clockSetup107();
+    await p.freeze(11_000);
+    const now = performance.now();
+    const time = vi.spyOn(performance, "now").mockReturnValue(now + 30_000);
+    fireEvent.progress(p.video); time.mockRestore();
+    await p.freeze(15_000); expect(p.request).not.toHaveBeenCalled();
+  });
+
+  it("[clock107-render] advancing native frames prevents swapping a stale reported clock", async () => {
+    const p = await clockSetup107();
+    for (let elapsed = 0; elapsed < 20_000; elapsed += 500) { p.frame(); await p.freeze(500); }
+    expect(p.request).not.toHaveBeenCalled();
+  });
+
+  it.each(["stale", "invalid", "throwing"] as const)("[clock107-render] an advancing native counter wins over a %s browser counter", async browser => {
+    const p = await clockSetup107();
+    Object.defineProperty(p.video, "getVideoPlaybackQuality", { configurable: true, value: () => {
+      if (browser === "throwing") throw new Error("Optional counter unavailable");
+      return { totalVideoFrames: browser === "invalid" ? Number.NaN : 295 };
+    } });
+    await p.advance(); await p.advance();
+    for (let elapsed = 0; elapsed < 20_000; elapsed += 500) { p.frame(); await p.freeze(500); }
+    expect(p.request).not.toHaveBeenCalled();
+  });
+
+  it.each(["paused", "hidden", "pip", "avkit", "controls", "seeking", "blur", "source", "manual"] as const)(
+    "[clock107-render] %s interrupts an almost-earned hold", async reason => {
+      const p = await clockSetup107();
+      await p.freeze(11_000);
+      if (reason === "paused") { p.setPaused(true); fireEvent.pause(p.video); }
+      if (reason === "hidden") { Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" }); fireEvent(document, new Event("visibilitychange")); }
+      if (reason === "pip") fireEvent(p.video, new Event("enterpictureinpicture"));
+      if (reason === "avkit") fireEvent(p.video, new Event("webkitbeginfullscreen"));
+      if (reason === "controls") p.video.controls = true;
+      if (reason === "seeking") { p.setSeeking(true); fireEvent.seeking(p.video); }
+      if (reason === "blur") { vi.mocked(document.hasFocus).mockReturnValue(false); fireEvent(window, new Event("blur")); }
+      if (reason === "source") p.view.rerender(<VideoPlayer {...p.props} sourceRevision={1} />);
+      if (reason === "manual") { fireEvent.pointerMove(p.video); p.settings(); fireEvent.click(screen.getByRole("button", { name: /720p/ })); await settle(); }
+      await p.freeze(15_000);
+      expect(p.request).toHaveBeenCalledTimes(reason === "manual" ? 1 : 0);
+    },
+  );
+
+  it("[clock107-render] ordinary DOM fullscreen remains eligible", async () => {
+    const p = await clockSetup107();
+    Object.defineProperty(document, "fullscreenElement", { configurable: true, value: p.video });
+    await p.freeze(); expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 103);
+  });
+
+  it("[clock107-render] cold audio inventory loads once without bypassing its pending attestation", async () => {
+    nativeJapanese95();
+    const p = await clockSetup107({ lazyAudio: "pending", pending: true });
+    await p.freeze(20_000);
+    expect(p.loadAudioTracks).toHaveBeenCalledTimes(1); expect(p.request).not.toHaveBeenCalled();
+    await act(async () => p.inventory.resolve([{ index: 1, label: "Japanese", language: "jpn", default: true }]));
+    await p.freeze(500);
+    expect(p.loadAudioTracks).toHaveBeenCalledTimes(1); expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([{ fixedDefault: true }, { fixedUrl: true }, { capability: false }])(
+    "[clock107-render] fixed quality or absent capability remains protected %j", async options => {
+      const p = await clockSetup107(options); p.request.mockClear();
+      await p.freeze(20_000); expect(p.request).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["clock", "frames"] as const)("[clock107-render] resumed %s during HTTP preparation cannot replace the now-healthy reader", async resumed => {
+    const p = await clockSetup107({ pending: true });
+    const original = p.video.src;
+    await p.freeze(); expect(p.request).toHaveBeenCalledTimes(1);
+    if (resumed === "clock") p.video.currentTime += 0.02;
+    else p.frame();
+    await act(async () => p.manifest.resolve(new Response("#EXTM3U\n")));
+    await settle(); expect(p.video.src).toBe(original);
+    expect(hlsInstances.some(hls => hls.loadSource.mock.calls.some(([url]) => String(url).includes("starvation95")))).toBe(false);
+    await p.advance(); await p.advance(); await p.freeze(20_000); expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[clock107-render] HTTP readiness alone cannot rearm a second hold", async () => {
+    const p = await clockSetup107(); await p.freeze(); expect(p.request).toHaveBeenCalledTimes(1);
+    await p.advance(); await p.advance(); await p.freeze(20_000); expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[clock107-render] failed preparation cannot rearm on further clock holds", async () => {
+    const p = await clockSetup107({ fail: true });
+    await p.freeze(); expect(p.request).toHaveBeenCalledTimes(1);
+    await p.advance(); await p.advance(); await p.freeze(20_000);
+    expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
   function beginConfirmedEpisode96(p: Awaited<ReturnType<typeof setup>>) {
     p.setAhead(2.5); p.playing(); p.progress(); p.progress(); fireEvent.waiting(p.video);
   }
