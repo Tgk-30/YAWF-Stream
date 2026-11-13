@@ -8,6 +8,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useLayoutEffect } from "react";
+import { flushSync } from "react-dom";
 import type { PendingUpdate, UpdateCheckResult } from "../lib/updater";
 import type { NetworkMode } from "../lib/networkPolicy";
 
@@ -76,6 +78,40 @@ function retainReactClick(button: HTMLElement): () => void {
     throw new Error("React click handler was not attached");
   }
   return props.onClick;
+}
+
+/** Release an already-registered native continuation at a precise React phase.
+ * The layout boundary models a new render before the old passive cleanup. */
+function heldNativeContinuation(version: string | null) {
+  let continuation: (() => void) | undefined;
+  const promise = {
+    then(onfulfilled: (value: string | null) => unknown) {
+      continuation = () => { onfulfilled(version); };
+      return Promise.resolve();
+    },
+  } as unknown as Promise<string | null>;
+  return {
+    promise,
+    release: () => {
+      if (continuation == null) throw new Error("Native continuation not registered");
+      const pending = continuation;
+      continuation = undefined;
+      pending();
+    },
+  };
+}
+
+function NativeContinuationBoundary({
+  autoInstall,
+  floor,
+  release,
+}: {
+  autoInstall: boolean;
+  floor: string;
+  release?: () => void;
+}) {
+  useLayoutEffect(() => { release?.(); }, [release]);
+  return <UpdateBanner autoCheck autoInstall={autoInstall} nativeCompatibilityFloor={floor} />;
 }
 
 beforeEach(() => {
@@ -580,6 +616,375 @@ describe("UpdateBanner", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(install).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed launch after 15 minutes despite a recent success and resets the weekly cadence", async () => {
+    vi.useFakeTimers();
+    try {
+      const previous = String(Date.now() - 1000);
+      localStorage.setItem("ds_last_update_check", previous);
+      const install = vi.fn();
+      checkForUpdates.mockResolvedValueOnce({ status: "check-failed" })
+        .mockResolvedValueOnce(availableUpdate("9.9.9", install));
+      render(<UpdateBanner autoCheck autoInstall={false} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(checkForUpdates).toHaveBeenCalledTimes(1);
+      expect(localStorage.getItem("ds_last_update_check")).toBe(previous);
+      fireEvent.focus(window);
+      fireEvent.focus(window);
+      await act(async () => { await vi.advanceTimersByTimeAsync(15 * 60 * 1000 - 1); });
+      fireEvent.focus(window);
+      expect(checkForUpdates).toHaveBeenCalledTimes(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(checkForUpdates).toHaveBeenCalledTimes(2);
+      expect(screen.getByText("Update v9.9.9 available")).toBeInTheDocument();
+      expect(install).not.toHaveBeenCalled();
+      expect(Number(localStorage.getItem("ds_last_update_check"))).toBe(Date.now());
+      fireEvent.click(screen.getByRole("button", { name: "Dismiss update notification" }));
+      fireEvent.focus(window);
+      expect(checkForUpdates).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("defers an expired failure retry while hidden until visible", async () => {
+    vi.useFakeTimers();
+    try {
+      checkForUpdates.mockResolvedValueOnce({ status: "check-failed" }).mockResolvedValue({ status: "no-update" });
+      const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+      render(<UpdateBanner autoCheck autoInstall={false} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      hidden.mockReturnValue(true);
+      await act(async () => { await vi.advanceTimersByTimeAsync(15 * 60 * 1000); });
+      fireEvent.focus(window);
+      expect(checkForUpdates).toHaveBeenCalledTimes(1);
+      hidden.mockReturnValue(false);
+      await act(async () => { fireEvent(document, new Event("visibilitychange")); await Promise.resolve(); });
+      expect(checkForUpdates).toHaveBeenCalledTimes(2);
+      hidden.mockRestore();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not defeat a failure cooldown when props change and cancels the retry on unmount", async () => {
+    vi.useFakeTimers();
+    try {
+      checkForUpdates.mockResolvedValue({ status: "check-failed" });
+      const { rerender, unmount } = render(<UpdateBanner autoCheck autoInstall={false} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      rerender(<UpdateBanner autoCheck={false} autoInstall={false} />);
+      rerender(<UpdateBanner autoCheck autoInstall={false} networkMode="fullLocal" />);
+      rerender(<UpdateBanner autoCheck autoInstall={false} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      fireEvent.focus(window);
+      expect(checkForUpdates).toHaveBeenCalledTimes(1);
+      unmount();
+      await act(async () => { await vi.advanceTimersByTimeAsync(20 * 60 * 1000); });
+      expect(checkForUpdates).toHaveBeenCalledTimes(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("retries repeated failures only after each cooldown and coalesces an in-flight retry", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish: ((result: UpdateCheckResult) => void) | undefined;
+      checkForUpdates.mockResolvedValueOnce({ status: "check-failed" })
+        .mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }))
+        .mockResolvedValue({ status: "no-update" });
+      render(<UpdateBanner autoCheck autoInstall={false} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(15 * 60 * 1000); });
+      expect(checkForUpdates).toHaveBeenCalledTimes(2);
+      fireEvent.focus(window);
+      fireEvent.focus(window);
+      expect(checkForUpdates).toHaveBeenCalledTimes(2);
+      await act(async () => { finish?.({ status: "check-failed" }); await Promise.resolve(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(15 * 60 * 1000 - 1); });
+      fireEvent.focus(window);
+      expect(checkForUpdates).toHaveBeenCalledTimes(2);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(checkForUpdates).toHaveBeenCalledTimes(3);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("honors disabled checking and privacy while a failure retry becomes due", async () => {
+    vi.useFakeTimers();
+    try {
+      checkForUpdates.mockResolvedValueOnce({ status: "check-failed" }).mockResolvedValue({ status: "no-update" });
+      const { rerender } = render(<UpdateBanner autoCheck autoInstall={false} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      rerender(<UpdateBanner autoCheck={false} autoInstall={false} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(15 * 60 * 1000); });
+      fireEvent.focus(window);
+      expect(checkForUpdates).toHaveBeenCalledTimes(1);
+      rerender(<UpdateBanner autoCheck autoInstall={false} networkMode="fullLocal" />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      fireEvent.focus(window);
+      expect(checkForUpdates).toHaveBeenCalledTimes(1);
+      rerender(<UpdateBanner autoCheck autoInstall={false} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(checkForUpdates).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("throttles a successful retry even if success timestamps cannot be stored", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal("localStorage", {
+        getItem: () => null,
+        setItem: () => { throw new Error("storage unavailable"); },
+      });
+      checkForUpdates.mockResolvedValueOnce({ status: "check-failed" }).mockResolvedValue({ status: "no-update" });
+      render(<UpdateBanner autoCheck autoInstall={false} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(15 * 60 * 1000); });
+      expect(checkForUpdates).toHaveBeenCalledTimes(2);
+      fireEvent.focus(window);
+      fireEvent.focus(window);
+      await act(async () => { await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1000); });
+      expect(checkForUpdates).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("keeps the mandatory feed failure retry available with automatic checks disabled", async () => {
+    getNativeAppVersion.mockResolvedValue("0.9.21");
+    checkForUpdates.mockResolvedValueOnce({ status: "check-failed" })
+      .mockResolvedValueOnce(availableUpdate("0.9.24", vi.fn()));
+    render(<UpdateBanner autoCheck={false} autoInstall={false} nativeCompatibilityFloor="0.9.24" />);
+    await screen.findByText(/signed desktop release feed could not be checked/);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("Update v0.9.24 available");
+    expect(checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+  });
+
+  it("does not start another check over an offered update when props refresh", async () => {
+    const install = vi.fn();
+    checkForUpdates.mockResolvedValue(availableUpdate("9.9.9", install));
+    const { rerender } = render(<UpdateBanner autoCheck autoInstall={false} />);
+    await screen.findByText("Update v9.9.9 available");
+    rerender(<UpdateBanner autoCheck={false} autoInstall={false} />);
+    rerender(<UpdateBanner autoCheck autoInstall={false} />);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.focus(window);
+    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  it.each(["timer", "focus"] as const)("keeps the native floor on a mandatory failed-check %s retry", async (trigger) => {
+    vi.useFakeTimers();
+    try {
+      const install = vi.fn();
+      getNativeAppVersion.mockResolvedValue("0.9.21");
+      checkForUpdates.mockResolvedValueOnce({ status: "check-failed" })
+        .mockResolvedValueOnce(availableUpdate("0.9.22", install));
+      render(<UpdateBanner autoCheck autoInstall nativeCompatibilityFloor="0.9.24" />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(screen.getByText(/signed desktop release feed could not be checked/)).toBeInTheDocument();
+      fireEvent.focus(window);
+      expect(checkForUpdates).toHaveBeenCalledTimes(1);
+      if (trigger === "timer") {
+        await act(async () => { await vi.advanceTimersByTimeAsync(15 * 60 * 1000); });
+      } else {
+        vi.setSystemTime(Date.now() + 15 * 60 * 1000);
+        await act(async () => { fireEvent.focus(window); await Promise.resolve(); });
+      }
+      expect(checkForUpdates).toHaveBeenCalledTimes(2);
+      expect(install).not.toHaveBeenCalled();
+      expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+      expect(screen.getByText(/No signed desktop update compatible with native floor/)).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("never installs a below-floor offer after a mandatory failure and focus", async () => {
+    getNativeAppVersion.mockResolvedValue("0.9.21");
+    const install = vi.fn();
+    checkForUpdates.mockResolvedValueOnce({ status: "check-failed" })
+      .mockResolvedValueOnce(availableUpdate("0.9.22", install));
+    render(<UpdateBanner autoCheck autoInstall nativeCompatibilityFloor="0.9.24" />);
+    await screen.findByText(/signed desktop release feed could not be checked/);
+    await act(async () => { fireEvent.focus(window); await Promise.resolve(); });
+    expect(install).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+  });
+
+  it("does not start a foreground check before native compatibility is resolved", async () => {
+    let resolve: ((version: string | null) => void) | undefined;
+    getNativeAppVersion.mockReturnValue(new Promise((done) => { resolve = done; }));
+    const install = vi.fn();
+    checkForUpdates.mockResolvedValue(availableUpdate("0.9.22", install));
+    render(<UpdateBanner autoCheck autoInstall nativeCompatibilityFloor="0.9.24" />);
+    fireEvent.focus(window);
+    fireEvent.focus(window);
+    await act(async () => { await Promise.resolve(); });
+    expect(checkForUpdates).not.toHaveBeenCalled();
+    await act(async () => { resolve?.("0.9.21"); await Promise.resolve(); });
+    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(install).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    expect(screen.getByText(/No signed desktop update compatible with native floor/)).toBeInTheDocument();
+  });
+
+  it("retains a known native floor requirement if a later version lookup fails", async () => {
+    getNativeAppVersion.mockResolvedValueOnce("0.9.21").mockResolvedValue(null);
+    checkForUpdates.mockResolvedValueOnce({ status: "check-failed" })
+      .mockResolvedValueOnce(availableUpdate("0.9.22", vi.fn()));
+    const { rerender } = render(<UpdateBanner autoCheck={false} autoInstall nativeCompatibilityFloor="0.9.24" />);
+    await screen.findByText(/signed desktop release feed could not be checked/);
+    rerender(<UpdateBanner autoCheck={false} autoInstall nativeCompatibilityFloor="0.9.25" />);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText(/No signed desktop update compatible with native floor v0.9.25/);
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+  });
+
+  it("installs an existing offered update once when automatic installation is enabled", async () => {
+    const install = vi.fn(() => new Promise<void>(() => {}));
+    checkForUpdates.mockResolvedValue(availableUpdate("9.9.9", install));
+    const { rerender } = render(<UpdateBanner autoCheck autoInstall={false} />);
+    await screen.findByText("Update v9.9.9 available");
+    rerender(<UpdateBanner autoCheck autoInstall />);
+    await waitFor(() => expect(install).toHaveBeenCalledTimes(1));
+    fireEvent.focus(window);
+    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(install).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not install an existing offer when auto-install is enabled under blocked privacy", async () => {
+    const install = vi.fn();
+    checkForUpdates.mockResolvedValue(availableUpdate("9.9.9", install));
+    const { rerender } = render(<UpdateBanner autoCheck autoInstall={false} />);
+    await screen.findByText("Update v9.9.9 available");
+    rerender(<UpdateBanner autoCheck autoInstall networkMode="fullLocal" />);
+    await act(async () => { await Promise.resolve(); });
+    expect(install).not.toHaveBeenCalled();
+    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows an explicit mandatory retry immediately while automatic checking is enabled", async () => {
+    getNativeAppVersion.mockResolvedValue("0.9.21");
+    checkForUpdates.mockResolvedValueOnce({ status: "check-failed" })
+      .mockResolvedValueOnce(availableUpdate("0.9.24", vi.fn()));
+    render(<UpdateBanner autoCheck autoInstall={false} nativeCompatibilityFloor="0.9.24" />);
+    await screen.findByText(/signed desktop release feed could not be checked/);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("Update v0.9.24 available");
+    expect(checkForUpdates).toHaveBeenCalledTimes(2);
+  });
+
+  it("revalidates a pending offer against a raised native floor before auto-install", async () => {
+    getNativeAppVersion.mockResolvedValue("0.9.21");
+    const install = vi.fn();
+    checkForUpdates.mockResolvedValue(availableUpdate("0.9.22", install));
+    const { rerender } = render(<UpdateBanner autoCheck autoInstall={false} nativeCompatibilityFloor="0.9.20" />);
+    await screen.findByText("Update v0.9.22 available");
+    rerender(<UpdateBanner autoCheck autoInstall nativeCompatibilityFloor="0.9.24" />);
+    await screen.findByText(/No signed desktop update compatible with native floor v0.9.24/);
+    expect(install).not.toHaveBeenCalled();
+    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+  });
+
+  it("uses a raised floor for an in-flight result after an effect refresh", async () => {
+    let finish: ((result: UpdateCheckResult) => void) | undefined;
+    getNativeAppVersion.mockResolvedValue("0.9.21");
+    const install = vi.fn();
+    checkForUpdates.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const { rerender } = render(<UpdateBanner autoCheck autoInstall nativeCompatibilityFloor="0.9.20" />);
+    await waitFor(() => expect(checkForUpdates).toHaveBeenCalledTimes(1));
+    rerender(<UpdateBanner autoCheck autoInstall nativeCompatibilityFloor="0.9.24" />);
+    await act(async () => { await Promise.resolve(); finish?.(availableUpdate("0.9.22", install)); await Promise.resolve(); });
+    await screen.findByText(/No signed desktop update compatible with native floor v0.9.24/);
+    expect(install).not.toHaveBeenCalled();
+    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+  });
+
+  it("R3 rejects a cached offer when the floor renders before its old passive cleanup", async () => {
+    const held = heldNativeContinuation("0.9.21");
+    getNativeAppVersion.mockResolvedValueOnce("0.9.21")
+      .mockReturnValueOnce(held.promise)
+      .mockReturnValue(new Promise(() => {}));
+    const install = vi.fn(() => new Promise<void>(() => {}));
+    checkForUpdates.mockResolvedValue(availableUpdate("0.9.22", install));
+    const { rerender } = render(<NativeContinuationBoundary autoInstall={false} floor="0.9.20" />);
+    await screen.findByText("Update v0.9.22 available");
+    rerender(<NativeContinuationBoundary autoInstall floor="0.9.20" />);
+    rerender(<NativeContinuationBoundary autoInstall floor="0.9.24" release={held.release} />);
+    await act(async () => { await Promise.resolve(); });
+    expect(install).not.toHaveBeenCalled();
+    expect(screen.getByText(/No signed desktop update compatible with native floor v0.9.24/)).toBeInTheDocument();
+    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+  });
+
+  it("R3 revalidates a retained manual handler against the current known native floor", async () => {
+    getNativeAppVersion.mockResolvedValueOnce("0.9.21").mockReturnValue(new Promise(() => {}));
+    const install = vi.fn(() => new Promise<void>(() => {}));
+    checkForUpdates.mockResolvedValue(availableUpdate("0.9.22", install));
+    const { rerender } = render(<UpdateBanner autoCheck autoInstall={false} nativeCompatibilityFloor="0.9.20" />);
+    const retained = retainReactClick(await screen.findByRole("button", { name: "Install" }));
+    rerender(<UpdateBanner autoCheck autoInstall={false} nativeCompatibilityFloor="0.9.24" />);
+    act(() => retained());
+    await act(async () => { await Promise.resolve(); });
+    expect(install).not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    expect(screen.getByText(/No signed desktop update compatible with native floor v0.9.24/)).toBeInTheDocument();
+  });
+
+  it("R3 revalidates the current floor at queued manual plugin entry", async () => {
+    getNativeAppVersion.mockResolvedValueOnce("0.9.21").mockReturnValue(new Promise(() => {}));
+    const install = vi.fn(() => new Promise<void>(() => {}));
+    checkForUpdates.mockResolvedValue(availableUpdate("0.9.22", install));
+    const { rerender } = render(<UpdateBanner autoCheck autoInstall={false} nativeCompatibilityFloor="0.9.20" />);
+    const button = await screen.findByRole("button", { name: "Install" });
+    act(() => {
+      button.click();
+      rerender(<UpdateBanner autoCheck autoInstall={false} nativeCompatibilityFloor="0.9.24" />);
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(install).not.toHaveBeenCalled();
+    expect(screen.getByText(/No signed desktop update compatible with native floor v0.9.24/)).toBeInTheDocument();
+  });
+
+  it("R3 honors revoked automatic intent before an old cached continuation cleans up", async () => {
+    const held = heldNativeContinuation("0.9.21");
+    getNativeAppVersion.mockResolvedValueOnce("0.9.21")
+      .mockReturnValueOnce(held.promise)
+      .mockReturnValue(new Promise(() => {}));
+    const install = vi.fn(() => new Promise<void>(() => {}));
+    checkForUpdates.mockResolvedValue(availableUpdate("0.9.22", install));
+    const { rerender } = render(<NativeContinuationBoundary autoInstall={false} floor="0.9.20" />);
+    await screen.findByText("Update v0.9.22 available");
+    rerender(<NativeContinuationBoundary autoInstall floor="0.9.20" />);
+    rerender(<NativeContinuationBoundary autoInstall={false} floor="0.9.20" release={held.release} />);
+    await act(async () => { await Promise.resolve(); });
+    expect(install).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Install" })).toBeInTheDocument();
+    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+  });
+
+  it("R3 revokes a queued automatic install but still permits explicit manual Install and Retry", async () => {
+    let finish: ((result: UpdateCheckResult) => void) | undefined;
+    getNativeAppVersion.mockResolvedValue("0.9.21");
+    checkForUpdates.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const install = vi.fn()
+      .mockRejectedValueOnce(new Error("synthetic install failure"))
+      .mockImplementation(() => new Promise<void>(() => {}));
+    const { rerender } = render(<UpdateBanner autoCheck autoInstall nativeCompatibilityFloor="0.9.20" />);
+    await waitFor(() => expect(checkForUpdates).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      finish?.(availableUpdate("0.9.22", install));
+      // The check continuation admits an automatic operation first; this
+      // continuation revokes it before the queued updater plugin starts.
+      await Promise.resolve();
+      flushSync(() => {
+        rerender(<UpdateBanner autoCheck autoInstall={false} nativeCompatibilityFloor="0.9.20" />);
+      });
+    });
+    expect(install).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole("button", { name: "Install" }));
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect(install).toHaveBeenCalledTimes(1);
+    fireEvent.click(retry);
+    await waitFor(() => expect(install).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("Installing… 0%")).toBeInTheDocument();
+    expect(checkForUpdates).toHaveBeenCalledTimes(1);
   });
 
   it("re-checks weekly for a long-running instance once a week has elapsed", async () => {

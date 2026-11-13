@@ -50,6 +50,7 @@ type FailureReason =
 // this poll interval only bounds how promptly a long-running instance notices
 // the week has passed - it does not itself hit the network every 6h.
 const UPDATE_POLL_MS = 6 * 60 * 60 * 1000;
+const FAILED_CHECK_RETRY_MS = 15 * 60 * 1000;
 
 export function UpdateBanner({
   autoCheck,
@@ -82,6 +83,13 @@ export function UpdateBanner({
   // Share an in-flight feed request across effect refreshes and foreground
   // signals. This prevents duplicate network checks without accepting stale UI.
   const checkPromiseRef = useRef<Promise<UpdateCheckResult> | null>(null);
+  const lastNativeVersionRef = useRef<string | null>(null);
+  const nativeCompatibilityFloorRef = useRef(nativeCompatibilityFloor);
+  nativeCompatibilityFloorRef.current = nativeCompatibilityFloor;
+  // A failed optional check is not a weekly success. Keep its retry deadline
+  // across effect refreshes, without persisting a stale failure across launches.
+  const failedRetryAtRef = useRef<number | null>(null);
+  const unpersistedSuccessAtRef = useRef<number | null>(null);
   // Installation is not safely repeatable. Keep one operation even if a user
   // double-clicks or an automatic path races a foreground signal.
   const installPromiseRef = useRef<Promise<void> | null>(null);
@@ -93,6 +101,8 @@ export function UpdateBanner({
   // current policy through a ref rather than trusting their captured props.
   const networkModeRef = useRef(networkMode);
   networkModeRef.current = networkMode;
+  const autoInstallRef = useRef(autoInstall);
+  autoInstallRef.current = autoInstall;
   const mountedRef = useRef(false);
 
   useEffect(() => {
@@ -102,11 +112,23 @@ export function UpdateBanner({
     };
   }, []);
 
+  const currentRequirement = (
+    fallback: CompatibilityRequirement | null,
+  ): CompatibilityRequirement | null => {
+    const currentVersion = lastNativeVersionRef.current ?? fallback?.currentVersion;
+    const compatibilityFloor = nativeCompatibilityFloorRef.current;
+    return currentVersion != null && requiresDesktopNativeUpdate(currentVersion, compatibilityFloor)
+      ? { currentVersion, compatibilityFloor }
+      : null;
+  };
+
   const beginInstall = (
     pending: PendingUpdate,
-    requirement: CompatibilityRequirement | null,
+    initialRequirement: CompatibilityRequirement | null,
+    intent: "automatic" | "manual",
   ) => {
     if (installPromiseRef.current != null) return installPromiseRef.current;
+    let requirement = currentRequirement(initialRequirement);
     const suspendForPrivacy = () => {
       pendingRef.current = false;
       if (!mountedRef.current) return;
@@ -115,20 +137,40 @@ export function UpdateBanner({
       setFailureReason(requirement == null ? null : "privacy-blocked");
       setPhase(requirement == null ? "idle" : "error");
     };
-    if (!isNetworkAllowed("updates", networkModeRef.current)) {
-      suspendForPrivacy();
-      return Promise.resolve();
-    }
+    const admitInstall = () => {
+      requirement = currentRequirement(requirement);
+      if (!isNetworkAllowed("updates", networkModeRef.current)) {
+        suspendForPrivacy();
+        return false;
+      }
+      if (requirement != null && compareAppVersions(pending.version, requirement.compatibilityFloor) < 0) {
+        pendingRef.current = false;
+        if (mountedRef.current) {
+          setUpdate(null);
+          setCompatibility(requirement);
+          setFailureReason("no-compatible-release");
+          setPhase("error");
+        }
+        return false;
+      }
+      if (intent === "automatic" && !autoInstallRef.current) {
+        if (mountedRef.current) {
+          setCompatibility(requirement);
+          setFailureReason(null);
+          setPhase("idle");
+        }
+        return false;
+      }
+      return true;
+    };
+    if (!admitInstall()) return Promise.resolve();
     setFailureReason(null);
     setPhase("installing");
     setProgress(0);
     const operation = Promise.resolve().then(async () => {
       // Re-check immediately before entering the updater plugin. This closes
       // the gap between a click/auto-install decision and its queued microtask.
-      if (!isNetworkAllowed("updates", networkModeRef.current)) {
-        suspendForPrivacy();
-        return;
-      }
+      if (!admitInstall()) return;
       installStartedRef.current = true;
       await pending.install((fraction) => {
         if (mountedRef.current) setProgress(fraction);
@@ -186,6 +228,9 @@ export function UpdateBanner({
     // Native Android owns its independent APK channel, never the server version.
     if (isTauri() && !isDesktopTauri()) return;
     let cancelled = false;
+    let compatibilityResolved = false;
+    let automaticRequirement: CompatibilityRequirement | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
     const sharedCheck = (): Promise<UpdateCheckResult> => {
       const existing = checkPromiseRef.current;
@@ -199,11 +244,12 @@ export function UpdateBanner({
     };
 
     const runCheck = async (
-      requirement: CompatibilityRequirement | null = null,
+      initialRequirement: CompatibilityRequirement | null = null,
     ) => {
-      if (installStartedRef.current) return;
+      let requirement = initialRequirement;
+      if (installStartedRef.current || installPromiseRef.current != null) return;
       const updateNetworkAllowed = isNetworkAllowed("updates", networkMode);
-      if (requirement == null && (!autoCheck || !updateNetworkAllowed)) return;
+      if (requirement == null && (!autoCheck || !updateNetworkAllowed || pendingRef.current)) return;
       if (requirement != null) {
         setCompatibility(requirement);
         setUpdate(null);
@@ -217,8 +263,18 @@ export function UpdateBanner({
       }
       const result = await sharedCheck();
       if (cancelled) return;
-      if (result.status !== "privacy-blocked" && result.status !== "unsupported") {
-        markUpdateChecked();
+      // The floor may have changed while the request was in flight. Never
+      // handle or install its result using an obsolete optional classification.
+      requirement = currentRequirement(requirement);
+      if (requirement != null) setCompatibility(requirement);
+      if (result.status === "available" || result.status === "no-update") {
+        failedRetryAtRef.current = null;
+        if (retryTimer != null) clearTimeout(retryTimer);
+        const now = Date.now();
+        markUpdateChecked(now);
+        // The helper is best-effort. Avoid repeated focus checks when storage
+        // cannot retain the successful timestamp during this mounted session.
+        unpersistedSuccessAtRef.current = updateCheckAgeMs(now) === 0 ? null : now;
       }
       if (result.status === "privacy-blocked") {
         if (requirement != null) {
@@ -228,6 +284,8 @@ export function UpdateBanner({
         return;
       }
       if (result.status === "check-failed") {
+        failedRetryAtRef.current = Date.now() + FAILED_CHECK_RETRY_MS;
+        scheduleRetry();
         if (requirement != null) {
           setFailureReason("check-failed");
           setPhase("error");
@@ -266,8 +324,8 @@ export function UpdateBanner({
       pendingRef.current = true;
       setFailureReason(null);
       setUpdate(pending);
-      if (autoInstall) {
-        void beginInstall(pending, requirement);
+      if (autoInstallRef.current) {
+        void beginInstall(pending, requirement, "automatic");
       } else {
         setPhase("idle");
       }
@@ -275,36 +333,65 @@ export function UpdateBanner({
 
     void getNativeAppVersion().then((nativeVersion) => {
       if (cancelled || installStartedRef.current) return;
-      const requirement =
-        nativeVersion != null &&
-        requiresDesktopNativeUpdate(nativeVersion, nativeCompatibilityFloor)
-          ? {
-              currentVersion: nativeVersion,
-              compatibilityFloor: nativeCompatibilityFloor,
-            }
-          : null;
+      if (nativeVersion != null) lastNativeVersionRef.current = nativeVersion;
+      const requirement = currentRequirement(null);
+      automaticRequirement = requirement;
+      compatibilityResolved = true;
       if (requirement == null) {
         setCompatibility(null);
         setFailureReason(null);
       }
-      void runCheck(requirement);
+      // An existing offer remains owned across setting changes. Reuse it instead
+      // of fetching again, but revalidate the current floor before auto-install.
+      if (pendingRef.current && update != null) {
+        if (requirement != null && compareAppVersions(update.version, requirement.compatibilityFloor) < 0) {
+          pendingRef.current = false;
+          setUpdate(null);
+          setCompatibility(requirement);
+          setFailureReason("no-compatible-release");
+          setPhase("error");
+        } else if (autoInstallRef.current && isNetworkAllowed("updates", networkModeRef.current)) {
+          void beginInstall(update, requirement, "automatic");
+        }
+        return;
+      }
+      if (failedRetryAtRef.current != null) {
+        checkIfDue();
+      } else {
+        void runCheck(requirement);
+      }
     });
 
-    // Weekly cadence: poll periodically but only actually hit the network when
-    // the window is visible, nothing is already pending, and a week has elapsed
-    // since the last check. Robust to timer drift/suspend - the elapsed-time
-    // gate is the real control, not the interval.
+    // Failed checks retry on their own deadline, independent of the
+    // last successful weekly check. Focus/visibility cannot bypass the delay.
     const checkIfDue = () => {
+      const retryAt = failedRetryAtRef.current;
+      const recentUnpersistedSuccess = unpersistedSuccessAtRef.current != null &&
+        Date.now() - unpersistedSuccessAtRef.current < WEEKLY_UPDATE_CHECK_MS;
+      const due = retryAt != null
+        ? Date.now() >= retryAt
+        : !recentUnpersistedSuccess && updateCheckAgeMs() >= WEEKLY_UPDATE_CHECK_MS;
       if (
         autoCheck &&
+        compatibilityResolved &&
         !document.hidden &&
         !pendingRef.current &&
+        checkPromiseRef.current == null &&
+        installPromiseRef.current == null &&
         isNetworkAllowed("updates", networkMode) &&
-        updateCheckAgeMs() >= WEEKLY_UPDATE_CHECK_MS
+        due
       ) {
-        void runCheck();
+        void runCheck(automaticRequirement);
       }
     };
+    const scheduleRetry = () => {
+      if (retryTimer != null) clearTimeout(retryTimer);
+      const retryAt = failedRetryAtRef.current;
+      if (retryAt != null && retryAt > Date.now()) {
+        retryTimer = setTimeout(checkIfDue, retryAt - Date.now());
+      }
+    };
+    scheduleRetry();
     const handleVisibilityChange = () => {
       if (!document.hidden) checkIfDue();
     };
@@ -315,6 +402,7 @@ export function UpdateBanner({
     return () => {
       cancelled = true;
       clearInterval(poll);
+      if (retryTimer != null) clearTimeout(retryTimer);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", checkIfDue);
     };
@@ -415,8 +503,10 @@ export function UpdateBanner({
             className="btn btn-prominent update-banner-install"
             onClick={() => {
               if (failureReason === "install-failed" && update != null) {
-                void beginInstall(update, compatibility);
+                void beginInstall(update, compatibility, "manual");
               } else {
+                // A deliberate user retry is not constrained by auto-retry backoff.
+                failedRetryAtRef.current = null;
                 setRetryNonce((value) => value + 1);
               }
             }}
@@ -429,7 +519,7 @@ export function UpdateBanner({
               type="button"
               className="btn btn-prominent update-banner-install"
               onClick={() => {
-                if (update != null) void beginInstall(update, compatibility);
+                if (update != null) void beginInstall(update, compatibility, "manual");
               }}
             >
               Install
