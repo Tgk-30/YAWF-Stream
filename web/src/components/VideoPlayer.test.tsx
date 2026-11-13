@@ -17847,6 +17847,7 @@ describe("automatic starvation95 adaptation", () => {
     iosCompatibilityHls?: boolean;
     snapshots?: number[]; snapshotGeneration?: string[]; snapshotEndlist?: boolean;
     currentAudio?: number; currentManifest?: string; currentHeaders?: Record<string, string>;
+    attestedDefaultAudio?: number;
   } = {}) {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     if (options.iosCompatibilityHls) enableIosCompatibilityHls106();
@@ -17880,6 +17881,18 @@ describe("automatic starvation95 adaptation", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (options.lease && init?.method === "HEAD") return new Response(null, { status: leaseExpired ? 404 : 200 });
       if (String(input).includes("starvation95/index.m3u8")) {
+        if (options.attestedDefaultAudio != null) {
+          const params = new URL(String(input)).searchParams;
+          const quality = params.get("quality")!;
+          const start = params.get("start")!;
+          const generation = `transcode-default-audio-${quality}-${start}`;
+          return new Response(`#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n${quality}.m3u8?generation=${generation}\n`, { headers: {
+            "x-yawf-hls-snapshot-version": "1", "x-yawf-hls-snapshot-generation": generation,
+            "x-yawf-hls-snapshot-frontier": "60", "x-yawf-hls-snapshot-target": "6",
+            "x-yawf-hls-snapshot-endlist": "0", "x-yawf-transcode-quality": quality,
+            "x-yawf-transcode-start": start, "x-yawf-transcode-audio": String(options.attestedDefaultAudio),
+          } });
+        }
         if (options.snapshots != null) {
           const frontier = options.snapshots.length > 1 ? options.snapshots.shift()! : options.snapshots[0]!;
           const generation = options.snapshotGeneration != null && options.snapshotGeneration.length > 1
@@ -18393,6 +18406,104 @@ describe("automatic starvation95 adaptation", () => {
     for (let i = 0; i < 6; i++) await confirmedEpisode96(p);
     expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 104);
     expect(document.querySelector("video.player-video")).toBe(p.video); expect(p.video.src).toBe(original);
+  });
+
+  it("[progressive107] reduces again only after owned decoded 480p progress and two fresh waits", async () => {
+    const p = await setup({ audio: true });
+    p.episodes(); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 1);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    Object.defineProperty(p.video, "videoHeight", { configurable: true, value: 480 });
+    p.video.currentTime = 0;
+    act(() => hlsInstances.at(-1)?.emit("hlsMediaAttached"));
+    fireEvent.loadStart(p.video); fireEvent.loadedMetadata(p.video); fireEvent.loadedData(p.video); fireEvent.seeked(p.video); fireEvent.canPlay(p.video);
+    p.playing(); p.progress(); p.progress();
+    p.episode(); await settle();
+    for (let i = 0; i < 5; i++) fireEvent.waiting(p.video);
+    expect(p.request).toHaveBeenCalledTimes(1);
+    p.episode(); await settle();
+    expect(p.request).toHaveBeenCalledTimes(2);
+    expect(p.request).toHaveBeenLastCalledWith("360p", 112, 1);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    Object.defineProperty(p.video, "videoHeight", { configurable: true, value: 360 });
+    p.video.currentTime = 0;
+    act(() => hlsInstances.at(-1)?.emit("hlsMediaAttached"));
+    fireEvent.loadStart(p.video); fireEvent.loadedMetadata(p.video); fireEvent.loadedData(p.video); fireEvent.seeked(p.video); fireEvent.canPlay(p.video);
+    p.playing(); p.progress(); p.progress(); p.episodes(); await settle();
+    expect(p.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("[progressive107-default-audio] follows the attested default audio after owned 480p decoding", async () => {
+    const p = await setup({ attestedDefaultAudio: 0 });
+    p.episodes(); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    Object.defineProperty(p.video, "videoHeight", { configurable: true, value: 480 });
+    p.video.currentTime = 0;
+    act(() => hlsInstances.at(-1)?.emit("hlsMediaAttached"));
+    fireEvent.loadStart(p.video); fireEvent.loadedMetadata(p.video); fireEvent.loadedData(p.video); fireEvent.seeked(p.video); fireEvent.canPlay(p.video);
+    p.playing(); p.progress(); p.progress(); p.episode(); await settle();
+    expect(p.request).toHaveBeenCalledTimes(1);
+    p.episode(); await settle();
+    expect(p.request).toHaveBeenCalledTimes(2);
+    expect(p.request).toHaveBeenLastCalledWith("360p", 112, 0);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+  });
+
+  it("[progressive107-default-audio] does not infer audio 0 when the master has no audio header", async () => {
+    const p = await setup();
+    p.episodes(); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106);
+    Object.defineProperty(p.video, "videoHeight", { configurable: true, value: 480 });
+    p.video.currentTime = 0;
+    act(() => hlsInstances.at(-1)?.emit("hlsMediaAttached"));
+    fireEvent.loadStart(p.video); fireEvent.loadedMetadata(p.video); fireEvent.loadedData(p.video); fireEvent.seeked(p.video); fireEvent.canPlay(p.video);
+    p.playing(); p.progress(); p.progress(); p.episode(); p.episode(); await settle();
+    expect(p.request).toHaveBeenCalledTimes(2);
+    expect(p.request).toHaveBeenLastCalledWith("360p", 112);
+  });
+
+  it("[progressive107-default-audio] rejects an attested default that conflicts with the selected audio", async () => {
+    const p = await setup({ audio: true, attestedDefaultAudio: 0 });
+    const original = p.video.src;
+    p.episodes(); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 1);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    expect(p.video.src).toBe(original);
+    expect(hlsInstances.some(hls => hls.loadSource.mock.calls.some(([url]) => String(url).includes("starvation95")))).toBe(false);
+    p.episodes(); await settle(); expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[progressive107] HTTP readiness and stale pre-adoption waits cannot rearm", async () => {
+    const p = await setup({ audio: true });
+    p.episodes(); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 106, 1);
+    for (let i = 0; i < 5; i++) { p.progress(); fireEvent.waiting(p.video); }
+    await settle(); expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("[progressive107] a same-content fresh source cannot spend the adopted generation's remaining attempt", async () => {
+    const p = await setup({ audio: true });
+    p.episodes(); await settle();
+    Object.defineProperty(p.video, "videoHeight", { configurable: true, value: 480 });
+    p.video.currentTime = 0;
+    act(() => hlsInstances.at(-1)?.emit("hlsMediaAttached"));
+    fireEvent.loadStart(p.video); fireEvent.loadedMetadata(p.video); fireEvent.loadedData(p.video); fireEvent.seeked(p.video); fireEvent.canPlay(p.video);
+    p.playing(); p.progress(); p.progress(); await settle();
+    p.view.rerender(<VideoPlayer {...p.props} url="https://server.example/api/stream/fresh-progressive107/movie.mp4" sourceRevision={1} />);
+    await settle();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    let time = 200;
+    Object.defineProperties(video, {
+      currentSrc: { configurable: true, get: () => video.src },
+      currentTime: { configurable: true, get: () => time, set: (value: number) => { time = value; } },
+      duration: { configurable: true, value: 900 }, videoHeight: { configurable: true, value: 480 },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_CURRENT_DATA },
+      paused: { configurable: true, value: false }, seeking: { configurable: true, value: false },
+    });
+    fireEvent.loadStart(video); fireEvent.loadedMetadata(video); fireEvent.loadedData(video); fireEvent.canPlay(video); fireEvent.playing(video);
+    for (let i = 0; i < 5; i++) { time += 1; fireEvent.timeUpdate(video); fireEvent.waiting(video); }
+    await settle(); expect(p.request).toHaveBeenCalledTimes(1);
   });
 
   it.each([false, true])("[starvation95] adapts default-direct/Auto=%s after two genuine episodes, not duplicates", async auto => {
