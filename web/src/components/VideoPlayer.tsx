@@ -7599,8 +7599,19 @@ function WebviewPlayer({
       let selected = localPreference != null
         ? retainedServerAudioMatch({ ...localPreference, label: genericLocalLabel ? null : localPreference.label }, serverAudioTracks)
         : serverAudioTracks.find((track) => track.index === resolvedServerAudioTrack) ?? null;
+      const currentHls = hlsRef.current;
+      let compatibilityHlsOwnsCurrentMedia = false;
+      if (!nativeHlsPlaybackRef.current && deviceKind() === "ios" && iosHlsPlaybackMode === "compatibility" &&
+        currentMediaEvent(video) && currentHls?.media === video &&
+        currentHls.config.preferManagedMediaSource === false) {
+        try {
+          compatibilityHlsOwnsCurrentMedia = currentHls.url === new URL(url, window.location.href).href;
+        } catch {
+          compatibilityHlsOwnsCurrentMedia = false;
+        }
+      }
       if (selected == null && localPreference != null && !unresolvedLocalSelection &&
-        nativeHlsPlaybackRef.current && nativeList?.length === 1 && !nativeAudioBindingRef.current.retired &&
+        (nativeHlsPlaybackRef.current || compatibilityHlsOwnsCurrentMedia) && nativeList?.length === 1 && !nativeAudioBindingRef.current.retired &&
         nativeAudioBindingRef.current.started && nativeAudioBindingRef.current.selection === selectionKey() &&
         serverAudioInventoryStatus === "ready" && serverAudioInventoryRef.current.tracks === serverAudioTracks) {
         const index = boundServerHlsAudioIndex(initialLeasePreparation?.audio ?? null,
