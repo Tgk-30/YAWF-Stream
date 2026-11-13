@@ -25,6 +25,9 @@ import { createPortal } from "react-dom";
 // Type-only: the runtime module is imported on demand inside the HLS effect
 // below, so this import contributes no bytes to the chunk.
 import type HlsType from "hls.js";
+// Vite emits the matching package worker as a local asset; this URL does not
+// fetch or start it on native/progressive paths. The ESM build needs workerPath.
+import hlsWorkerUrl from "hls.js/dist/hls.worker.js?url";
 type HlsInstance = InstanceType<typeof HlsType>;
 export const WEBVIEW_STARTUP_TIMEOUT_MS = 20_000;
 export const SERVER_HLS_STARTUP_TIMEOUT_MS = 45_000;
@@ -6566,6 +6569,7 @@ function WebviewPlayer({
           : 0
         : null;
       instance = new Hls({
+        workerPath: hlsWorkerUrl,
         ...(exactHlsStartPosition == null
           ? {}
           : { startPosition: exactHlsStartPosition }),
