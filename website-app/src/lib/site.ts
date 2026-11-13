@@ -9,7 +9,7 @@ type PublishedRelease = Readonly<{
   tag: string;
 }>;
 
-export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.102', tag: 'v2.3.102-web' };
+export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.103', tag: 'v2.3.103-web' };
 export const ANDROID_TV_RELEASE: PublishedRelease = { version: '2.3.38', tag: 'v2.3.38-web' };
 export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'android-v2.3.104' };
 export const SERVER_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'v2.3.104' };
