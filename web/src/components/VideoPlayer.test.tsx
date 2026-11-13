@@ -68,6 +68,7 @@ const { hlsInstances, hlsIsSupported } = vi.hoisted(() => ({
   hlsInstances: [] as Array<{
     config: {
       startPosition?: number;
+      workerPath?: string;
       xhrSetup?: (xhr: XMLHttpRequest, url?: string) => void;
       manifestLoadPolicy?: {
         default: {
@@ -142,6 +143,7 @@ vi.mock("./CastControls", () => ({
     </>
   ),
 }));
+vi.mock("hls.js/dist/hls.worker.js?url", () => ({ default: "/assets/hls.worker-test.js" }));
 vi.mock("hls.js", () => {
   class FakeHls {
     static isSupported = hlsIsSupported;
@@ -162,6 +164,7 @@ vi.mock("hls.js", () => {
     };
     config: {
       startPosition?: number;
+      workerPath?: string;
       xhrSetup?: (xhr: XMLHttpRequest, url?: string) => void;
       manifestLoadPolicy?: {
         default: {
@@ -12136,6 +12139,31 @@ describe("captions toggle", () => {
 // ---- HLS source branch -----------------------------------------------------
 
 describe("HLS source attach", () => {
+  it("gives lazy hls.js the bundled same-version worker URL", async () => {
+    render(<VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />);
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    expect(hlsInstances[0].config.workerPath).toBe("/assets/hls.worker-test.js");
+    expect(hlsInstances[0].loadSource).toHaveBeenCalledWith("https://x/stream.m3u8");
+  });
+
+  it.each(["progressive", "native iOS", "unsupported-MSE native fallback"])(
+    "does not construct hls.js or request its worker for %s playback",
+    async (path) => {
+      const worker = vi.fn();
+      vi.stubGlobal("Worker", worker);
+      if (path !== "progressive") {
+        deviceKindMock.mockReturnValue(path === "native iOS" ? "ios" : "android");
+        HTMLMediaElement.prototype.canPlayType = vi.fn(() => "probably" as const);
+      }
+      if (path === "unsupported-MSE native fallback") hlsIsSupported.mockReturnValue(false);
+      render(<VideoPlayer url={path === "progressive" ? "https://x/video.mp4" : "https://x/stream.m3u8"} title="T" onClose={() => {}} />);
+      await act(async () => { await Promise.resolve(); });
+      expect(hlsInstances).toHaveLength(0);
+      expect(worker).not.toHaveBeenCalled();
+      expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes("hls.worker"))).toBe(false);
+    },
+  );
+
   // hls.js (~151 KB gz) is now fetched on demand, only once an .m3u8 the browser
   // cannot play natively is reached - so the attach is async and these await it.
   it("leaves ordinary nonexact HLS startup on the hls.js default", async () => {

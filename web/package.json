@@ -1,12 +1,13 @@
 {
   "name": "debridstreamer-web",
   "private": true,
-  "version": "2.3.104",
+  "version": "2.3.105",
   "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build && npm run check:android-webview && npm run check:bundle",
+    "build": "tsc -b && vite build && npm run check:hls-worker && npm run check:android-webview && npm run check:bundle",
+    "check:hls-worker": "node ../scripts/check_hls_worker_asset.mjs dist /",
     "check:android-webview": "node ../scripts/check_android_webview_compat.mjs dist",
     "check:bundle": "node ../scripts/check_bundle_budgets.mjs web",
     "preview": "vite preview",
