@@ -1,7 +1,7 @@
 {
   "name": "debridstreamer-server",
   "private": true,
-  "version": "2.3.102",
+  "version": "2.3.103",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -28,7 +28,7 @@
     "esbuild": "^0.28.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.12"
   },
   "overrides": {
     "fast-uri": "3.1.9",

@@ -55,7 +55,10 @@ export function useScrubThumbnails(
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   // Two hours of scrubbing otherwise creates about 1,440 base64 JPEG buckets.
   const cacheRef = useRef<Map<number, string | null>>(new Map());
-  const lastCaptureRef = useRef(0);
+  const lastCaptureRef = useRef(-Infinity);
+  const sourceOwnerRef = useRef<string | null>(null);
+  const sourceAttachedRef = useRef(false);
+  const hoveringRef = useRef(false);
   const pendingTimeRef = useRef<number | null>(null);
   const seekingRef = useRef(false);
   const seekTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -72,9 +75,8 @@ export function useScrubThumbnails(
   useEffect(() => {
     if (!enabled || typeof document === "undefined") return;
     const video = document.createElement("video");
-    video.src = sourceUrl;
     video.muted = true;
-    video.preload = "auto";
+    video.preload = "none";
     // No crossOrigin: debrid hosts send no CORS headers, so requesting CORS
     // would abort the load entirely and break thumbnails (loadedmetadata/seeked
     // never fire). Load no-CORS like the main player; if the canvas is then
@@ -83,10 +85,23 @@ export function useScrubThumbnails(
     const canvas = document.createElement("canvas");
     videoRef.current = video;
     canvasRef.current = canvas;
+    sourceOwnerRef.current = sourceUrl;
+    sourceAttachedRef.current = false;
+    hoveringRef.current = false;
+    lastCaptureRef.current = -Infinity;
     cacheRef.current.clear();
 
-    const onMeta = () => setReady(Number.isFinite(video.duration));
+    const onMeta = () => {
+      if (videoRef.current !== video || !sourceAttachedRef.current) return;
+      setReady(Number.isFinite(video.duration));
+      if (hoveringRef.current && document.visibilityState !== "hidden" && pendingTimeRef.current != null) {
+        const next = pendingTimeRef.current;
+        pendingTimeRef.current = null;
+        requestCapture(next);
+      }
+    };
     const onSeeked = () => {
+      if (videoRef.current !== video) return;
       clearSeekTimer();
       seekingRef.current = false;
       captureCurrentFrame();
@@ -100,21 +115,46 @@ export function useScrubThumbnails(
     // A media error means no 'seeked' will ever arrive for the in-flight seek.
     // Drop the in-flight flag so later hovers are not coalesced forever.
     const onError = () => {
+      if (videoRef.current !== video) return;
       clearSeekTimer();
       seekingRef.current = false;
       pendingTimeRef.current = null;
     };
+    const onVisibility = () => {
+      if (videoRef.current !== video || document.visibilityState !== "hidden") return;
+      hoveringRef.current = false;
+      lastCaptureRef.current = -Infinity;
+      pendingTimeRef.current = null;
+      seekingRef.current = false;
+      clearSeekTimer();
+      if (sourceAttachedRef.current) {
+        video.removeAttribute("src");
+        video.load();
+        sourceAttachedRef.current = false;
+      }
+      setReady(false);
+      setPreview(null);
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     video.addEventListener("loadedmetadata", onMeta);
+    video.addEventListener("loadeddata", onMeta);
     video.addEventListener("seeked", onSeeked);
     video.addEventListener("error", onError);
 
     return () => {
       clearSeekTimer();
       video.removeEventListener("loadedmetadata", onMeta);
+      video.removeEventListener("loadeddata", onMeta);
       video.removeEventListener("seeked", onSeeked);
       video.removeEventListener("error", onError);
-      video.removeAttribute("src");
-      video.load();
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (sourceAttachedRef.current) {
+        video.removeAttribute("src");
+        video.load();
+      }
+      sourceAttachedRef.current = false;
+      sourceOwnerRef.current = null;
+      hoveringRef.current = false;
       videoRef.current = null;
       canvasRef.current = null;
       cacheRef.current.clear();
@@ -130,7 +170,7 @@ export function useScrubThumbnails(
   const captureCurrentFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (video == null || canvas == null) return;
+    if (video == null || canvas == null || !hoveringRef.current || document.visibilityState === "hidden") return;
     // Guard videoWidth too: a corrupt stream can report height>0 with width 0,
     // which would make the ratio Infinity and canvas.height Infinity.
     const ratio =
@@ -162,15 +202,24 @@ export function useScrubThumbnails(
   const requestCapture = useCallback(
     (timeSeconds: number) => {
       const video = videoRef.current;
-      if (video == null || !Number.isFinite(video.duration)) return;
+      if (video == null || !sourceAttachedRef.current || !hoveringRef.current || document.visibilityState === "hidden") return;
+      if (!Number.isFinite(video.duration)) {
+        pendingTimeRef.current = timeSeconds;
+        return;
+      }
       const t = Math.max(0, Math.min(timeSeconds, video.duration - 0.1));
       if (seekingRef.current) {
         pendingTimeRef.current = t; // coalesce while a seek is in flight
         return;
       }
+      pendingTimeRef.current = null;
       // If we're already at this frame, no 'seeked' event would fire - capture
-      // directly so the preview doesn't stall on a no-op seek.
+      // once current frame data arrives; metadata alone is not drawable.
       if (Math.abs(t - video.currentTime) < 0.05) {
+        if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+          pendingTimeRef.current = t;
+          return;
+        }
         captureCurrentFrame();
         return;
       }
@@ -190,7 +239,10 @@ export function useScrubThumbnails(
 
   const onHover = useCallback(
     (timeSeconds: number) => {
-      if (!enabled) return;
+      const video = videoRef.current;
+      if (!enabled || !sourceUrl || sourceOwnerRef.current !== sourceUrl || video == null ||
+          !Number.isFinite(timeSeconds) || document.visibilityState === "hidden") return;
+      hoveringRef.current = true;
       // Serve from cache instantly when we have a nearby bucket.
       const bucket = Math.round(timeSeconds / BUCKET_SECONDS);
       const cached = cacheRef.current.get(bucket);
@@ -200,6 +252,15 @@ export function useScrubThumbnails(
         // Still show the time label immediately, image fills in after the seek.
         setPreview((p) => ({ image: p?.image ?? null, time: timeSeconds }));
       }
+      if (!sourceAttachedRef.current) {
+        // Source assignment itself can fetch. Do it only for a real preview,
+        // with listeners installed and the latest requested time retained.
+        sourceAttachedRef.current = true;
+        pendingTimeRef.current = timeSeconds;
+        video.preload = "auto";
+        video.src = sourceUrl;
+        video.load();
+      }
       const now = Date.now();
       if (now - lastCaptureRef.current < THROTTLE_MS) {
         pendingTimeRef.current = timeSeconds;
@@ -208,10 +269,12 @@ export function useScrubThumbnails(
       lastCaptureRef.current = now;
       requestCapture(timeSeconds);
     },
-    [enabled, requestCapture],
+    [enabled, sourceUrl, requestCapture],
   );
 
   const onLeave = useCallback(() => {
+    hoveringRef.current = false;
+    lastCaptureRef.current = -Infinity;
     pendingTimeRef.current = null;
     setPreview(null);
   }, []);

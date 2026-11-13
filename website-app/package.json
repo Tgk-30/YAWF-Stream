@@ -1,14 +1,15 @@
 {
   "name": "yawf-stream-site",
   "private": true,
-  "version": "2.3.102",
+  "version": "2.3.103",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build && npm run check:bundle",
+    "build": "npm run check:toolchain && tsc -b && vite build && npm run check:bundle",
     "check:bundle": "node ../scripts/check_bundle_budgets.mjs website-app",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check:toolchain": "node ../scripts/check_website_toolchain_override.mjs"
   },
   "dependencies": {
     "@gsap/react": "^2.1.2",
@@ -85,5 +86,10 @@
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.46.4",
     "vite": "^7.3.7"
+  },
+  "overrides": {
+    "@typescript-eslint/typescript-estree@8.52.0": {
+      "minimatch": "11.0.1"
+    }
   }
 }
