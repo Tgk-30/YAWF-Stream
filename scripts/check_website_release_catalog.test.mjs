@@ -10,10 +10,19 @@ test("website release catalog accepts the published platform channels", () => {
 
 test("website release catalog rejects server90 while leaving independent channels unchanged", () => {
   const previous = source.replace(
-    "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.106', tag: 'v2.3.106' };",
+    "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.107', tag: 'v2.3.107' };",
     "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.90', tag: 'v2.3.90' };",
   );
-  assert.notEqual(previous, source, "fixture must contain the server106 mutation target");
+  assert.notEqual(previous, source, "fixture must contain the server107 mutation target");
+  assert.deepEqual(validateWebsiteReleaseCatalog(previous), ["SERVER_RELEASE must retain its published version and tag"]);
+});
+
+test("website release catalog rejects the previously published server106 tuple", () => {
+  const previous = source.replace(
+    "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.107', tag: 'v2.3.107' };",
+    "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.106', tag: 'v2.3.106' };",
+  );
+  assert.notEqual(previous, source, "fixture must contain the server107 mutation target");
   assert.deepEqual(validateWebsiteReleaseCatalog(previous), ["SERVER_RELEASE must retain its published version and tag"]);
 });
 
@@ -40,13 +49,13 @@ for (const { name, from, to } of [
   },
   {
     name: "previous102 server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.106', tag: 'v2.3.106' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.107', tag: 'v2.3.107' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.102', tag: 'v2.3.102' };",
   },
   {
     name: "unpublished future server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.106', tag: 'v2.3.106' };",
-    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.107', tag: 'v2.3.107' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.107', tag: 'v2.3.107' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.108', tag: 'v2.3.108' };",
   },
   {
     name: "desktop version",
@@ -90,7 +99,7 @@ for (const { name, from, to } of [
   },
   {
     name: "previous104 server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.106', tag: 'v2.3.106' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.107', tag: 'v2.3.107' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'v2.3.104' };",
   },
   {
@@ -105,37 +114,37 @@ for (const { name, from, to } of [
   },
   {
     name: "published server version",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.106', tag: 'v2.3.106' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.107', tag: 'v2.3.107' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.51', tag: 'v2.3.51' };",
   },
   {
     name: "server release tag independently of version",
-    from: "tag: 'v2.3.106'",
+    from: "tag: 'v2.3.107'",
     to: "tag: 'v2.3.51'",
   },
   {
     name: "stale server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.106', tag: 'v2.3.106' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.107', tag: 'v2.3.107' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.95', tag: 'v2.3.95' };",
   },
   {
     name: "older published server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.106', tag: 'v2.3.106' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.107', tag: 'v2.3.107' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.96', tag: 'v2.3.96' };",
   },
   {
     name: "previous published server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.106', tag: 'v2.3.106' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.107', tag: 'v2.3.107' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.98', tag: 'v2.3.98' };",
   },
   {
     name: "previously current server101 channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.106', tag: 'v2.3.106' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.107', tag: 'v2.3.107' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.101', tag: 'v2.3.101' };",
   },
   {
     name: "previous103 server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.106', tag: 'v2.3.106' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.107', tag: 'v2.3.107' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.103', tag: 'v2.3.103' };",
   },
   {
