@@ -5,8 +5,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const UPDATER_SHA256 = "689275dd62813f589013519d783316e7bb27260cf98a49b6c879ff7abefa027f";
-export const FIXTURE_SHA256 = "1a0f6f9346f678c601b48ba6bb657b05f8c1ecfa03a72ca4849403cae18e78a2";
+export const UPDATER_SHA256 = "65355a43e7209cd9ca292d41d354e2c571f0944efb1e5445d1076c1d266de6b4";
+export const FIXTURE_SHA256 = "a5b60b880a04f02a75725f9cd524dbeed8aebdec945a1db7b76387273f3142cf";
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const SOURCE = resolve(ROOT, "../../scripts/android/YawfAndroidUpdater.kt");
 const OUTPUT = resolve(

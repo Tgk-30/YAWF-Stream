@@ -18,7 +18,7 @@ android {
         buildConfigField(
             "String",
             "UPDATER_SOURCE_SHA256",
-            "\"689275dd62813f589013519d783316e7bb27260cf98a49b6c879ff7abefa027f\"",
+            "\"65355a43e7209cd9ca292d41d354e2c571f0944efb1e5445d1076c1d266de6b4\"",
         )
     }
 

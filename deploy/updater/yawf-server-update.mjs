@@ -129,7 +129,7 @@ async function boundedFetch(url, { fetchImpl = fetch, maxBytes = 2_000_000, sign
 }
 
 async function discoverManifestReleases(fetchImpl) {
-  const selected = []; let aggregateBytes = 0;
+  const selected = []; let aggregateBytes = 0; let historyEnded = false;
   const signal = AbortSignal.timeout(RELEASE_DISCOVERY_TIMEOUT_MS);
   for (let page = 1; page <= RELEASE_PAGE_LIMIT; page += 1) {
     const url = new URL(RELEASES_API);
@@ -141,14 +141,15 @@ async function discoverManifestReleases(fetchImpl) {
     if (!Array.isArray(releases) || releases.length > RELEASES_PER_PAGE) throw new Error("GitHub returned invalid paginated release metadata.");
     selected.push(...selectManifestReleases(releases));
     if (releases.length < RELEASES_PER_PAGE) {
-      return selected.sort((a, b) => semverCompare(b.version, a.version) || Number(a.tag.endsWith("-web")) - Number(b.tag.endsWith("-web")));
+      historyEnded = true;
+      break;
     }
   }
-  throw new Error("GitHub release discovery exceeded its page limit.");
+  return { releases: selected.sort((a, b) => semverCompare(b.version, a.version) || Number(a.tag.endsWith("-web")) - Number(b.tag.endsWith("-web"))), historyEnded };
 }
 
 export async function resolveUpdateCandidate(currentVersion, fetchImpl = fetch) {
-  const releases = await discoverManifestReleases(fetchImpl);
+  const { releases, historyEnded } = await discoverManifestReleases(fetchImpl);
   for (const release of releases) {
     if (semverCompare(release.version, currentVersion) <= 0) continue;
     const bytes = await boundedFetch(release.manifest.browser_download_url, { fetchImpl, maxBytes: 64 * 1024 });
@@ -163,6 +164,7 @@ export async function resolveUpdateCandidate(currentVersion, fetchImpl = fetch) 
     }
     return { ...parsed, tag: release.tag };
   }
+  if (!historyEnded) throw new Error("GitHub release discovery reached its page limit without a verified newer candidate.");
   return null;
 }
 

@@ -21,15 +21,16 @@ const manifest = {
 };
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
-function candidateFixture() {
-  const manifestBytes = Buffer.from(JSON.stringify(manifest));
-  const sums = Buffer.from(`${sha256(manifestBytes)}  server-update.json\n${manifest.debian.sha256}  ${manifest.debian.name}\n`);
-  const tag = `v${releaseVersion}`;
-  const asset = (name, bytes) => ({ name, size: name === manifest.debian.name ? manifest.debian.size : bytes.length,
-    digest: `sha256:${name === manifest.debian.name ? manifest.debian.sha256 : sha256(bytes)}`,
+function candidateFixture(version = releaseVersion) {
+  const fixtureManifest = { ...manifest, version, debian: { ...manifest.debian, name: `debridstreamer-server_${version}_all.deb` } };
+  const manifestBytes = Buffer.from(JSON.stringify(fixtureManifest));
+  const sums = Buffer.from(`${sha256(manifestBytes)}  server-update.json\n${fixtureManifest.debian.sha256}  ${fixtureManifest.debian.name}\n`);
+  const tag = `v${version}`;
+  const asset = (name, bytes) => ({ name, size: name === fixtureManifest.debian.name ? fixtureManifest.debian.size : bytes.length,
+    digest: `sha256:${name === fixtureManifest.debian.name ? fixtureManifest.debian.sha256 : sha256(bytes)}`,
     browser_download_url: `https://github.com/Tgk-30/YAWF-Stream/releases/download/${tag}/${name}` });
   const release = { tag_name: tag, draft: false, prerelease: false, published_at: "2026-10-12T00:00:00Z",
-    assets: [asset("server-update.json", manifestBytes), asset(manifest.debian.name, Buffer.alloc(0)), asset("SHA256SUMS", sums)] };
+    assets: [asset("server-update.json", manifestBytes), asset(fixtureManifest.debian.name, Buffer.alloc(0)), asset("SHA256SUMS", sums)] };
   const assetResponse = (url) => new Response(String(url).endsWith("server-update.json") ? manifestBytes : sums,
     { status: 200, headers: { "content-length": String(String(url).endsWith("server-update.json") ? manifestBytes.length : sums.length) } });
   return { manifestBytes, release, sums, assetResponse };
@@ -184,6 +185,86 @@ test("release discovery ignores external pagination links", async () => {
   assert.equal(await resolveUpdateCandidate("0.0.0", fetchImpl), null);
   assert.deepEqual(requested.map((url) => new URL(url).hostname), ["api.github.com", "api.github.com"]);
   assert.deepEqual(requested.map((url) => new URL(url).searchParams.get("page")), ["1", "2"]);
+});
+
+// Eleven full catalog pages exist, but only the fixed first ten may be read.
+function boundedWindowFixture(first = candidateFixture(), later = null, failure = null) {
+  const outside = candidateFixture("99.0.0");
+  const filler = index => ({ tag_name: `not-a-release-${index}` });
+  const catalog = Array.from({ length: 11 }, (_, page) => Array.from({ length: 20 }, (_, index) => filler(page * 20 + index)));
+  catalog[0][0] = first.release;
+  if (later != null) catalog[9][19] = later.release;
+  catalog[10][0] = outside.release;
+  const pages = [], assets = [];
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.hostname === "api.github.com") {
+      const page = Number(parsed.searchParams.get("page")); pages.push(page);
+      assert.ok(page <= 10, "never expand the fixed release window");
+      if (page === 2 && failure === "malformed-page") return new Response("{");
+      if (page === 2 && failure === "http-page") return new Response("failure", { status: 503 });
+      if (page === 2 && failure === "timeout-page") throw new DOMException("fixture deadline", "TimeoutError");
+      if (page === 2 && failure === "oversized-page") return new Response("x".repeat(RELEASE_PAGE_MAX_BYTES + 1));
+      const value = catalog[page - 1];
+      if (failure === "aggregate-pages") for (const entry of value) entry.padding = "x".repeat(45_000);
+      return new Response(JSON.stringify(value));
+    }
+    assets.push(parsed.href);
+    const selected = later != null && parsed.pathname.includes(`/v${later.release.tag_name.slice(1)}/`) ? later : first;
+    if (failure === "manifest-digest" && parsed.pathname.endsWith("server-update.json")) return new Response("{}");
+    return selected.assetResponse(url);
+  };
+  return { fetchImpl, pages, assets };
+}
+
+test("a full bounded window admits a validated first-page newer candidate from a catalog over 200 releases", async () => {
+  const fixture = boundedWindowFixture();
+  assert.equal((await resolveUpdateCandidate(previousVersion, fixture.fetchImpl)).version, releaseVersion);
+  assert.deepEqual(fixture.pages, [1,2,3,4,5,6,7,8,9,10]);
+  assert.equal(fixture.assets.length, 2);
+});
+
+test("a full bounded window scans every page before choosing a higher last-page candidate", async () => {
+  const higher = candidateFixture("9.8.7");
+  const fixture = boundedWindowFixture(candidateFixture(), higher);
+  assert.equal((await resolveUpdateCandidate(previousVersion, fixture.fetchImpl)).version, "9.8.7");
+  assert.deepEqual(fixture.pages, [1,2,3,4,5,6,7,8,9,10]);
+  assert.ok(fixture.assets.every(url => url.includes("/v9.8.7/")), "validate only the highest eligible release, never a lower fallback");
+});
+
+for (const failure of ["manifest-digest", "malformed-page", "http-page", "timeout-page", "oversized-page", "aggregate-pages"]) {
+  test(`an earlier newer candidate cannot bypass a later ${failure} failure`, async () => {
+    const fixture = boundedWindowFixture(candidateFixture(), null, failure);
+    await assert.rejects(resolveUpdateCandidate(previousVersion, fixture.fetchImpl), /digest|JSON|property|request failed|deadline|size limit/);
+  });
+}
+
+test("an invalid highest manifest refuses instead of installing a valid lower release", async () => {
+  const lower = candidateFixture("2.3.104");
+  const higher = candidateFixture("2.3.105");
+  const bad = Buffer.from(JSON.stringify({ ...JSON.parse(higher.manifestBytes.toString("utf8")), command: "sh" }));
+  higher.release.assets.find(asset => asset.name === "server-update.json").digest = `sha256:${sha256(bad)}`;
+  const sums = Buffer.from(`${sha256(bad)}  server-update.json\n${manifest.debian.sha256}  debridstreamer-server_2.3.105_all.deb\n`);
+  higher.release.assets.find(asset => asset.name === "SHA256SUMS").digest = `sha256:${sha256(sums)}`;
+  higher.assetResponse = url => String(url).endsWith("server-update.json") ? new Response(bad) : new Response(sums);
+  const fixture = boundedWindowFixture(lower, higher);
+  await assert.rejects(resolveUpdateCandidate("2.3.103", fixture.fetchImpl), /manifest|schema|keys|Invalid/);
+  assert.equal(fixture.assets.length, 1);
+  assert.ok(fixture.assets[0].includes("/v2.3.105/"));
+});
+
+for (const current of [releaseVersion, "99.0.0"]) {
+  test(`an incomplete window with only equal or older releases fails for installed ${current}`, async () => {
+    const fixture = boundedWindowFixture();
+    await assert.rejects(resolveUpdateCandidate(current, fixture.fetchImpl), /page limit|bounded/);
+    assert.equal(fixture.pages.length, 10);
+    assert.equal(fixture.assets.length, 0);
+  });
+}
+
+test("complete short history with no newer eligible release may report up to date", async () => {
+  const fixture = candidateFixture();
+  assert.equal(await resolveUpdateCandidate(releaseVersion, async () => new Response(JSON.stringify([fixture.release]))), null);
 });
 
 test("volume copier streams protected files with exact numeric metadata and rejects unsafe trees", () => {
