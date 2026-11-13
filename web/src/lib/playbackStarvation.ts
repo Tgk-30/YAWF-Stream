@@ -18,29 +18,46 @@ export class PlaybackStarvation {
   private progressed = false;
   private resumePosition: number | null = null;
   private episodes: number[] = [];
-  private attempted = false;
+  private attempts = 0;
+  private lastAttemptQuality: ServerTranscodeQuality | null = null;
+  private rearmed = false;
   private audioInventoryAttempted = false;
   private confirmation: WaitingConfirmation | null = null;
 
   get waitingConfirmation(): WaitingConfirmation | null { return this.confirmation; }
+  get requiresAdoptedSource(): boolean { return this.attempts === 1 && this.rearmed; }
 
   cancelWaitingConfirmation(): void { this.confirmation = null; }
 
   get audioInventoryLoadAttempted(): boolean { return this.audioInventoryAttempted; }
 
   claimAudioInventoryLoad(): boolean {
-    if (this.audioInventoryAttempted || this.attempted) return false;
+    if (this.audioInventoryAttempted || this.attempts > 0) return false;
     this.audioInventoryAttempted = true;
     return true;
   }
 
-  claimAttempt(now: number, eligible: boolean): boolean {
+  claimAttempt(now: number, eligible: boolean, quality?: ServerTranscodeQuality): boolean {
     if (!eligible) { this.interrupt(); return false; }
     this.episodes = this.episodes.filter((at) => now >= at && now - at <= STARVATION_EPISODE_WINDOW_MS);
-    if (this.attempted || this.episodes.length < STARVATION_EPISODES_BEFORE_REDUCTION) return false;
-    this.attempted = true;
+    if (this.attempts >= 2 || (this.attempts === 1 && !this.rearmed) ||
+      this.episodes.length < STARVATION_EPISODES_BEFORE_REDUCTION) return false;
+    if (this.attempts === 1 && (quality == null || quality === "auto" || this.lastAttemptQuality == null ||
+      parseInt(quality, 10) >= parseInt(this.lastAttemptQuality, 10))) return false;
+    this.attempts += 1;
+    this.lastAttemptQuality = quality ?? null;
+    this.rearmed = false;
     return true;
   }
+
+  /** Only the caller that verified the prepared generation may rearm. */
+  adoptFirstAttempt(quality: ServerTranscodeQuality): void {
+    if (this.attempts !== 1 || this.rearmed || this.lastAttemptQuality !== quality) return;
+    this.interrupt();
+    this.rearmed = true;
+  }
+
+  private get blocked(): boolean { return this.attempts >= 2 || (this.attempts === 1 && !this.rearmed); }
 
   interrupt(): void {
     this.lastPosition = null;
@@ -69,14 +86,14 @@ export class PlaybackStarvation {
 
   waiting(now: number, bufferedAhead: number, eligible: boolean, attemptReady = true): boolean {
     if (!eligible) { this.interrupt(); return false; }
-    if (this.attempted || !this.progressed || !Number.isFinite(bufferedAhead) || bufferedAhead > 0.5) return false;
+    if (this.blocked || !this.progressed || !Number.isFinite(bufferedAhead) || bufferedAhead > 0.5) return false;
     return this.episode(now, attemptReady);
   }
 
   beginWaitingConfirmation(now: number, position: number, playbackIntent: number, eligible: boolean): WaitingConfirmation | null {
     if (!eligible || !Number.isFinite(now)) { this.interrupt(); return null; }
     this.progress(position, true);
-    if (this.attempted || !this.progressed) return null;
+    if (this.blocked || !this.progressed) return null;
     return this.confirmation ??= { at: now, position: this.lastPosition ?? position, playbackIntent };
   }
 

@@ -41,6 +41,44 @@ describe("PlaybackStarvation", () => {
     }
   });
 
+  it("[progressive107] refuses same or higher second rungs even after first adoption", () => {
+    for (const forbidden of ["480p", "720p", "1080p", "auto"] as const) {
+      const policy = new PlaybackStarvation();
+      policy.progress(10, true); policy.progress(11, true); policy.waiting(1, 0, true, false);
+      policy.progress(12, true); policy.waiting(2, 0, true, false);
+      expect(policy.claimAttempt(3, true, "480p")).toBe(true);
+      policy.adoptFirstAttempt("480p");
+      policy.progress(0, true); policy.progress(1, true); policy.waiting(4, 0, true, false);
+      policy.progress(2, true); policy.waiting(5, 0, true, false);
+      expect(policy.claimAttempt(6, true, forbidden)).toBe(false);
+    }
+  });
+
+  it("[progressive107] never permits a third attempt even with a lower available rung", () => {
+    const policy = new PlaybackStarvation();
+    policy.progress(10, true); policy.progress(11, true); policy.waiting(1, 0, true, false);
+    policy.progress(12, true); policy.waiting(2, 0, true, false);
+    expect(policy.claimAttempt(3, true, "720p")).toBe(true);
+    policy.adoptFirstAttempt("720p");
+    policy.progress(0, true); policy.progress(1, true); policy.waiting(4, 0, true, false);
+    policy.progress(2, true); policy.waiting(5, 0, true, false);
+    expect(policy.claimAttempt(6, true, "480p")).toBe(true);
+    policy.adoptFirstAttempt("480p");
+    policy.interrupt();
+    for (let i = 0; i < 5; i++) { policy.progress(20 + i, true); policy.waiting(7 + i, 0, true, false); }
+    expect(policy.claimAttempt(20, true, "360p")).toBe(false);
+  });
+
+  it("[progressive107] a wrong adopted quality cannot rearm an attempt", () => {
+    const policy = new PlaybackStarvation();
+    policy.progress(10, true); policy.progress(11, true); policy.waiting(1, 0, true, false);
+    policy.progress(12, true); policy.waiting(2, 0, true, false);
+    expect(policy.claimAttempt(3, true, "480p")).toBe(true);
+    policy.adoptFirstAttempt("720p");
+    for (let i = 0; i < 5; i++) { policy.progress(20 + i, true); policy.waiting(4 + i, 0, true, false); }
+    expect(policy.claimAttempt(10, true, "360p")).toBe(false);
+  });
+
   it("ignores healthy buffer, invalid buffer, and episodes outside the rolling window", () => {
     const policy = new PlaybackStarvation();
     policy.progress(10, true); policy.progress(11, true);
