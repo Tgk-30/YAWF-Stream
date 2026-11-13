@@ -19,6 +19,16 @@ test("website release catalog rejects server90 while leaving independent channel
 
 for (const { name, from, to } of [
   {
+    name: "previous102 desktop channel",
+    from: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.103', tag: 'v2.3.103-web' };",
+    to: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.102', tag: 'v2.3.102-web' };",
+  },
+  {
+    name: "unpublished future desktop channel",
+    from: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.103', tag: 'v2.3.103-web' };",
+    to: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'v2.3.104-web' };",
+  },
+  {
     name: "previous102 Android phone channel",
     from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'android-v2.3.104' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.102', tag: 'android-v2.3.102' };",
@@ -40,7 +50,7 @@ for (const { name, from, to } of [
   },
   {
     name: "desktop version",
-    from: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.102', tag: 'v2.3.102-web' };",
+    from: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.103', tag: 'v2.3.103-web' };",
     to: "export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.25', tag: 'v2.3.28-web' };",
   },
   {
