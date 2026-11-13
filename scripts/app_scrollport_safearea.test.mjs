@@ -125,16 +125,49 @@ test("standalone coarse non-phone scrollport starts below safe top and ends at t
   }
 });
 
+function assertFixedViewportControl(css, selector) {
+  const rule = declarations(css, selector);
+  assert.equal(rule.position, "fixed", "coarse headers use the viewport, not the inset scrollport");
+  for (const compact of [false, true]) for (const safeTop of [8, 32, 0]) {
+    const vars = variables(safeTop, compact);
+    const expected = Math.max(parseFloat(vars["--sp-md"]), safeTop);
+    for (const used of [0, 8, 32]) {
+      assert.equal(pixels(rule.top, { ...vars, [consumed]: `${used}px` }), expected,
+        `fixed viewport top ignores consumed ${used}, safeTop ${safeTop}, compact ${compact}`);
+    }
+  }
+}
+
 for (const [label, css, selector] of [["search", search, ".global-search"], ["profile", profile, ".profile-menu"]]) {
-  test(`${label} subtracts consumed inset after the full max without changing initial viewport position`, () => {
-    const rule = declarations(css, selector);
+  test(`${label} fixed coarse viewport top is invariant to parent consumed inset`, () => {
+    assertFixedViewportControl(css, selector);
+  });
+
+  test(`${label} absolute fine-pointer top compensates only its containing-block inset`, () => {
+    const rule = declarations(css, selector, { ...tablet, coarse: false });
+    assert.equal(rule.position, "absolute");
     for (const compact of [false, true]) for (const safeTop of [8, 32, 0]) {
       const vars = variables(safeTop, compact);
-      const original = Math.max(parseFloat(vars["--sp-md"]), safeTop);
-      assert.equal(pixels(rule.top, { ...vars, [consumed]: "0px" }), original, "unconsumed position is unchanged");
-      assert.equal(safeTop + pixels(rule.top, { ...vars, [consumed]: `${safeTop}px` }), original, `consumed position, safeTop ${safeTop}, compact ${compact}`);
+      const expected = Math.max(parseFloat(vars["--sp-md"]), safeTop);
+      for (const used of [0, 8, 32]) {
+        assert.equal(used + pixels(rule.top, { ...vars, [consumed]: `${used}px` }), expected,
+          "absolute local top plus containing-block inset preserves the original position");
+      }
     }
   });
+
+  for (const [name, before, after] of [
+    ["wrong coarse position", "position: fixed;", "position: absolute;"],
+    ["removed coarse top", "top: max(var(--sp-md), var(--safe-area-top));", ""],
+  ]) {
+    test(`${label} fixed-coordinate control rejects ${name}`, () => {
+      const coarse = css.indexOf("@media (pointer: coarse)");
+      assert.notEqual(coarse, -1);
+      const mutant = css.slice(0, coarse) + css.slice(coarse).replace(before, after);
+      assert.notEqual(mutant, css);
+      assert.throws(() => assertFixedViewportControl(mutant, selector), { name: "AssertionError" });
+    });
+  }
 }
 
 test("library subtracts consumed inset without changing the floating-row bound or initial header", () => {

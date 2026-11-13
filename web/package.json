@@ -1,7 +1,7 @@
 {
   "name": "debridstreamer-web",
   "private": true,
-  "version": "2.3.102",
+  "version": "2.3.103",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -42,11 +42,11 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^6.0.2",
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitest/coverage-v8": "^4.1.12",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^29.1.1",
     "typescript": "^5.6.3",
-    "vite": "^8.0.16",
-    "vitest": "^4.1.11"
+    "vite": "^8.1.6",
+    "vitest": "^4.1.12"
   }
 }
