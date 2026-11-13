@@ -83,6 +83,7 @@ import { AdjustmentRange } from "./player/AdjustmentRange";
 import { CaptionsMenu, type EmbeddedCaptions } from "./player/CaptionsMenu";
 import { EmbeddedPlayer } from "./EmbeddedPlayer";
 import { CastControls } from "./CastControls";
+import { PLAYBACK_CLOCK_SAMPLE_MS } from "../lib/playbackClockStall";
 import { PlaybackStarvation, STARVATION_WAIT_CONFIRMATION_MS, lowerStarvationQuality } from "../lib/playbackStarvation";
 import { bindServerHlsAudio, boundServerHlsAudioIndex, type ServerHlsAudioBinding } from "../lib/serverHlsAudioBinding";
 import { predictEpisodeEnd } from "../lib/endPredictor";
@@ -2269,6 +2270,8 @@ export function VideoPlayer({
           automaticHandoffState = purpose === "automatic-starvation" && typeof handoffState === "function"
             ? handoffState() : null;
           if (!ownsRequest()) return false;
+          // A refused owned reader must stay refused even on legacy masters.
+          if (purpose === "automatic-starvation" && snapshot === "legacy" && automaticHandoffState == null) return false;
           activationPosition = positionIntent === "fixed" ? position : latestAbsolutePositionRef.current;
           if (purpose === "automatic-starvation" && activationPosition < next.timelineOffsetSeconds) return false;
           if (snapshot !== "legacy") {
@@ -7507,6 +7510,7 @@ function WebviewPlayer({
   ]);
   const starvationInventoryIdentity = serverAudioInventoryStatus !== "ready" || serverAudioTracks.length === 0
     ? null : JSON.stringify(serverAudioTracks.map((track) => [track.index, track.id, track.language, track.logicalLabel]));
+  const nativeClockControlsRef = useRef(false);
   const starvationAudioSnapshotRef = useRef<{ source: typeof sourceIdentity; selection: string; inventory: string | null } | null>(null);
   const starvationQualities = serverOptimized?.qualities.slice().sort().join(",") ?? null;
   useEffect(() => {
@@ -7560,6 +7564,22 @@ function WebviewPlayer({
       !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null && pendingRecoverySeekFor(video) == null &&
       !terminalRecoveryOwns(video) && !recoveryClockWasReset(video) && backgroundPauseVideoRef.current !== video &&
       foregroundPlaybackRef.current == null && !serverOptimizationPending;
+    // DOM/CSS fullscreen is still our inline player. Only OS-owned presentation
+    // and controls exclude this independent clock-stall admission.
+    const inlineClockOwnership = () => video.isConnected && !video.controls && !nativeClockControlsRef.current &&
+      document.visibilityState === "visible" && document.hasFocus() && document.pictureInPictureElement !== video &&
+      (video as WebKitVideoElement).webkitPresentationMode !== "picture-in-picture" &&
+      (video as WebKitVideoElement).webkitPresentationMode !== "fullscreen" &&
+      (video as HTMLVideoElement & { webkitDisplayingFullscreen?: boolean }).webkitDisplayingFullscreen !== true;
+    const decodedFrames = (): readonly [number | null, number | null] => {
+      const valid = (value: unknown): number | null => typeof value === "number" &&
+        Number.isSafeInteger(value) && value >= 0 ? value : null;
+      let browser: number | null = null;
+      let native: number | null = null;
+      try { browser = valid(video.getVideoPlaybackQuality?.().totalVideoFrames); } catch { /* Optional browser counter. */ }
+      try { native = valid((video as HTMLVideoElement & { webkitDecodedFrameCount?: number }).webkitDecodedFrameCount); } catch { /* Optional native counter. */ }
+      return [browser, native];
+    };
     const readLocalAudioSelection = activeServerOptimizedQuality == null ||
       (activeServerAudioPreference == null && !initialServerAudioTrackExplicit);
     const needsLocalAudioInventory = () => readLocalAudioSelection &&
@@ -7588,6 +7608,7 @@ function WebviewPlayer({
       else if (starvationPolicy.waitingConfirmation == null) clearConfirmationTimer();
       if (needsLocalAudioInventory() && serverAudioInventoryStatus === "idle" &&
         starvationPolicy.claimAudioInventoryLoad()) startServerAudioInventoryLoad(false);
+      sampleClock();
     };
     const nativeSelection = () => {
       const list = (video as BrowserAudioVideoElement).audioTracks;
@@ -7669,15 +7690,39 @@ function WebviewPlayer({
         label: selected?.logicalLabel ?? activeServerAudioPreference?.label ?? null,
       }) });
     };
-    const reduce = (plan: NonNullable<ReturnType<typeof audioPlan>>) => {
+    const reduce = (plan: NonNullable<ReturnType<typeof audioPlan>>, sustained = false) => {
+      const heldClock = video.currentTime;
+      const heldFrames = decodedFrames();
+      const heldIntent = playbackAttemptRef.current;
       setAutomaticReductionLimitation(null);
       onAutomaticQualityReduction(plan.quality, () => {
         if (!currentMediaEvent(video) || selectionKey() !== plan.nativeSelection || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.error != null || video.seeking ||
           rendererSeekingRef.current || recoveryClockWasReset(video) || terminalRecoveryOwns(video) || !Number.isFinite(video.currentTime)) return null;
+        const frames = decodedFrames();
+        if (sustained && (!inlineClockOwnership() || ownedPlaybackPausedRef.current || video.paused || video.ended ||
+          suspendedRef.current || documentSuspendedRef.current || scrubbingRef.current ||
+          playbackAttemptRef.current !== heldIntent || video.currentTime > heldClock + 0.01 || video.currentTime < heldClock - 0.05 ||
+          frames[0] !== heldFrames[0] || frames[1] !== heldFrames[1])) return null;
         onAbsolutePositionChange(absolutePlaybackPosition());
         return playbackHandoffState();
       }, plan.sourceAudioTrack ?? undefined, plan.preference,
-        () => starvationPolicy.claimAttempt(performance.now(), eligible(), plan.quality));
+        () => {
+          if (!sustained) return starvationPolicy.claimAttempt(performance.now(), eligible(), plan.quality);
+          const frames = decodedFrames();
+          return starvationPolicy.claimClockStall(performance.now(), video.currentTime, frames[0], playbackAttemptRef.current,
+            eligible() && inlineClockOwnership(), plan.quality, frames[1]);
+        });
+    };
+    const sampleClock = () => {
+      const allowed = eligible() && inlineClockOwnership();
+      const frames = decodedFrames();
+      const stalled = starvationPolicy.sampleClockStall(performance.now(), video.currentTime,
+        frames[0], playbackAttemptRef.current, allowed, frames[1]);
+      if (!allowed) return;
+      if (needsLocalAudioInventory() && serverAudioInventoryStatus === "idle" &&
+        starvationPolicy.claimAudioInventoryLoad()) startServerAudioInventoryLoad(false);
+      const plan = stalled ? audioPlan() : null;
+      if (plan != null) reduce(plan, true);
     };
     const scheduleConfirmation = () => {
       const pending = starvationPolicy.waitingConfirmation;
@@ -7720,6 +7765,15 @@ function WebviewPlayer({
     if (plan != null) reduce(plan);
     scheduleConfirmation();
     const interrupt = () => { cancelConfirmation(); starvationPolicy.interrupt(); onCancelAutomaticQualityReduction(); };
+    const enterNativeControls = () => { nativeClockControlsRef.current = true; interrupt(); };
+    const leaveNativeControls = () => { nativeClockControlsRef.current = false; interrupt(); };
+    const presentationChanged = () => {
+      nativeClockControlsRef.current = (video as WebKitVideoElement).webkitPresentationMode !== "inline";
+      interrupt();
+    };
+    sampleClock();
+    const clockTimer = automaticQualityIntent && serverOptimized != null
+      ? setInterval(sampleClock, PLAYBACK_CLOCK_SAMPLE_MS) : null;
     const seeking = interrupt;
     const nativeAudio = (video as BrowserAudioVideoElement).audioTracks;
     const nativeAudioChanged = () => {
@@ -7742,7 +7796,15 @@ function WebviewPlayer({
     video.addEventListener("pause", interrupt);
     document.addEventListener("visibilitychange", interrupt);
     window.addEventListener("pagehide", interrupt);
+    window.addEventListener("blur", interrupt);
+    window.addEventListener("focus", interrupt);
+    video.addEventListener("enterpictureinpicture", enterNativeControls);
+    video.addEventListener("leavepictureinpicture", leaveNativeControls);
+    video.addEventListener("webkitbeginfullscreen", enterNativeControls);
+    video.addEventListener("webkitendfullscreen", leaveNativeControls);
+    video.addEventListener("webkitpresentationmodechanged", presentationChanged);
     return () => {
+      if (clockTimer != null) clearInterval(clockTimer);
       clearConfirmationTimer();
       nativeAudio?.removeEventListener?.("change", nativeAudioChanged);
       nativeAudio?.removeEventListener?.("addtrack", nativeAudioChanged);
@@ -7756,6 +7818,13 @@ function WebviewPlayer({
       video.removeEventListener("pause", interrupt);
       document.removeEventListener("visibilitychange", interrupt);
       window.removeEventListener("pagehide", interrupt);
+      window.removeEventListener("blur", interrupt);
+      window.removeEventListener("focus", interrupt);
+      video.removeEventListener("enterpictureinpicture", enterNativeControls);
+      video.removeEventListener("leavepictureinpicture", leaveNativeControls);
+      video.removeEventListener("webkitbeginfullscreen", enterNativeControls);
+      video.removeEventListener("webkitendfullscreen", leaveNativeControls);
+      video.removeEventListener("webkitpresentationmodechanged", presentationChanged);
     };
   }, [absolutePlaybackPosition, activeServerAudioPreference, activeServerOptimizedQuality, automaticQualityIntent, hlsAudioTrack,
     hlsAudioTracks, initialServerAudioTrackExplicit, onAbsolutePositionChange, onAutomaticQualityReduction, onAutomaticAdoptionProgress,

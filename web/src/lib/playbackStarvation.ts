@@ -1,3 +1,4 @@
+import { PlaybackClockStall } from "./playbackClockStall";
 import type { ServerTranscodeQuality } from "./serverApi";
 
 const CLOCK_REGRESSION_TOLERANCE_SECONDS = 0.05;
@@ -23,6 +24,7 @@ export class PlaybackStarvation {
   private rearmed = false;
   private audioInventoryAttempted = false;
   private confirmation: WaitingConfirmation | null = null;
+  private readonly clockStall = new PlaybackClockStall();
 
   get waitingConfirmation(): WaitingConfirmation | null { return this.confirmation; }
   get requiresAdoptedSource(): boolean { return this.attempts === 1 && this.rearmed; }
@@ -40,13 +42,29 @@ export class PlaybackStarvation {
   claimAttempt(now: number, eligible: boolean, quality?: ServerTranscodeQuality): boolean {
     if (!eligible) { this.interrupt(); return false; }
     this.episodes = this.episodes.filter((at) => now >= at && now - at <= STARVATION_EPISODE_WINDOW_MS);
-    if (this.attempts >= 2 || (this.attempts === 1 && !this.rearmed) ||
-      this.episodes.length < STARVATION_EPISODES_BEFORE_REDUCTION) return false;
+    if (this.episodes.length < STARVATION_EPISODES_BEFORE_REDUCTION) return false;
+    return this.reserveAttempt(quality);
+  }
+
+  /** A different signal, never synthetic waiting episodes, with the SAME budget. */
+  sampleClockStall(now: number, position: number, frames: number | null, intent: number, eligible: boolean, nativeFrames: number | null = null): boolean {
+    return this.clockStall.sample(now, position, frames, intent, eligible && !this.blocked, nativeFrames);
+  }
+
+  claimClockStall(now: number, position: number, frames: number | null, intent: number, eligible: boolean, quality: ServerTranscodeQuality, nativeFrames: number | null = null): boolean {
+    if (!eligible) { this.interrupt(); return false; }
+    if (quality === "auto") return false;
+    return this.sampleClockStall(now, position, frames, intent, true, nativeFrames) && this.reserveAttempt(quality);
+  }
+
+  private reserveAttempt(quality?: ServerTranscodeQuality): boolean {
+    if (this.blocked) return false;
     if (this.attempts === 1 && (quality == null || quality === "auto" || this.lastAttemptQuality == null ||
       parseInt(quality, 10) >= parseInt(this.lastAttemptQuality, 10))) return false;
     this.attempts += 1;
     this.lastAttemptQuality = quality ?? null;
     this.rearmed = false;
+    this.clockStall.reset();
     return true;
   }
 
@@ -60,6 +78,7 @@ export class PlaybackStarvation {
   private get blocked(): boolean { return this.attempts >= 2 || (this.attempts === 1 && !this.rearmed); }
 
   interrupt(): void {
+    this.clockStall.reset();
     this.lastPosition = null;
     this.resumePosition = null;
     this.progressed = false;
