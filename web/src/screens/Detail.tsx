@@ -78,6 +78,7 @@ import { isServerMode } from "../lib/serverMode";
 import { isDesktopTauri } from "../lib/tauri";
 import { assertNetworkAllowed, getNetworkMode, isRequestExempt } from "../lib/networkPolicy";
 import type { PlaybackEngine } from "../lib/playbackEngine";
+import type { IosHlsPlaybackMode } from "../lib/iosHlsPlayback";
 import {
   playbackRecoverySessionIdentity,
   withFreshStreamResolutionTimeout,
@@ -198,6 +199,8 @@ interface ActivePlayer {
   /** Exact renderer selected for this source. Never infer this from the URL in
    * diagnostics: a debrid direct link often has no useful extension. */
   engine: PlaybackEngine;
+  /** Immutable engine preference captured when this player is opened. */
+  iosHlsPlaybackMode: IosHlsPlaybackMode;
   /** Original Server Mode source. It supplies the stream-scoped external-player
    * capability and, when transcoding is available, the safe HLS fallback. */
   fallbackStream: StreamInfo | null;
@@ -1096,6 +1099,7 @@ export function Detail() {
       },
       sourceFileName,
       engine,
+      iosHlsPlaybackMode: settings.iosHlsPlaybackMode,
       fallbackStream,
       initialQualityIntent,
       startPositionSeconds: Math.max(
@@ -2387,6 +2391,7 @@ export function Detail() {
             sourceFileName={player.sourceFileName}
             playbackAuthorization={player.fallbackStream?.playbackAuthorization}
             engine={player.engine}
+            iosHlsPlaybackMode={player.iosHlsPlaybackMode}
             requestWebviewFallback={
               player.fallbackStream != null &&
               player.fallbackStream.backend !== "direct_torrent" &&

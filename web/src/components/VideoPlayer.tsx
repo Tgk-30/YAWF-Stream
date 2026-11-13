@@ -51,6 +51,12 @@ import {
   mpvStop,
 } from "../lib/tauri";
 import { deviceKind, isStandaloneDisplay } from "../lib/platform";
+import {
+  iosHlsPlaybackRoute,
+  normalizeIosHlsPlaybackMode,
+  supportsStandardIosHlsMse,
+  type IosHlsPlaybackMode,
+} from "../lib/iosHlsPlayback";
 import { containerFullscreenExit, containerFullscreenRequest, ipadSafariPageUrl } from "../lib/playerFullscreen";
 import {
   isAndroidAppUiContext,
@@ -243,6 +249,8 @@ interface VideoPlayerProps {
   savedPrefs?: PlaybackPrefs | null;
   /** Optional global player defaults. Settings owns persistence and supplies this. */
   playerPreferences?: PlayerPreferenceDefaults | null;
+  /** iOS HLS engine choice snapshotted when Detail opens this player. */
+  iosHlsPlaybackMode?: IosHlsPlaybackMode;
   /** Subtitle source (local OpenSubtitles client or the Server-Mode client) when
    * available - powers subtitle search. Null disables the search UI. */
   subtitleClient?: SubtitleClient | null;
@@ -362,17 +370,25 @@ interface WebKitDocument extends Document {
   webkitFullscreenElement?: Element | null;
 }
 
-function shouldUseNativeHls(video: HTMLVideoElement): boolean {
+function shouldUseNativeHls(
+  video: HTMLVideoElement,
+  iosHlsPlaybackMode: IosHlsPlaybackMode,
+): boolean {
   // Native HLS commonly hides alternate audio tracks from web content even
   // when it reports that the manifest is playable. Prefer hls.js everywhere it
-  // can use MSE so the player gets a real track inventory. iOS remains native
-  // because WebKit does not expose MSE there. If hls.js later reports MSE as
-  // unavailable, the attach effect falls back to this native capability.
+  // can use MSE so the player gets a real track inventory. iOS stays native by
+  // default, while the explicit compatibility option requires standard MSE.
+  // If hls.js later reports MSE as unavailable, the attach effect falls back
+  // to the native capability.
+  // The explicit iOS compatibility preference is admitted only when standard
+  // Media Source is available; Managed Media Source is not an equivalent.
   const kind = deviceKind();
-  return (
-    kind === "ios" &&
-    video.canPlayType("application/vnd.apple.mpegurl") !== ""
-  );
+  if (kind !== "ios") return false;
+  return iosHlsPlaybackRoute({
+    mode: iosHlsPlaybackMode,
+    nativePlayable:
+      video.canPlayType("application/vnd.apple.mpegurl") !== "",
+  }) === "native";
 }
 
 const WEBKIT_EXACT_ZERO_FRAGMENT_SECONDS = 0.001;
@@ -910,10 +926,15 @@ export function VideoPlayer({
   initialHandoffState = null,
   autoCountdown = true,
   playerPreferences = null,
+  iosHlsPlaybackMode = "native",
   preferredPlayer,
   useBuiltInPlayer = true,
   serverOptimized,
 }: VideoPlayerProps) {
+  const iosHlsPlaybackModeRef = useRef(
+    normalizeIosHlsPlaybackMode(iosHlsPlaybackMode),
+  );
+  const effectiveIosHlsPlaybackMode = iosHlsPlaybackModeRef.current;
   const requestedEngine = engine ?? inferEngine(url, kind);
   const serverAudioRetentionScope = manualServerAudioScope(
     sourceFileName,
@@ -3322,6 +3343,7 @@ export function VideoPlayer({
             onEnded={reportEnded}
             savedPrefs={savedPrefs}
             playerPreferences={playerPreferences}
+            iosHlsPlaybackMode={effectiveIosHlsPlaybackMode}
             startPositionSeconds={effectiveStartPositionSeconds}
             timelineOffsetSeconds={effectiveTimelineOffsetSeconds}
             knownAbsoluteDurationSeconds={activeKnownAbsoluteDuration}
@@ -3490,6 +3512,7 @@ function WebviewPlayer({
   onEnded,
   savedPrefs,
   playerPreferences,
+  iosHlsPlaybackMode,
   startPositionSeconds,
   timelineOffsetSeconds,
   knownAbsoluteDurationSeconds,
@@ -3595,6 +3618,7 @@ function WebviewPlayer({
   ) => void;
   savedPrefs?: PlaybackPrefs | null;
   playerPreferences?: PlayerPreferenceDefaults | null;
+  iosHlsPlaybackMode: IosHlsPlaybackMode;
   startPositionSeconds?: number;
   timelineOffsetSeconds: number;
   knownAbsoluteDurationSeconds: number | null;
@@ -4842,6 +4866,14 @@ function WebviewPlayer({
   // seek (MP4/WebM). For HLS the manifest URL can't drive a second <video>
   // reliably, so gate them to non-HLS in-webview sources.
   const isHls = url.split("?")[0].toLowerCase().endsWith(".m3u8");
+  const compatibilityHlsOwnsMedia =
+    isHls &&
+    deviceKind() === "ios" &&
+    iosHlsPlaybackMode === "compatibility" &&
+    supportsStandardIosHlsMse() &&
+    !nativeHlsPlayback;
+  const advertisedAirPlayAvailable =
+    airPlayAvailable && !compatibilityHlsOwnsMedia;
   const thumbs = useScrubThumbnails(url, !isHls);
 
   // Safari/native-HLS and a few embedded browsers expose AudioTrackList on the
@@ -6463,7 +6495,7 @@ function WebviewPlayer({
       assignNativeSource(url);
       return;
     }
-    if (shouldUseNativeHls(video)) {
+    if (shouldUseNativeHls(video, iosHlsPlaybackMode)) {
       setNativeHlsPlayback(true);
       // WKWebView/Safari owns HLS loading here. Make its manifest and segment
       // requests use the authenticated webview cookie jar, not URL credentials.
@@ -6568,8 +6600,37 @@ function WebviewPlayer({
           ? Math.max(0, configuredStartPosition as number)
           : 0
         : null;
+      const compatibilityHlsRequested =
+        deviceKind() === "ios" && iosHlsPlaybackMode === "compatibility";
+      // Capability can change between the initial route decision and the lazy
+      // hls.js import. Revalidate beside construction so compatibility mode
+      // never silently lets hls.js select Managed Media Source instead.
+      if (compatibilityHlsRequested && !supportsStandardIosHlsMse()) {
+        if (element.canPlayType("application/vnd.apple.mpegurl") !== "") {
+          setNativeHlsPlayback(true);
+          if (isTrustedServerStreamURL(url)) {
+            element.crossOrigin = "use-credentials";
+          } else {
+            element.removeAttribute("crossorigin");
+          }
+          const sourceUrl = requiresExactHandoffRef.current
+            ? nativeHlsSourceWithExactStart(url, startPositionRef.current)
+            : url;
+          nativeExactHlsFragmentRef.current = requiresExactHandoffRef.current;
+          assignNativeSource(sourceUrl);
+          return;
+        }
+        onPlaybackErrorRef.current(
+          "Compatibility mode is unavailable in this browser. Try the native player or choose another source.",
+          exactHandoffPendingRef.current,
+        );
+        return;
+      }
       instance = new Hls({
         workerPath: hlsWorkerUrl,
+        ...(compatibilityHlsRequested
+          ? { preferManagedMediaSource: false }
+          : {}),
         ...(exactHlsStartPosition == null
           ? {}
           : { startPosition: exactHlsStartPosition }),
@@ -6746,7 +6807,7 @@ function WebviewPlayer({
       setHlsAudioTracks([]);
       setHlsAudioInventoryKnown(false);
     };
-  }, [engine, sourceIdentity, url, isHls, leasePreparationReady]);
+  }, [engine, sourceIdentity, url, isHls, iosHlsPlaybackMode, leasePreparationReady]);
 
   const beginConfirmedNativeHlsSeek = (
     video: HTMLVideoElement,
@@ -7114,11 +7175,12 @@ function WebviewPlayer({
   };
 
   const showBrowserCastPicker = () => {
+    if (compatibilityHlsOwnsMedia) return;
     const video = videoRef.current;
     if (video == null) return;
     const webkitVideo = video as WebKitVideoElement;
     if (
-      airPlayAvailable &&
+      advertisedAirPlayAvailable &&
       typeof webkitVideo.webkitShowPlaybackTargetPicker === "function"
     ) {
       try {
@@ -7148,7 +7210,9 @@ function WebviewPlayer({
     activeSubtitle != null && /^https?:\/\//i.test(activeSubtitle.vttUrl)
       ? activeSubtitle.vttUrl
       : null;
-  const browserCastAvailable = airPlayAvailable || remotePlaybackAvailable;
+  const browserCastAvailable =
+    !compatibilityHlsOwnsMedia &&
+    (advertisedAirPlayAvailable || remotePlaybackAvailable);
 
   // Keyboard shortcuts (invisible power-user nicety). Active only while this
   // in-app player is mounted. Ignored when typing in a field (the CaptionsMenu
@@ -8279,7 +8343,7 @@ function WebviewPlayer({
                 className="chip player-osd-icon-button player-mobile-optional"
                 onClick={showBrowserCastPicker}
                 aria-label="Cast to a device"
-                title={airPlayAvailable ? "AirPlay" : "Cast to a device"}
+                title={advertisedAirPlayAvailable ? "AirPlay" : "Cast to a device"}
                 tabIndex={chromeVisible ? undefined : -1}
               >
                 <Icon name="cast" size={17} />
@@ -8473,11 +8537,11 @@ function WebviewPlayer({
                     type="button"
                     className="chip player-touch-action player-mobile-optional"
                     onClick={showBrowserCastPicker}
-                    aria-label={airPlayAvailable ? "AirPlay" : "Cast to a device"}
+                    aria-label={advertisedAirPlayAvailable ? "AirPlay" : "Cast to a device"}
                     tabIndex={chromeVisible ? undefined : -1}
                   >
                     <Icon name="cast" size={18} />
-                    <span className="player-touch-action-label">{airPlayAvailable ? "AirPlay" : "Cast"}</span>
+                    <span className="player-touch-action-label">{advertisedAirPlayAvailable ? "AirPlay" : "Cast"}</span>
                   </button>
                 ) : null}
                 {pictureInPictureSupported && (

@@ -69,6 +69,7 @@ const { hlsInstances, hlsIsSupported } = vi.hoisted(() => ({
     config: {
       startPosition?: number;
       workerPath?: string;
+      preferManagedMediaSource?: boolean;
       xhrSetup?: (xhr: XMLHttpRequest, url?: string) => void;
       manifestLoadPolicy?: {
         default: {
@@ -165,6 +166,7 @@ vi.mock("hls.js", () => {
     config: {
       startPosition?: number;
       workerPath?: string;
+      preferManagedMediaSource?: boolean;
       xhrSetup?: (xhr: XMLHttpRequest, url?: string) => void;
       manifestLoadPolicy?: {
         default: {
@@ -12661,6 +12663,132 @@ describe("HLS source attach", () => {
     const player = screen.getByRole("dialog", { name: "Playing Ordinary native HLS" });
     const video = player.querySelector("video.player-video") as HTMLVideoElement;
     expect(video.src).toBe("https://x/stream.m3u8?quality=auto");
+  });
+
+  it("uses standard MSE and the emitted worker for opt-in iOS compatibility playback", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    class StandardMediaSource {}
+    Object.assign(StandardMediaSource, { isTypeSupported: vi.fn(() => true) });
+    const restoreMediaSource = replaceProperty(
+      globalThis,
+      "MediaSource",
+      StandardMediaSource as unknown as typeof MediaSource,
+    );
+    const restoreManaged = replaceProperty(
+      globalThis,
+      "ManagedMediaSource",
+      class ManagedMediaSource {},
+    );
+    const restoreSourceBuffer = replaceProperty(globalThis, "SourceBuffer", {
+      prototype: { appendBuffer: vi.fn(), remove: vi.fn() },
+    });
+    const restoreAirPlay = replaceProperty(
+      HTMLVideoElement.prototype,
+      "webkitShowPlaybackTargetPicker",
+      vi.fn(),
+    );
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    try {
+      const mounted = render(
+        <VideoPlayer
+          url="https://x/stream.m3u8"
+          title="Compatibility HLS"
+          iosHlsPlaybackMode="compatibility"
+          onClose={() => {}}
+        />,
+      );
+
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      expect(hlsInstances[0].config).toMatchObject({
+        workerPath: "/assets/hls.worker-test.js",
+        preferManagedMediaSource: false,
+      });
+      expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(
+        "https://x/stream.m3u8",
+      );
+      mounted.rerender(
+        <VideoPlayer
+          url="https://x/stream.m3u8"
+          title="Compatibility HLS"
+          iosHlsPlaybackMode="native"
+          onClose={() => {}}
+        />,
+      );
+      expect(hlsInstances).toHaveLength(1);
+      expect(hlsInstances[0].destroy).not.toHaveBeenCalled();
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      const event = new Event("webkitplaybacktargetavailabilitychanged") as Event & {
+        availability?: string;
+      };
+      event.availability = "available";
+      fireEvent(video, event);
+      expect(screen.queryByRole("button", { name: "AirPlay" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Cast to a device" })).toBeNull();
+    } finally {
+      restoreAirPlay();
+      restoreSourceBuffer();
+      restoreManaged();
+      restoreMediaSource();
+    }
+  });
+
+  it("revalidates standard MSE after the lazy import and restores native HLS with AirPlay", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    const typeSupported = vi.fn(() => true);
+    class StandardMediaSource {}
+    Object.assign(StandardMediaSource, { isTypeSupported: typeSupported });
+    const restoreMediaSource = replaceProperty(
+      globalThis,
+      "MediaSource",
+      StandardMediaSource as unknown as typeof MediaSource,
+    );
+    const restoreManaged = replaceProperty(
+      globalThis,
+      "ManagedMediaSource",
+      class ManagedMediaSource {},
+    );
+    const restoreSourceBuffer = replaceProperty(globalThis, "SourceBuffer", {
+      prototype: { appendBuffer: vi.fn(), remove: vi.fn() },
+    });
+    const showPlaybackTargetPicker = vi.fn();
+    const restoreAirPlay = replaceProperty(
+      HTMLVideoElement.prototype,
+      "webkitShowPlaybackTargetPicker",
+      showPlaybackTargetPicker,
+    );
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    try {
+      render(
+        <VideoPlayer
+          url="https://x/stream.m3u8"
+          title="Compatibility fallback"
+          iosHlsPlaybackMode="compatibility"
+          onClose={() => {}}
+        />,
+      );
+      typeSupported.mockReturnValue(false);
+
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      await waitFor(() => expect(video.src).toBe("https://x/stream.m3u8"));
+      expect(hlsInstances).toHaveLength(0);
+      const event = new Event("webkitplaybacktargetavailabilitychanged") as Event & {
+        availability?: string;
+      };
+      event.availability = "available";
+      fireEvent(video, event);
+      const airPlay = await screen.findByRole("button", { name: "AirPlay" });
+      await userEvent.click(airPlay);
+      expect(showPlaybackTargetPicker).toHaveBeenCalledWith();
+    } finally {
+      restoreAirPlay();
+      restoreSourceBuffer();
+      restoreManaged();
+      restoreMediaSource();
+    }
   });
 
   it("destroys the hls.js instance on unmount", async () => {

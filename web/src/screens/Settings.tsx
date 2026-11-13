@@ -75,6 +75,7 @@ import type {
   StreamMaxQuality,
 } from "../data/settings";
 import { PLAYBACK_LANGUAGE_OPTIONS } from "../lib/languagePreference";
+import { supportsStandardIosHlsMse } from "../lib/iosHlsPlayback";
 import {
   INTERFACE_LANGUAGE_OPTIONS,
   METADATA_LANGUAGE_OPTIONS,
@@ -2322,6 +2323,9 @@ function PlaybackTab({ draft, patch }: TabProps) {
   // The server-transcode option is only meaningful in Server Mode AND only when
   // the operator enabled it (+ ffmpeg present), advertised via bootstrap.
   const canTranscode = isServerMode() && useTranscodeAvailable();
+  const iosPlaybackSettings = deviceKind() === "ios";
+  const compatibilityAvailable =
+    iosPlaybackSettings && supportsStandardIosHlsMse();
 
   return (
     <div className="settings-fields">
@@ -2376,6 +2380,28 @@ function PlaybackTab({ draft, patch }: TabProps) {
             ))}
           </select>
         </label>
+      )}
+
+      {iosPlaybackSettings && (
+        <Field
+          label="iPhone and iPad HLS playback"
+          hint={compatibilityAvailable
+            ? "Compatibility mode uses the web streaming engine. It applies to the next player you open. AirPlay requires Native mode."
+            : "Compatibility mode is unavailable in this browser. New players use Native mode, which supports AirPlay."}
+        >
+          <select
+            aria-label="iPhone and iPad HLS playback"
+            value={compatibilityAvailable ? draft.iosHlsPlaybackMode : "native"}
+            onChange={(event) => patch({
+              iosHlsPlaybackMode: event.target.value as AppSettings["iosHlsPlaybackMode"],
+            })}
+          >
+            <option value="native">Native, with AirPlay</option>
+            <option value="compatibility" disabled={!compatibilityAvailable}>
+              Compatibility mode
+            </option>
+          </select>
+        </Field>
       )}
 
       <DownloadsFolderSetting />

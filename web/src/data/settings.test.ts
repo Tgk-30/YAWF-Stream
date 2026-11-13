@@ -229,6 +229,7 @@ describe("defaultSettings", () => {
     expect(d.defaultPlaybackSpeed).toBe(1);
     expect(d.defaultVolume).toBe(100);
     expect(d.rememberPerTitleTrackChoices).toBe(true);
+    expect(d.iosHlsPlaybackMode).toBe("native");
     expect(d.simpleMode).toBe(true);
     expect(d.autoUpdateChecks).toBe(true);
     expect(d.autoInstallUpdates).toBe(false);
@@ -359,6 +360,7 @@ describe("loadSettings", () => {
         defaultPlaybackSpeed: 1.1,
         defaultVolume: 999,
         rememberPerTitleTrackChoices: "true",
+        iosHlsPlaybackMode: "managed",
         ratingScale: "eleven",
       }),
     });
@@ -389,6 +391,7 @@ describe("loadSettings", () => {
     expect(s.defaultPlaybackSpeed).toBe(1);
     expect(s.defaultVolume).toBe(100);
     expect(s.rememberPerTitleTrackChoices).toBe(true);
+    expect(s.iosHlsPlaybackMode).toBe("native");
     expect(s.ratingScale).toBe("ten"); // poisoned scale → 1–10 default
   });
 
@@ -419,6 +422,7 @@ describe("loadSettings", () => {
         defaultPlaybackSpeed: "1.5",
         defaultVolume: "42.4",
         rememberPerTitleTrackChoices: false,
+        iosHlsPlaybackMode: "compatibility",
       }),
     });
     expect(loadSettings()).toMatchObject({
@@ -428,6 +432,7 @@ describe("loadSettings", () => {
       defaultPlaybackSpeed: 1.5,
       defaultVolume: 42,
       rememberPerTitleTrackChoices: false,
+      iosHlsPlaybackMode: "compatibility",
     });
   });
 
@@ -726,6 +731,7 @@ describe("loadSettingsFromStore - established store", () => {
     expect(s.defaultPlaybackSpeed).toBe(1);
     expect(s.defaultVolume).toBe(100);
     expect(s.rememberPerTitleTrackChoices).toBe(true);
+    expect(s.iosHlsPlaybackMode).toBe("native");
     expect(s.debridTokens).toEqual([]);
     expect(s.sources).toEqual([]);
   });
@@ -791,6 +797,7 @@ describe("loadSettingsFromStore - established store", () => {
     settingsMap.set("default_playback_speed", "1.25");
     settingsMap.set("default_volume", "45");
     settingsMap.set("remember_per_title_track_choices", "false");
+    settingsMap.set("ios_hls_playback_mode", "compatibility");
     const s = await loadSettingsFromStore();
     expect(s.builtInIndexersEnabled).toBe(false);
     expect(s.simpleMode).toBe(false);
@@ -806,6 +813,7 @@ describe("loadSettingsFromStore - established store", () => {
     expect(s.defaultPlaybackSpeed).toBe(1.25);
     expect(s.defaultVolume).toBe(45);
     expect(s.rememberPerTitleTrackChoices).toBe(false);
+    expect(s.iosHlsPlaybackMode).toBe("compatibility");
   });
 
   it("keeps an existing saved cached-only choice", async () => {
@@ -938,6 +946,7 @@ describe("saveSettingsToStore", () => {
         defaultPlaybackSpeed: 1.5,
         defaultVolume: 67,
         rememberPerTitleTrackChoices: false,
+        iosHlsPlaybackMode: "compatibility",
       }),
     );
     expect(settingsMap.get("ai_provider")).toBe("openai");
@@ -953,6 +962,7 @@ describe("saveSettingsToStore", () => {
     expect(settingsMap.get("default_subtitle_behavior")).toBe("preferred");
     expect(settingsMap.get("default_subtitle_language")).toBe("fr");
     expect(settingsMap.get("default_playback_speed")).toBe("1.5");
+    expect(settingsMap.get("ios_hls_playback_mode")).toBe("compatibility");
     expect(settingsMap.get("default_volume")).toBe("67");
     expect(settingsMap.get("remember_per_title_track_choices")).toBe("false");
   });
@@ -1171,6 +1181,7 @@ describe("saveSettingsToStore", () => {
       defaultPlaybackSpeed: 1.25,
       defaultVolume: 35,
       rememberPerTitleTrackChoices: false,
+      iosHlsPlaybackMode: "compatibility",
       debridTokens: [{ service: "real_debrid", apiToken: "rd-tok" }],
       sources: [{ id: "src1", type: "jackett", baseURL: "http://j", isActive: true, apiKey: "ak", displayName: "J", priority: 0 }],
     });
@@ -1193,6 +1204,7 @@ describe("saveSettingsToStore", () => {
     expect(loaded.defaultPlaybackSpeed).toBe(1.25);
     expect(loaded.defaultVolume).toBe(35);
     expect(loaded.rememberPerTitleTrackChoices).toBe(false);
+    expect(loaded.iosHlsPlaybackMode).toBe("compatibility");
     expect(loaded.debridTokens).toEqual([{ service: "real_debrid", apiToken: "rd-tok" }]);
     expect(loaded.sources).toEqual([
       {

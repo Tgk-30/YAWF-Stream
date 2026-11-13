@@ -47,6 +47,10 @@ import type { NetworkMode } from "../lib/networkPolicy";
 import { DEFAULT_THEME_ID, resolveThemeId } from "../theme/themes";
 import { normalizeLanguagePreference } from "../lib/languagePreference";
 import {
+  normalizeIosHlsPlaybackMode,
+  type IosHlsPlaybackMode,
+} from "../lib/iosHlsPlayback";
+import {
   OpenSubtitlesClient,
   type SubtitleClient,
 } from "../services/subtitles/OpenSubtitlesClient";
@@ -111,6 +115,7 @@ const SettingsKeys = {
   defaultPlaybackSpeed: "default_playback_speed",
   defaultVolume: "default_volume",
   rememberPerTitleTrackChoices: "remember_per_title_track_choices",
+  iosHlsPlaybackMode: "ios_hls_playback_mode",
   openSubtitlesApiKey: "opensubtitles_api_key",
   autoUpdateChecks: "auto_update_checks",
   simpleMode: "simple_mode",
@@ -273,6 +278,8 @@ export interface AppSettings {
   defaultVolume?: number;
   /** Restore a title's prior audio and subtitle choice before applying defaults. */
   rememberPerTitleTrackChoices?: boolean;
+  /** iPad/iPhone HLS engine selected for the next player opened. */
+  iosHlsPlaybackMode: IosHlsPlaybackMode;
   /** OpenSubtitles REST API key (powers in-player subtitle search). */
   openSubtitlesApiKey: string;
   /** Progressive disclosure: Simple hides advanced tabs/controls. Local-Mode
@@ -574,6 +581,7 @@ export function defaultSettings(): AppSettings {
     defaultPlaybackSpeed: 1,
     defaultVolume: 100,
     rememberPerTitleTrackChoices: true,
+    iosHlsPlaybackMode: "native",
     openSubtitlesApiKey: env("VITE_OPENSUBTITLES_KEY"),
     simpleMode: true,
     autoUpdateChecks: true,
@@ -656,6 +664,7 @@ export function loadSettings(): AppSettings {
         typeof parsed.rememberPerTitleTrackChoices === "boolean"
           ? parsed.rememberPerTitleTrackChoices
           : base.rememberPerTitleTrackChoices,
+      iosHlsPlaybackMode: normalizeIosHlsPlaybackMode(parsed.iosHlsPlaybackMode),
       ratingScale: normalizeRatingScale(parsed.ratingScale),
       preferredExternalPlayer:
         typeof parsed.preferredExternalPlayer === "string"
@@ -909,6 +918,10 @@ function scalarSettingEntries(settings: AppSettings): Array<[string, string]> {
       SettingsKeys.rememberPerTitleTrackChoices,
       (settings.rememberPerTitleTrackChoices ?? true) ? "true" : "false",
     ],
+    [
+      SettingsKeys.iosHlsPlaybackMode,
+      normalizeIosHlsPlaybackMode(settings.iosHlsPlaybackMode),
+    ],
     [SettingsKeys.autoUpdateChecks, settings.autoUpdateChecks ? "true" : "false"],
     [SettingsKeys.simpleMode, settings.simpleMode ? "true" : "false"],
     [SettingsKeys.autoInstallUpdates, settings.autoInstallUpdates ? "true" : "false"],
@@ -1109,6 +1122,7 @@ export async function loadSettingsFromStore(): Promise<AppSettings> {
     defaultPlaybackSpeed,
     defaultVolume,
     rememberPerTitleTrackChoices,
+    iosHlsPlaybackMode,
     autoUpdateChecks,
     autoInstallUpdates,
     streamCachedOnly,
@@ -1162,6 +1176,7 @@ export async function loadSettingsFromStore(): Promise<AppSettings> {
     settingsByKey.get(SettingsKeys.defaultPlaybackSpeed) ?? null,
     settingsByKey.get(SettingsKeys.defaultVolume) ?? null,
     settingsByKey.get(SettingsKeys.rememberPerTitleTrackChoices) ?? null,
+    settingsByKey.get(SettingsKeys.iosHlsPlaybackMode) ?? null,
     settingsByKey.get(SettingsKeys.autoUpdateChecks) ?? null,
     settingsByKey.get(SettingsKeys.autoInstallUpdates) ?? null,
     settingsByKey.get(SettingsKeys.streamCachedOnly) ?? null,
@@ -1315,6 +1330,9 @@ export async function loadSettingsFromStore(): Promise<AppSettings> {
       rememberPerTitleTrackChoices == null
         ? base.rememberPerTitleTrackChoices
         : rememberPerTitleTrackChoices === "true",
+    iosHlsPlaybackMode: normalizeIosHlsPlaybackMode(
+      iosHlsPlaybackMode ?? base.iosHlsPlaybackMode,
+    ),
     openSubtitlesApiKey: openSubtitlesApiKey ?? base.openSubtitlesApiKey,
     simpleMode: simpleMode == null ? base.simpleMode : simpleMode === "true",
     autoUpdateChecks:
