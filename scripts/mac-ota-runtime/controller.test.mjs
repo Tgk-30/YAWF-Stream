@@ -541,3 +541,77 @@ test("extracted Swift notice witness executes semantic fixtures and four causal 
     await assert.rejects(runFile(mutant,[name],{env:environment,timeout:10_000,maxBuffer:1024*1024}),name);
   }
 });
+
+test("extracted version reader sees atomic disk replacement and rejects cached Bundle revert", { timeout: 120_000 }, async () => {
+  const source = await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8");
+  const reader = swiftSection(source, "private func bundleVersion(", "@MainActor\n    private func uniqueRunningApplication(").replace("private func", "func");
+  assert.doesNotMatch(reader, /Bundle\(url:|object\(forInfoDictionaryKey:/);
+  assert.match(reader, /read\(upToCount: 64_001\)/);
+  const folder = await mkdtemp(path.join(os.tmpdir(), "mac-bundle-version-"));
+  const environment = { ...process.env, TMPDIR: folder, CLANG_MODULE_CACHE_PATH: path.join(folder, "modules") };
+  const cases = `
+enum AdmissionError: Error { case refused(String) }
+func XCTUnwrap<T>(_ value: T?) throws -> T { guard let value else { throw AdmissionError.refused("nil") }; return value }
+let root = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+let kind = CommandLine.arguments[2]
+let app = root.appendingPathComponent("fixture.app", isDirectory: true)
+let contents = app.appendingPathComponent("Contents", isDirectory: true)
+let info = contents.appendingPathComponent("Info.plist")
+try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+func put(_ value: Any) throws {
+    try PropertyListSerialization.data(fromPropertyList: value, format: .xml, options: 0).write(to: info, options: .atomic)
+}
+func version(_ value: Any) throws { try put(["CFBundleIdentifier": "com.yawf.host.version", "CFBundlePackageType": "APPL", "CFBundleShortVersionString": value]) }
+try version("2.3.96")
+if kind == "replacement" {
+    guard try bundleVersion(app) == "2.3.96" else { fatalError("initial version") }
+    try version("2.3.102")
+    let disk = try PropertyListSerialization.propertyList(from: Data(contentsOf: info), options: [], format: nil) as! [String: Any]
+    guard disk["CFBundleShortVersionString"] as? String == "2.3.102" else { fatalError("disk fixture") }
+    guard try bundleVersion(app) == "2.3.102" else { fatalError("STALE_BUNDLE_VERSION") }
+    print("replacement96to102")
+} else {
+    switch kind {
+    case "oversize": try Data(repeating: 32, count: 64_001).write(to: info)
+    case "array": try put(["2.3.102"])
+    case "number": try version(102)
+    case "malformed": try Data("not a plist".utf8).write(to: info)
+    case "missing-version": try put(["CFBundleIdentifier": "com.yawf.host.version"])
+    case "invalid-version": try version("2.3.102 extra")
+    case "missing-file": try FileManager.default.removeItem(at: info)
+    case "symlink-file":
+        let elsewhere = root.appendingPathComponent("elsewhere.plist")
+        try FileManager.default.moveItem(at: info, to: elsewhere)
+        try FileManager.default.createSymbolicLink(at: info, withDestinationURL: elsewhere)
+    case "symlink-contents":
+        let elsewhere = root.appendingPathComponent("elsewhere", isDirectory: true)
+        try FileManager.default.moveItem(at: contents, to: elsewhere)
+        try FileManager.default.createSymbolicLink(at: contents, withDestinationURL: elsewhere)
+    default: fatalError("unknown host fixture")
+    }
+    do { _ = try bundleVersion(app) } catch { print("refused-" + kind); exit(0) }
+    fatalError("UNSAFE_VERSION_ACCEPTED")
+}
+`;
+  async function compile(body, label) {
+    const file = path.join(folder, label + ".swift"), executable = path.join(folder, label);
+    await writeFile(file, "import Foundation\n" + body + cases);
+    await runFile("/usr/bin/swiftc", ["-module-cache-path", path.join(folder, "modules"), file, "-o", executable], { env: environment, timeout: 60_000, maxBuffer: 1024 * 1024 });
+    return executable;
+  }
+  async function execute(executable, kind) {
+    const root = await mkdtemp(path.join(folder, "fixture-"));
+    return runFile(executable, [root, kind], { env: environment, timeout: 10_000, maxBuffer: 1024 * 1024 });
+  }
+  const executable = await compile(reader, "uncached-reader");
+  for (const kind of ["replacement", "oversize", "array", "number", "malformed", "missing-version", "invalid-version", "missing-file", "symlink-file", "symlink-contents"]) {
+    const result = await execute(executable, kind);
+    assert.match(result.stdout, new RegExp(kind === "replacement" ? "replacement96to102" : "refused-" + kind));
+  }
+  const oldReader = `func bundleVersion(_ url: URL) throws -> String {
+    let bundle = try XCTUnwrap(Bundle(url: url))
+    return try XCTUnwrap(bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+  }\n`;
+  const reverted = await compile(oldReader, "original-bundle-reader");
+  await assert.rejects(execute(reverted, "replacement"), error => /STALE_BUNDLE_VERSION/.test(error.stderr));
+});

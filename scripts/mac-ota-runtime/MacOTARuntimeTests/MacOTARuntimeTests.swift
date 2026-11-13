@@ -600,8 +600,31 @@ final class MacOTARuntimeTests: XCTestCase {
     }
 
     private func bundleVersion(_ url: URL) throws -> String {
-        let bundle = try XCTUnwrap(Bundle(url: url))
-        return try XCTUnwrap(bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+        // Bundle caches info dictionaries across an in-place updater replacement.
+        // Read only this admitted bundle's bounded on-disk plist on every check.
+        let app = url.standardizedFileURL
+        let contents = app.appendingPathComponent("Contents", isDirectory: true)
+        let info = contents.appendingPathComponent("Info.plist", isDirectory: false)
+        guard url.isFileURL, url == app, app.pathExtension == "app",
+              [app, contents, info].allSatisfy({ $0.resolvingSymlinksInPath().standardizedFileURL == $0 }) else {
+            throw AdmissionError.refused("The version plist must be inside the admitted nonsymlink app bundle.")
+        }
+        let before = try info.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard before.isRegularFile == true, before.isSymbolicLink == false,
+              let size = before.fileSize, size > 0, size <= 64_000 else {
+            throw AdmissionError.refused("The version plist must be a bounded regular file.")
+        }
+        let handle = try FileHandle(forReadingFrom: info)
+        defer { try? handle.close() }
+        let data = try handle.read(upToCount: 64_001) ?? Data()
+        guard data.count == size, data.count <= 64_000,
+              let dictionary = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
+              let version = dictionary["CFBundleShortVersionString"] as? String,
+              version.utf8.count <= 32,
+              version.range(of: "^[0-9]+\\.[0-9]+\\.[0-9]+$", options: .regularExpression) != nil else {
+            throw AdmissionError.refused("The version plist must contain one well-typed release version.")
+        }
+        return version
     }
 
     @MainActor
