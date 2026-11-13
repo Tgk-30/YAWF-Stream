@@ -10,10 +10,10 @@ test("website release catalog accepts the published platform channels", () => {
 
 test("website release catalog rejects server90 while leaving independent channels unchanged", () => {
   const previous = source.replace(
-    "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'v2.3.104' };",
+    "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'v2.3.105' };",
     "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.90', tag: 'v2.3.90' };",
   );
-  assert.notEqual(previous, source, "fixture must contain the server104 mutation target");
+  assert.notEqual(previous, source, "fixture must contain the server105 mutation target");
   assert.deepEqual(validateWebsiteReleaseCatalog(previous), ["SERVER_RELEASE must retain its published version and tag"]);
 });
 
@@ -30,23 +30,23 @@ for (const { name, from, to } of [
   },
   {
     name: "previous102 Android phone channel",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'android-v2.3.104' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'android-v2.3.105' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.102', tag: 'android-v2.3.102' };",
   },
   {
     name: "unpublished future Android phone channel",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'android-v2.3.104' };",
-    to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'android-v2.3.105' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'android-v2.3.105' };",
+    to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.106', tag: 'android-v2.3.106' };",
   },
   {
     name: "previous102 server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'v2.3.104' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'v2.3.105' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.102', tag: 'v2.3.102' };",
   },
   {
     name: "unpublished future server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'v2.3.104' };",
-    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'v2.3.105' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'v2.3.105' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.106', tag: 'v2.3.106' };",
   },
   {
     name: "desktop version",
@@ -60,28 +60,38 @@ for (const { name, from, to } of [
   },
   {
     name: "Android phone tag",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'android-v2.3.104' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'android-v2.3.105' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.20', tag: 'v2.3.13' };",
   },
   {
     name: "stale Android phone channel",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'android-v2.3.104' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'android-v2.3.105' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.88', tag: 'android-v2.3.88' };",
   },
   {
     name: "older published Android phone channel",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'android-v2.3.104' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'android-v2.3.105' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.96', tag: 'android-v2.3.96' };",
   },
   {
     name: "previous published Android phone channel",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'android-v2.3.104' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'android-v2.3.105' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.99', tag: 'android-v2.3.99' };",
   },
   {
     name: "previous103 Android phone channel",
-    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'android-v2.3.104' };",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'android-v2.3.105' };",
     to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.103', tag: 'android-v2.3.103' };",
+  },
+  {
+    name: "previous104 Android phone channel",
+    from: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'android-v2.3.105' };",
+    to: "export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'android-v2.3.104' };",
+  },
+  {
+    name: "previous104 server channel",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'v2.3.105' };",
+    to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'v2.3.104' };",
   },
   {
     name: "Android TV filename",
@@ -95,37 +105,37 @@ for (const { name, from, to } of [
   },
   {
     name: "published server version",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'v2.3.104' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'v2.3.105' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.51', tag: 'v2.3.51' };",
   },
   {
     name: "server release tag independently of version",
-    from: "tag: 'v2.3.104'",
+    from: "tag: 'v2.3.105'",
     to: "tag: 'v2.3.51'",
   },
   {
     name: "stale server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'v2.3.104' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'v2.3.105' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.95', tag: 'v2.3.95' };",
   },
   {
     name: "older published server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'v2.3.104' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'v2.3.105' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.96', tag: 'v2.3.96' };",
   },
   {
     name: "previous published server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'v2.3.104' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'v2.3.105' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.98', tag: 'v2.3.98' };",
   },
   {
     name: "previously current server101 channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'v2.3.104' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'v2.3.105' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.101', tag: 'v2.3.101' };",
   },
   {
     name: "previous103 server channel",
-    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.104', tag: 'v2.3.104' };",
+    from: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'v2.3.105' };",
     to: "export const SERVER_RELEASE: PublishedRelease = { version: '2.3.103', tag: 'v2.3.103' };",
   },
   {
