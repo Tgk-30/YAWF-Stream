@@ -665,6 +665,19 @@ test("release discovery and manifest contracts are fixed and bounded", () => {
   assert.match(source, /if \(!reachedReleaseHistoryEnd\)/);
 });
 
+test("bounded release selection validates the greatest window candidate before upgrade or incomplete-history decisions", () => {
+  const discover = section("private fun discoverCandidate()", "private fun selectCandidateFromReleaseWindow(");
+  const select = section("private fun selectCandidateFromReleaseWindow(", "private fun releaseAssets(");
+  assert.match(discover, /selectCandidateFromReleaseWindow\(releases, installed\.versionCode, reachedReleaseHistoryEnd\)/);
+  assert.ok(discover.indexOf("for (page in 1..MAX_RELEASE_PAGES)") < discover.indexOf("return selectCandidateFromReleaseWindow"));
+  assert.doesNotMatch(discover, /if \(!reachedReleaseHistoryEnd\) throw/);
+  assert.match(select, /maxByOrNull \{ it\.semanticVersion \}/);
+  assert.ok(select.indexOf("parseManifest(loadManifest(it), it)") < select.indexOf("isVersionCodeUpgrade"));
+  assert.ok(select.indexOf("isVersionCodeUpgrade") < select.indexOf("if (!reachedReleaseHistoryEnd) throw"));
+  assert.ok(select.indexOf("if (!reachedReleaseHistoryEnd) throw") < select.lastIndexOf("return null"));
+  assert.doesNotMatch(select, /catch|firstOrNull|find \{/);
+});
+
 test("source and redirect policy cannot be supplied by a caller", () => {
   assert.match(
     source,
@@ -948,7 +961,7 @@ test("actual Kotlin parser, redirect, replay, state, and cancellation behavior",
       { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
     );
     assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
-    assert.match(run.stdout, /YawfAndroidUpdater behavior assertions passed: 95/);
+    assert.match(run.stdout, /YawfAndroidUpdater behavior assertions passed: 108/);
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }

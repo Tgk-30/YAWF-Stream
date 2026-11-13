@@ -294,6 +294,54 @@ private fun testReleaseHistoryBounds() {
   assertThat(Subject.invoke("releaseHistoryEnded", 20) == false, "full page requires another page")
 }
 
+private fun testBoundedReleaseWindow() {
+  fun official(version: String): Any {
+    val tag = "android-v$version"
+    val name = "YAWF.Stream_Android_$version.apk"
+    return releaseAssets(JSONObject(
+      """{"draft":false,"prerelease":false,"tag_name":"$tag","assets":[{"name":"android-update.json","browser_download_url":"https://github.com/Tgk-30/YAWF-Stream/releases/download/$tag/android-update.json"},{"name":"$name","browser_download_url":"https://github.com/Tgk-30/YAWF-Stream/releases/download/$tag/$name","size":42000000,"digest":"sha256:$HASH"}]}"""
+    )) ?: error("official fixture ignored")
+  }
+  fun bytes(version: String, hash: String = HASH, extra: String = ""): ByteArray {
+    val patch = version.substringAfterLast('.').toLong()
+    return manifest(version = version, versionCode = (2_003_000L + patch).toString(), name = "YAWF.Stream_Android_$version.apk", sha256 = hash, extra = extra)
+  }
+  val lower = official("2.3.104")
+  val higher = official("2.3.105")
+  val outside = official("2.3.106")
+  // More than 200 catalog rows exist. The actual bounded loop supplies only
+  // eligible metadata from its fixed prefix to this shared selection method.
+  val catalog = MutableList<Any?>(220) { null }
+  catalog[0] = lower; catalog[199] = higher; catalog[200] = outside
+  val window = catalog.take(200).filterNotNull()
+  val loaded = mutableListOf<String>()
+  fun select(releases: List<Any>, installed: Long, complete: Boolean, replacement: ByteArray? = null): Any? {
+    val loader: (Any) -> ByteArray = { release ->
+      val version = property(release, "version") as String
+      loaded += version
+      if (version == "2.3.105" && replacement != null) replacement else bytes(version)
+    }
+    return Subject.invoke("selectCandidateFromReleaseWindow", releases, installed, complete, loader)
+  }
+  assertThat(property(select(listOf(lower), 2_003_103L, false)!!, "version") == "2.3.104", "new first-page candidate in incomplete history")
+  loaded.clear()
+  assertThat(property(select(window, 2_003_103L, false)!!, "version") == "2.3.105", "greatest eligible at end of fixed window")
+  assertThat(loaded == listOf("2.3.105"), "only highest candidate is validated, not out-of-window release")
+  expectRejected("incomplete window without eligible releases") { select(emptyList(), 2_003_103L, false) }
+  expectRejected("incomplete equal candidate is not up to date") { select(window, 2_003_105L, false) }
+  expectRejected("incomplete old candidates are not up to date") { select(window, 2_003_106L, false) }
+  assertThat(select(emptyList(), 2_003_103L, true) == null, "complete empty history may be up to date")
+  assertThat(select(window, 2_003_105L, true) == null, "complete equal history may be up to date")
+  loaded.clear()
+  expectRejected("invalid highest manifest cannot fall back to valid lower release") {
+    select(window, 2_003_103L, false, bytes("2.3.105", extra = ",\"command\":\"sh\""))
+  }
+  assertThat(loaded == listOf("2.3.105"), "invalid highest did not load lower release")
+  expectRejected("highest manifest digest binding remains mandatory") { select(window, 2_003_103L, false, bytes("2.3.105", hash = "c".repeat(64))) }
+  expectRejected("malformed highest manifest remains fatal") { select(window, 2_003_103L, false, "{".toByteArray()) }
+  assertThat(property(select(window, 2_003_103L, true)!!, "version") == "2.3.105", "complete history still permits upgrade")
+}
+
 private fun testCadenceAndReadinessPolicy() {
   val day = 24L * 60L * 60L * 1000L
   val now = 10L * day
@@ -482,6 +530,7 @@ fun main() {
   testStrictManifest()
   testReplayAndDownloadState()
   testReleaseHistoryBounds()
+  testBoundedReleaseWindow()
   testCadenceAndReadinessPolicy()
   testPrivateStagingContent()
   testOrphanDownloadIdentity()

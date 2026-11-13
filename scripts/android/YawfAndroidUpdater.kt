@@ -562,14 +562,24 @@ class YawfAndroidUpdater private constructor(
         break
       }
     }
-    if (!reachedReleaseHistoryEnd) throw UpdaterFailure("Release history exceeds the bounded search")
+    return selectCandidateFromReleaseWindow(releases, installed.versionCode, reachedReleaseHistoryEnd) { release ->
+      readBounded(release.manifestUrl, MAX_MANIFEST_BYTES, deadline, RedirectMode.ASSET)
+    }
+  }
 
-    val newest = releases.maxByOrNull { it.semanticVersion } ?: return null
-    val manifestBytes =
-      readBounded(newest.manifestUrl, MAX_MANIFEST_BYTES, deadline, RedirectMode.ASSET)
-    val candidate = parseManifest(manifestBytes, newest)
-    if (!isVersionCodeUpgrade(candidate.versionCode, installed.versionCode)) return null
-    return candidate
+  private fun selectCandidateFromReleaseWindow(
+    releases: List<ReleaseAssets>,
+    installedVersionCode: Long,
+    reachedReleaseHistoryEnd: Boolean,
+    loadManifest: (ReleaseAssets) -> ByteArray,
+  ): Candidate? {
+    // The fixed window need not exhaust all history to prove an upgrade. It
+    // cannot prove "up to date" unless the release history actually ended.
+    val newest = releases.maxByOrNull { it.semanticVersion }
+    val candidate = newest?.let { parseManifest(loadManifest(it), it) }
+    if (candidate != null && isVersionCodeUpgrade(candidate.versionCode, installedVersionCode)) return candidate
+    if (!reachedReleaseHistoryEnd) throw UpdaterFailure("No verified newer release in the bounded search window")
+    return null
   }
 
   private fun releaseAssets(release: JSONObject): ReleaseAssets? {
