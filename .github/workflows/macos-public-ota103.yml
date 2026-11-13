@@ -59,10 +59,14 @@ jobs:
           test "$(stat -f %z YAWF.Stream_2.3.103_aarch64.app.tar.gz)" = 95577725
           gh attestation verify YAWF.Stream_2.3.96_aarch64.app.tar.gz \
             --repo Tgk-30/YAWF-Stream --format json > "$RUNNER_TEMP/downloads/attestation96.json"
+          gh --version
           gh attestation verify YAWF.Stream_2.3.103_aarch64.app.tar.gz \
             --repo Tgk-30/YAWF-Stream \
             --signer-workflow Tgk-30/YAWF-Stream/.github/workflows/web-release.yml \
             --signer-digest 6463c35757b69a4143386497c755648259d25e7f \
+            --deny-self-hosted-runners \
+            --source-digest 6463c35757b69a4143386497c755648259d25e7f \
+            --source-ref refs/tags/v2.3.103-web \
             --format json > "$RUNNER_TEMP/downloads/attestation103.json"
           node "$GITHUB_WORKSPACE/scripts/mac-ota-runtime/controller.mjs" verify-target \
             --targetArchive "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.103_aarch64.app.tar.gz" \
