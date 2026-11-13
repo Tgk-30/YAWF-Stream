@@ -69,6 +69,7 @@ const { hlsInstances, hlsIsSupported } = vi.hoisted(() => ({
     config: {
       startPosition?: number;
       workerPath?: string;
+      preferManagedMediaSource?: boolean;
       xhrSetup?: (xhr: XMLHttpRequest, url?: string) => void;
       manifestLoadPolicy?: {
         default: {
@@ -84,6 +85,8 @@ const { hlsInstances, hlsIsSupported } = vi.hoisted(() => ({
     subtitleTracks: Array<{ name: string; lang?: string }>;
     subtitleTrack: number;
     subtitleDisplay: boolean;
+    media: HTMLMediaElement | null;
+    url: string | null;
     off: ReturnType<typeof vi.fn>;
     emit: (event: string, data?: unknown) => void;
     loadSource: ReturnType<typeof vi.fn>;
@@ -165,6 +168,7 @@ vi.mock("hls.js", () => {
     config: {
       startPosition?: number;
       workerPath?: string;
+      preferManagedMediaSource?: boolean;
       xhrSetup?: (xhr: XMLHttpRequest, url?: string) => void;
       manifestLoadPolicy?: {
         default: {
@@ -180,7 +184,8 @@ vi.mock("hls.js", () => {
     subtitleTracks: Array<{ name: string; lang?: string }> = [];
     private selectedSubtitle = -1;
     private displaySubtitles = true;
-    private media: HTMLMediaElement | null = null;
+    media: HTMLMediaElement | null = null;
+    url: string | null = null;
     get subtitleTrack() { return this.selectedSubtitle; }
     set subtitleTrack(id: number) {
       this.selectedSubtitle = id;
@@ -205,7 +210,9 @@ vi.mock("hls.js", () => {
     emit = (event: string, data: unknown = {}) => {
       for (const listener of this.listeners.get(event) ?? []) listener(event, data);
     };
-    loadSource = vi.fn();
+    loadSource = vi.fn((url: string) => {
+      this.url = new URL(url, window.location.href).href;
+    });
     attachMedia = vi.fn((media: HTMLMediaElement) => {
       this.media = media;
       // Real media attachment runs the media load algorithm, which resets the
@@ -12663,6 +12670,132 @@ describe("HLS source attach", () => {
     expect(video.src).toBe("https://x/stream.m3u8?quality=auto");
   });
 
+  it("uses standard MSE and the emitted worker for opt-in iOS compatibility playback", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    class StandardMediaSource {}
+    Object.assign(StandardMediaSource, { isTypeSupported: vi.fn(() => true) });
+    const restoreMediaSource = replaceProperty(
+      globalThis,
+      "MediaSource",
+      StandardMediaSource as unknown as typeof MediaSource,
+    );
+    const restoreManaged = replaceProperty(
+      globalThis,
+      "ManagedMediaSource",
+      class ManagedMediaSource {},
+    );
+    const restoreSourceBuffer = replaceProperty(globalThis, "SourceBuffer", {
+      prototype: { appendBuffer: vi.fn(), remove: vi.fn() },
+    });
+    const restoreAirPlay = replaceProperty(
+      HTMLVideoElement.prototype,
+      "webkitShowPlaybackTargetPicker",
+      vi.fn(),
+    );
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    try {
+      const mounted = render(
+        <VideoPlayer
+          url="https://x/stream.m3u8"
+          title="Compatibility HLS"
+          iosHlsPlaybackMode="compatibility"
+          onClose={() => {}}
+        />,
+      );
+
+      await waitFor(() => expect(hlsInstances).toHaveLength(1));
+      expect(hlsInstances[0].config).toMatchObject({
+        workerPath: "/assets/hls.worker-test.js",
+        preferManagedMediaSource: false,
+      });
+      expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(
+        "https://x/stream.m3u8",
+      );
+      mounted.rerender(
+        <VideoPlayer
+          url="https://x/stream.m3u8"
+          title="Compatibility HLS"
+          iosHlsPlaybackMode="native"
+          onClose={() => {}}
+        />,
+      );
+      expect(hlsInstances).toHaveLength(1);
+      expect(hlsInstances[0].destroy).not.toHaveBeenCalled();
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      const event = new Event("webkitplaybacktargetavailabilitychanged") as Event & {
+        availability?: string;
+      };
+      event.availability = "available";
+      fireEvent(video, event);
+      expect(screen.queryByRole("button", { name: "AirPlay" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Cast to a device" })).toBeNull();
+    } finally {
+      restoreAirPlay();
+      restoreSourceBuffer();
+      restoreManaged();
+      restoreMediaSource();
+    }
+  });
+
+  it("revalidates standard MSE after the lazy import and restores native HLS with AirPlay", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    const typeSupported = vi.fn(() => true);
+    class StandardMediaSource {}
+    Object.assign(StandardMediaSource, { isTypeSupported: typeSupported });
+    const restoreMediaSource = replaceProperty(
+      globalThis,
+      "MediaSource",
+      StandardMediaSource as unknown as typeof MediaSource,
+    );
+    const restoreManaged = replaceProperty(
+      globalThis,
+      "ManagedMediaSource",
+      class ManagedMediaSource {},
+    );
+    const restoreSourceBuffer = replaceProperty(globalThis, "SourceBuffer", {
+      prototype: { appendBuffer: vi.fn(), remove: vi.fn() },
+    });
+    const showPlaybackTargetPicker = vi.fn();
+    const restoreAirPlay = replaceProperty(
+      HTMLVideoElement.prototype,
+      "webkitShowPlaybackTargetPicker",
+      showPlaybackTargetPicker,
+    );
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
+      () => "probably",
+    );
+    try {
+      render(
+        <VideoPlayer
+          url="https://x/stream.m3u8"
+          title="Compatibility fallback"
+          iosHlsPlaybackMode="compatibility"
+          onClose={() => {}}
+        />,
+      );
+      typeSupported.mockReturnValue(false);
+
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      await waitFor(() => expect(video.src).toBe("https://x/stream.m3u8"));
+      expect(hlsInstances).toHaveLength(0);
+      const event = new Event("webkitplaybacktargetavailabilitychanged") as Event & {
+        availability?: string;
+      };
+      event.availability = "available";
+      fireEvent(video, event);
+      const airPlay = await screen.findByRole("button", { name: "AirPlay" });
+      await userEvent.click(airPlay);
+      expect(showPlaybackTargetPicker).toHaveBeenCalledWith();
+    } finally {
+      restoreAirPlay();
+      restoreSourceBuffer();
+      restoreManaged();
+      restoreMediaSource();
+    }
+  });
+
   it("destroys the hls.js instance on unmount", async () => {
     (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
       () => "",
@@ -17692,15 +17825,31 @@ describe("interactive chrome pointer lifetime", () => {
 
 describe("automatic starvation95 adaptation", () => {
   async function settle() { await act(async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); }); }
+  function enableIosCompatibilityHls106() {
+    deviceKindMock.mockReturnValue("ios");
+    class StandardMediaSource {
+      static isTypeSupported = vi.fn(() => true);
+    }
+    class ManagedMediaSource {}
+    class StandardSourceBuffer {
+      appendBuffer() {}
+      remove() {}
+    }
+    vi.stubGlobal("MediaSource", StandardMediaSource);
+    vi.stubGlobal("ManagedMediaSource", ManagedMediaSource);
+    vi.stubGlobal("SourceBuffer", StandardSourceBuffer);
+  }
   async function setup(options: {
     auto?: boolean; fixedDefault?: boolean; capability?: boolean; height?: number; audio?: boolean;
     fail?: boolean; pending?: boolean; qualities?: ServerTranscodeQuality[]; lease?: boolean;
     sourceTracks?: ServerAudioTrack[]; audioChurn?: boolean; lazyAudio?: "pending" | "failed" | "ambiguous";
     unknownFile?: boolean; reused?: boolean; compatibility?: boolean; fixedUrl?: boolean;
+    iosCompatibilityHls?: boolean;
     snapshots?: number[]; snapshotGeneration?: string[]; snapshotEndlist?: boolean;
     currentAudio?: number; currentManifest?: string; currentHeaders?: Record<string, string>;
   } = {}) {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    if (options.iosCompatibilityHls) enableIosCompatibilityHls106();
     const manifest = deferred<Response>();
     let leaseExpired = false;
     let view: ReturnType<typeof render>;
@@ -17755,6 +17904,7 @@ describe("automatic starvation95 adaptation", () => {
     }));
     const props = {
       ...(options.lease || options.reused ? { refreshCurrentSource: refresh } : {}),
+      ...(options.iosCompatibilityHls ? { iosHlsPlaybackMode: "compatibility" as const } : {}),
       url: options.compatibility || options.fixedUrl ? "https://server.example/api/stream/compat95/index.m3u8?quality=480p" : options.auto ? "https://server.example/api/stream/auto95/index.m3u8?quality=auto" : "https://server.example/api/stream/original95/movie.mp4",
       title: "Starvation95", sourceFileName: options.unknownFile ? undefined : "Starvation95.mkv", imdbId: "tt-starvation95", onClose: vi.fn(),
       serverOptimized: options.capability === false ? undefined : {
@@ -17816,14 +17966,18 @@ describe("automatic starvation95 adaptation", () => {
     beginConfirmedEpisode96(p); await advance96(2_000);
   }
 
-  function unlabeledNative102(language = "und") {
-    deviceKindMock.mockReturnValue("ios");
-    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+  function unlabeledRenderer102(language = "und") {
     const list = Object.assign(new EventTarget(), {
       0: { id: "renderer-local-999", label: "", language, enabled: true }, length: 1,
     });
     Object.defineProperty(HTMLMediaElement.prototype, "audioTracks", { configurable: true, get: () => list });
     return list;
+  }
+
+  function unlabeledNative102(language = "und") {
+    deviceKindMock.mockReturnValue("ios");
+    vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+    return unlabeledRenderer102(language);
   }
 
   it.each([[0, ""], [5, "und"]] as const)("[audio102] attested current muxed audio%s survives native language '%s' during480 to360", async (index, language) => {
@@ -17839,6 +17993,58 @@ describe("automatic starvation95 adaptation", () => {
     expect(p.video.src).toBe(source);
     expect(vi.mocked(fetch).mock.calls.filter(([input, init]) => String(input).includes("compat95/index.m3u8") && init?.method !== "HEAD")).toHaveLength(1);
     p.episodes(); await settle(); expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([[0, ""], [5, "und"]] as const)("[audio106] attested current muxed audio%s survives compatibility HLS language '%s' during480 to360", async (index, language) => {
+    unlabeledRenderer102(language);
+    const p = await setup({ compatibility: true, iosCompatibilityHls: true, height: 480, pending: true,
+      currentAudio: index, sourceTracks: [
+        { index: 0, label: "English", language: "eng", default: true },
+        { index: 5, label: "Japanese Main", language: "jpn", default: false },
+      ] });
+    await settle();
+    const currentHls = hlsInstances.at(-1)!;
+    expect(currentHls.config.preferManagedMediaSource).toBe(false);
+    expect(currentHls.media).toBe(p.video);
+    expect(currentHls.url).toBe(new URL(p.props.url, window.location.href).href);
+    p.episodes(); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("360p", 106, index);
+    p.episodes(); await settle(); expect(p.request).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "wrong media", "wrong URL", "wrong config", "noncompatibility renderer", "missing binding",
+    "stale proof", "disabled", "multiple tracks", "semantic mismatch", "selection drift",
+  ] as const)("[audio106] compatibility HLS refuses current-audio inference for %s", async scenario => {
+    const list = unlabeledRenderer102();
+    if (scenario === "disabled") list[0].enabled = false;
+    if (scenario === "multiple tracks") Object.assign(list, {
+      1: { ...list[0], id: "other-renderer-track", enabled: false }, length: 2,
+    });
+    if (scenario === "semantic mismatch") list[0].label = "Commentary";
+    const p = await setup({ compatibility: true,
+      iosCompatibilityHls: scenario !== "noncompatibility renderer", height: 480, pending: true,
+      currentAudio: scenario === "missing binding" ? undefined : 5,
+      currentHeaders: scenario === "stale proof"
+        ? { "x-yawf-hls-snapshot-generation": "transcode-stale106" } : undefined,
+      sourceTracks: [
+        { index: 0, label: "English", language: "eng", default: true },
+        { index: 5, label: "Japanese Main", language: "jpn", default: false },
+      ],
+    });
+    await settle();
+    const currentHls = hlsInstances.at(-1)!;
+    if (scenario !== "noncompatibility renderer") expect(currentHls.media).toBe(p.video);
+    if (scenario === "wrong media") currentHls.media = document.createElement("video");
+    if (scenario === "wrong URL") currentHls.url = "https://server.example/api/stream/other106/index.m3u8";
+    if (scenario === "wrong config") currentHls.config.preferManagedMediaSource = true;
+    if (scenario === "selection drift") {
+      p.playing(); p.progress(); p.progress();
+      list[0].id = "changed-after-decoding";
+    }
+    p.episodes(); await settle();
+    expect(p.request).not.toHaveBeenCalled();
+    expect(p.video.isConnected).toBe(true);
   });
 
   it("[audio102] delayed owned inventory completes earned episodes once without a new wait", async () => {

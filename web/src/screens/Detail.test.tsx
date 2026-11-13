@@ -478,6 +478,7 @@ vi.mock("../components/VideoPlayer", () => ({
     sourceFileName,
     playbackAuthorization,
     engine,
+    iosHlsPlaybackMode,
     requestWebviewFallback,
     upNext,
     autoCountdown,
@@ -505,6 +506,7 @@ vi.mock("../components/VideoPlayer", () => ({
       data-source-file={sourceFileName ?? ""}
       data-has-playback-authorization={String(playbackAuthorization != null)}
       data-engine={engine}
+      data-ios-hls-playback={iosHlsPlaybackMode}
       data-pause-year={nowPlaying?.year ?? ""}
       data-pause-runtime={nowPlaying?.runtimeMinutes ?? ""}
       data-pause-rating={nowPlaying?.rating ?? ""}
@@ -2052,6 +2054,37 @@ describe("Detail play", () => {
       "data-remember-per-title-track-choices",
       "false",
     );
+  });
+
+  it("snapshots the iOS HLS engine for one player and adopts changes only after close and reopen", async () => {
+    mockSettings = { ...defaultSettings(), iosHlsPlaybackMode: "native" };
+    mockCached = {
+      stream: {
+        fileName: "movie.mp4",
+        streamURL: "https://cdn/movie.mp4",
+        codec: "H.264",
+      },
+    };
+    const rendered = render(<Detail />);
+    await userEvent.click(screen.getByText("play"));
+    await waitFor(() => expect(screen.getByTestId("player")).toHaveAttribute(
+      "data-ios-hls-playback",
+      "native",
+    ));
+
+    mockSettings = { ...mockSettings, iosHlsPlaybackMode: "compatibility" };
+    rendered.rerender(<Detail />);
+    expect(screen.getByTestId("player")).toHaveAttribute(
+      "data-ios-hls-playback",
+      "native",
+    );
+
+    await userEvent.click(screen.getByText("close-player"));
+    await userEvent.click(screen.getByText("play"));
+    await waitFor(() => expect(screen.getByTestId("player")).toHaveAttribute(
+      "data-ios-hls-playback",
+      "compatibility",
+    ));
   });
 
   it("falls back to the resolved filename only when media metadata is unavailable", async () => {

@@ -42,6 +42,7 @@ describe("portable local backup", () => {
     const store = new DexieStore(`portable-export-${crypto.randomUUID()}`);
     stores.push(store);
     await store.setSetting("ui_theme", "midnight");
+    await store.setSetting("ios_hls_playback_mode", "compatibility");
     await store.setSetting("tmdb_api_key", "secret:tmdb_api_key");
     await store.setSecret("tmdb_api_key", "do-not-export");
     await store.addToWatchlist({
@@ -54,7 +55,10 @@ describe("portable local backup", () => {
 
     const backup = await exportPortableBackup(store);
 
-    expect(backup.profiles[0]!.data.settings).toEqual([{ key: "ui_theme", value: "midnight" }]);
+    expect(backup.profiles[0]!.data.settings).toEqual([
+      { key: "ios_hls_playback_mode", value: "compatibility" },
+      { key: "ui_theme", value: "midnight" },
+    ]);
     expect(backup.profiles[0]!.data.watchlist).toHaveLength(1);
     expect(JSON.stringify(backup)).not.toContain("do-not-export");
     expect(backup.profiles[0]!.data).not.toHaveProperty("secrets");

@@ -228,6 +228,7 @@ function settings(overrides: Partial<AppSettings> = {}): AppSettings {
     subtitleFontScale: 1,
     subtitleTextColor: "#ffffff",
     subtitleBgOpacity: 0.55,
+    iosHlsPlaybackMode: "native",
     openSubtitlesApiKey: "",
     simpleMode: true,
     autoUpdateChecks: true,
