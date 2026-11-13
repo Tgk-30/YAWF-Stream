@@ -619,7 +619,18 @@ if kind == "replacement" {
 function targetProof() {
   return [{ verificationResult: {
     mediaType: "application/vnd.dev.sigstore.verificationresult+json;version=0.1",
-    verifiedIdentity: { runnerEnvironment: "github-hosted" },
+    // Matcher configuration deliberately has no runnerEnvironment, as in hosted43379281856.
+    verifiedIdentity: { subjectAlternativeName: { regexp: ".*" }, issuer: { regexp: ".*" } },
+    signature: { certificate: {
+      issuer: "https://token.actions.githubusercontent.com",
+      subjectAlternativeName: "https://github.com/Tgk-30/YAWF-Stream/.github/workflows/web-release.yml@refs/tags/v2.3.103-web",
+      buildSignerURI: "https://github.com/Tgk-30/YAWF-Stream/.github/workflows/web-release.yml@refs/tags/v2.3.103-web",
+      buildSignerDigest: "6463c35757b69a4143386497c755648259d25e7f",
+      runnerEnvironment: "github-hosted",
+      sourceRepositoryURI: "https://github.com/Tgk-30/YAWF-Stream",
+      sourceRepositoryDigest: "6463c35757b69a4143386497c755648259d25e7f",
+      sourceRepositoryRef: "refs/tags/v2.3.103-web",
+    } },
     statement: {
       _type: "https://in-toto.io/Statement/v1",
       subject: [{ name: "YAWF.Stream_aarch64.app.tar.gz", digest: { sha256: "14b2d959277782f7defb3d934e7dc9e4f82b6b60fbe6951ca9625c840b5c9ec2" } }],
@@ -653,7 +664,7 @@ const proofMutations = {
   duplicateResult: proof => [...proof, ...proof],
   unverifiedPayload: proof => [{ attestation: { statement: proof[0].verificationResult.statement } }],
   wrongFormat: proof => { proof[0].verificationResult.mediaType = "unknown"; return proof; },
-  runner: proof => { proof[0].verificationResult.verifiedIdentity.runnerEnvironment = "self-hosted"; return proof; },
+  runner: proof => { proof[0].verificationResult.signature.certificate.runnerEnvironment = "self-hosted"; return proof; },
   buildRunner: proof => { proof[0].verificationResult.statement.predicate.buildDefinition.internalParameters.github.runner_environment = "self-hosted"; return proof; },
   signer: proof => { proof[0].verificationResult.statement.predicate.buildDefinition.externalParameters.workflow.path = ".github/workflows/finalize-desktop102.yml"; return proof; },
   ref: proof => { proof[0].verificationResult.statement.predicate.buildDefinition.externalParameters.workflow.ref = "refs/heads/main"; return proof; },
@@ -679,6 +690,10 @@ function assertPublic103Workflow(workflow, controller, swift) {
   assert.match(workflow, /= 95577725/);
   assert.match(workflow, /--signer-workflow Tgk-30\/YAWF-Stream\/\.github\/workflows\/web-release\.yml/);
   assert.match(workflow, /--signer-digest 6463c35757b69a4143386497c755648259d25e7f/);
+  assert.match(workflow, /gh --version/);
+  assert.match(workflow, /--deny-self-hosted-runners/);
+  assert.match(workflow, /--source-digest 6463c35757b69a4143386497c755648259d25e7f/);
+  assert.match(workflow, /--source-ref refs\/tags\/v2\.3\.103-web/);
   assert.match(workflow, /controller\.mjs" verify-target/);
   assert.ok(workflow.indexOf('controller.mjs" verify-target') < workflow.indexOf("tar -xzf YAWF.Stream_2.3.103"));
   assert.match(workflow, /--targetAttestation "\$RUNNER_TEMP\/downloads\/attestation103\.json"/);
@@ -697,6 +712,10 @@ test("public103 workflow binds verified shipping source before extraction and UI
   for (const [before, after] of [
     ["--signer-workflow Tgk-30/YAWF-Stream/.github/workflows/web-release.yml", "--signer-workflow other.yml"],
     ["--signer-digest 6463c35757b69a4143386497c755648259d25e7f", "--signer-digest wrong"],
+    ["gh --version", "echo no-version"],
+    ["--deny-self-hosted-runners", "--no-public-cert-policy"],
+    ["--source-digest 6463c35757b69a4143386497c755648259d25e7f", "--source-digest wrong"],
+    ["--source-ref refs/tags/v2.3.103-web", "--source-ref refs/heads/main"],
     ['controller.mjs" verify-target', 'controller.mjs" prepare'],
     ["= 95577725", "= 95584951"],
   ]) {
@@ -712,7 +731,7 @@ test("public103 attestation admission independently kills source, signer, runner
   const actual = validateTargetAttestation.toString();
   const controls = [
     ["duplicateResult", "document.length !== 1", "document.length < 1"],
-    ["runner", 'result?.verifiedIdentity?.runnerEnvironment !== "github-hosted"', "false"],
+    ["runner", 'certificate?.runnerEnvironment !== "github-hosted"', "false"],
     ["buildRunner", 'definition?.internalParameters?.github?.runner_environment !== "github-hosted"', "false"],
     ["signer", "workflow?.path !== TARGET.workflow", "false"],
     ["ref", "workflow?.ref !== TARGET.ref", "false"],
@@ -729,5 +748,73 @@ test("public103 attestation admission independently kills source, signer, runner
     const bad = proofMutations[name](targetProof());
     assert.throws(() => validateTargetAttestation(bad), name);
     assert.doesNotThrow(() => mutant(bad), `Causal guard removal must expose ${name}`);
+  }
+});
+
+test("verified certificate admits hosted shape without matcher runnerEnvironment", () => {
+  const proof = targetProof();
+  assert.equal(proof[0].verificationResult.verifiedIdentity.runnerEnvironment, undefined);
+  assert.doesNotThrow(() => validateTargetAttestation(proof));
+});
+
+const certificateMutations = {
+  missingSignature: proof => { delete proof[0].verificationResult.signature; },
+  missingCertificate: proof => { delete proof[0].verificationResult.signature.certificate; },
+  wrongCertificateType: proof => { proof[0].verificationResult.signature.certificate = "github-hosted"; },
+  issuer: proof => { proof[0].verificationResult.signature.certificate.issuer = "https://other.invalid"; },
+  subjectAlternativeName: proof => { proof[0].verificationResult.signature.certificate.subjectAlternativeName += "-other"; },
+  buildSignerURI: proof => { proof[0].verificationResult.signature.certificate.buildSignerURI += "-other"; },
+  buildSignerDigest: proof => { proof[0].verificationResult.signature.certificate.buildSignerDigest = "0".repeat(40); },
+  runnerEnvironment: proof => { proof[0].verificationResult.signature.certificate.runnerEnvironment = "self-hosted"; },
+  sourceRepositoryURI: proof => { proof[0].verificationResult.signature.certificate.sourceRepositoryURI += "-other"; },
+  sourceRepositoryDigest: proof => { proof[0].verificationResult.signature.certificate.sourceRepositoryDigest = "0".repeat(40); },
+  sourceRepositoryRef: proof => { proof[0].verificationResult.signature.certificate.sourceRepositoryRef = "refs/heads/main"; },
+};
+for (const [name, mutate] of Object.entries(certificateMutations)) {
+  test(`verified certificate refuses ${name} despite matching matcher and predicate`, () => {
+    const proof = targetProof();
+    proof[0].verificationResult.verifiedIdentity.runnerEnvironment = "github-hosted";
+    mutate(proof);
+    assert.throws(() => validateTargetAttestation(proof), /certificate/);
+  });
+}
+
+test("verified certificate rejects every missing certificate field despite matching matcher and predicate", () => {
+  for (const key of Object.keys(targetProof()[0].verificationResult.signature.certificate)) {
+    const proof = targetProof();
+    proof[0].verificationResult.verifiedIdentity.runnerEnvironment = "github-hosted";
+    delete proof[0].verificationResult.signature.certificate[key];
+    assert.throws(() => validateTargetAttestation(proof), /certificate/, key);
+  }
+});
+
+test("verified certificate is independent of policy matcher serialization", () => {
+  const proof = targetProof();
+  delete proof[0].verificationResult.verifiedIdentity;
+  assert.doesNotThrow(() => validateTargetAttestation(proof));
+  proof[0].verificationResult.verifiedIdentity = { runnerEnvironment: "self-hosted" };
+  assert.doesNotThrow(() => validateTargetAttestation(proof));
+});
+
+test("verified certificate guards each have an independent causal removal control", () => {
+  const actual = validateTargetAttestation.toString();
+  const conditions = {
+    issuer: 'certificate?.issuer !== "https://token.actions.githubusercontent.com"',
+    subjectAlternativeName: 'certificate?.subjectAlternativeName !== `${TARGET.repository}/${TARGET.workflow}@${TARGET.ref}`',
+    buildSignerURI: 'certificate?.buildSignerURI !== `${TARGET.repository}/${TARGET.workflow}@${TARGET.ref}`',
+    buildSignerDigest: 'certificate?.buildSignerDigest !== TARGET.source',
+    runnerEnvironment: 'certificate?.runnerEnvironment !== "github-hosted"',
+    sourceRepositoryURI: 'certificate?.sourceRepositoryURI !== TARGET.repository',
+    sourceRepositoryDigest: 'certificate?.sourceRepositoryDigest !== TARGET.source',
+    sourceRepositoryRef: 'certificate?.sourceRepositoryRef !== TARGET.ref',
+  };
+  for (const [name, condition] of Object.entries(conditions)) {
+    assert.equal(actual.split(condition).length, 2, name);
+    const mutant = new Function("TARGET", "fail", `return (${actual.replace(condition, "false")});`)(TARGET, message => { throw new Error(message); });
+    const proof = targetProof();
+    proof[0].verificationResult.verifiedIdentity.runnerEnvironment = "github-hosted";
+    certificateMutations[name](proof);
+    assert.throws(() => validateTargetAttestation(proof), /certificate/, name);
+    assert.doesNotThrow(() => mutant(proof), `Causal certificate removal must expose ${name}`);
   }
 });

@@ -34,17 +34,25 @@ const receiptSuggestedNamePattern = /^MacOTARuntimeReceipt_0_[0-9a-f]{8}-[0-9a-f
 const fail = (message) => { throw new Error(message); };
 const sha256 = async (file) => createHash("sha256").update(await readFile(file)).digest("hex");
 
-// Consume gh's VERIFIED statement, never an unverified DSSE payload.
+// Trust gh's verified certificate claims, not verifiedIdentity matcher configuration.
 export function validateTargetAttestation(document) {
   if (!Array.isArray(document) || document.length !== 1) fail("one verified target attestation required");
   const result = document[0]?.verificationResult;
+  const certificate = result?.signature?.certificate;
+  if (certificate?.runnerEnvironment !== "github-hosted" ||
+      certificate?.issuer !== "https://token.actions.githubusercontent.com" ||
+      certificate?.subjectAlternativeName !== `${TARGET.repository}/${TARGET.workflow}@${TARGET.ref}` ||
+      certificate?.buildSignerURI !== `${TARGET.repository}/${TARGET.workflow}@${TARGET.ref}` ||
+      certificate?.buildSignerDigest !== TARGET.source ||
+      certificate?.sourceRepositoryURI !== TARGET.repository ||
+      certificate?.sourceRepositoryDigest !== TARGET.source ||
+      certificate?.sourceRepositoryRef !== TARGET.ref) fail("verified target certificate claims mismatch");
   const statement = result?.statement;
   const definition = statement?.predicate?.buildDefinition;
   const workflow = definition?.externalParameters?.workflow;
   const dependencies = definition?.resolvedDependencies;
   const subjects = statement?.subject;
   if (result?.mediaType !== "application/vnd.dev.sigstore.verificationresult+json;version=0.1" ||
-      result?.verifiedIdentity?.runnerEnvironment !== "github-hosted" ||
       statement?._type !== "https://in-toto.io/Statement/v1" ||
       statement?.predicateType !== "https://slsa.dev/provenance/v1" ||
       definition?.buildType !== "https://actions.github.io/buildtypes/workflow/v1" ||
