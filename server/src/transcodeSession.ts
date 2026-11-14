@@ -410,6 +410,8 @@ export class TranscodeRegistry {
   private lifecycle: "open" | "closing" | "closed" = "open";
   private stopPromise: Promise<void> | null = null;
   private readonly jobs = new Map<string, Job>();
+  private readonly generationReleases = new Map<string, { generation: string; job?: Job; result?: "released" | "conflict" | "unconfirmed"; promise: Promise<"released" | "conflict" | "unconfirmed"> }>();
+  private readonly childSessions = new WeakMap<ChildProcess, string>();
   /** Ready replacements remain inert until a client reads their rendition. */
   private readonly prepared = new Map<string, Job>();
   /** Child processes remain here until Node reports exit or close.
@@ -448,7 +450,8 @@ export class TranscodeRegistry {
     return this.liveChildren.size + pendingReservations + this.activeProbes;
   }
 
-  private trackChild(child: ChildProcess): void {
+  private trackChild(child: ChildProcess, sessionId: string): void {
+    this.childSessions.set(child, sessionId);
     this.liveChildren.add(child);
     let resolveExit!: () => void;
     this.childExits.set(child, new Promise<void>((resolve) => { resolveExit = resolve; }));
@@ -509,7 +512,9 @@ export class TranscodeRegistry {
     try {
       await Promise.all([...ids].map((id) => this.kill(id)));
       await Promise.all(pendingCreations.map((creation) => creation.catch(() => undefined)));
+      await Promise.all([...this.generationReleases.values()].map((release) => release.promise));
     } finally {
+      this.generationReleases.clear();
       this.lifecycle = "closed";
     }
   }
@@ -738,6 +743,15 @@ export class TranscodeRegistry {
   private reap(): void {
     const now = Date.now();
     const nowIso = new Date(now).toISOString();
+    for (const [id, release] of this.generationReleases) {
+      const row = this.db.sqlite.prepare("SELECT revoked_at, expires_at FROM stream_sessions WHERE id = ?").get(id) as { revoked_at: string | null; expires_at: string | null } | undefined;
+      // Keep a still-running child's fence even after authorization expires.
+      // Such entries are bounded by process admission, not retained sessions.
+      if (release.result != null && ![...this.liveChildren].some(child => this.childSessions.get(child) === id) &&
+          (row == null || row.revoked_at != null || (row.expires_at != null && row.expires_at <= nowIso))) {
+        this.generationReleases.delete(id);
+      }
+    }
     for (const [id, job] of [...this.jobs.entries()]) {
       const row = this.db.sqlite
         .prepare("SELECT revoked_at, expires_at FROM stream_sessions WHERE id = ?")
@@ -782,6 +796,57 @@ export class TranscodeRegistry {
         this.invalidateProbe(id, probe);
       }
     }
+  }
+
+  /** Recovery relinquishes exactly one current generation, not its session's
+   * other prepared/pending/retired work. A tombstone prevents late GETs from
+   * resurrecting a released producer while a fresh session is resolving. */
+  releaseGeneration(sessionId: string, generation: string): Promise<"released" | "conflict" | "unconfirmed"> {
+    if (this.lifecycle !== "open") return Promise.resolve("conflict");
+    const prior = this.generationReleases.get(sessionId);
+    const job = this.jobs.get(sessionId);
+    if (this.prepared.has(sessionId) || this.pending.has(sessionId) || (job == null && this.retired.has(sessionId)) ||
+        (job != null && (job.assetGeneration !== generation || job.disposed || job.cancelled))) {
+      return Promise.resolve("conflict");
+    }
+    if (prior != null) {
+      if (prior.generation !== generation || job != null) return Promise.resolve("conflict");
+      if (prior.result !== "unconfirmed" || prior.job == null ||
+          prior.job.children.some(child => this.liveChildren.has(child))) return prior.promise;
+      // A later real exit can make an uncertain cleanup confirmable. Reuse
+      // only this captured job, never a new current/prepared/pending producer.
+      return this.finishGenerationRelease(sessionId, prior.generation, prior.job);
+    }
+    if (job == null && [...this.liveChildren].some(child => this.childSessions.get(child) === sessionId)) {
+      return Promise.resolve("conflict");
+    }
+    if (job != null) {
+      job.cancelled = true;
+      this.jobs.delete(sessionId);
+    }
+    this.generations.set(sessionId, (this.generations.get(sessionId) ?? 0) + 1);
+    return this.finishGenerationRelease(sessionId, generation, job);
+  }
+
+  private finishGenerationRelease(sessionId: string, generation: string, job?: Job): Promise<"released" | "conflict" | "unconfirmed"> {
+    let settle!: (value: "released" | "conflict" | "unconfirmed") => void;
+    const promise = new Promise<"released" | "conflict" | "unconfirmed">((resolve) => { settle = resolve; });
+    const entry: { generation: string; job?: Job; result?: "released" | "conflict" | "unconfirmed"; promise: typeof promise } = { generation, job, promise };
+    this.generationReleases.set(sessionId, entry);
+    void (async () => {
+      if (job != null) {
+        await this.disposeJob(sessionId, job, false);
+        if (job.children.some((child) => this.liveChildren.has(child))) return "unconfirmed" as const;
+        await rm(job.dir, { recursive: true, force: true });
+        if (existsSync(job.dir)) return "unconfirmed" as const;
+        this.db.sqlite.prepare("UPDATE stream_sessions SET transcode_dir = NULL WHERE id = ? AND transcode_dir = ?")
+          .run(sessionId, job.dir);
+      }
+      // An already-reaped session with no owned work is a safe no-op. Its
+      // unknown directory pointer is deliberately not inferred or cleared.
+      return "released" as const;
+    })().then(value => { entry.result = value; settle(value); }, () => { entry.result = "unconfirmed"; settle("unconfirmed"); });
+    return promise;
   }
 
   async kill(sessionId: string): Promise<void> {
@@ -1014,6 +1079,9 @@ export class TranscodeRegistry {
     if (this.lifecycle !== "open") {
       throw Object.assign(new Error("The transcode registry is closed."), { statusCode: 410 });
     }
+    if (this.generationReleases.has(sessionId)) {
+      throw Object.assign(new Error("The transcode generation was released."), { statusCode: 410 });
+    }
     const requestGeneration = this.generations.get(sessionId) ?? 0;
     const normalizedOptions: HlsTranscodeOptions = {
       profile: options.profile ?? "adaptive",
@@ -1228,7 +1296,7 @@ export class TranscodeRegistry {
       startSeconds: options.startSeconds ?? 0,
       subtitleVideoMpegTsTimestamp: null,
     };
-    for (const process of children) this.trackChild(process);
+    for (const process of children) this.trackChild(process, sessionId);
     registerStaged(job);
     // Prevent an unhandled spawn error from crashing the server and let startup
     // fail immediately when FFmpeg exits before producing a playable segment.

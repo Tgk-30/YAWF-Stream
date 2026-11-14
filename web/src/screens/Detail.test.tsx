@@ -36,7 +36,7 @@ let pickerSelection = { season: 1, episode: 3 };
 let mockActiveProfile: { id: string } | null = null;
 let mockServerSession: { profileId: string } | null = null;
 let capturedStreamPlay: (() => void) | null = null;
-let capturedRefreshCurrentSource: ((position: number, handoff: any) => Promise<void>) | null = null;
+let capturedRefreshCurrentSource: ((position: number, handoff: any, beforeCommit?: () => Promise<void>) => Promise<void>) | null = null;
 let capturedTryNextSource: (() => Promise<void>) | null = null;
 const streamPickerMode = vi.hoisted(() => ({ real: false }));
 const episodePickerMode = vi.hoisted(() => ({ real: false }));
@@ -3222,4 +3222,46 @@ describe("Detail server-mode title request", () => {
       expect(screen.getByTestId("hero-reqstate").textContent).toBe("requested"),
     );
   });
+  async function recovery117(resolveFresh = true) {
+    const old = { fileName: "show.mp4", streamURL: "https://cdn.example/old117.mp4", codec: "H.264" };
+    const fresh = { ...old, streamURL: "https://cdn.example/new117.mp4" };
+    const resolveStream = vi.fn().mockResolvedValueOnce(old);
+    if (resolveFresh) resolveStream.mockResolvedValue(fresh);
+    else resolveStream.mockRejectedValue(new Error("fresh resolve failed"));
+    mockServices.debrid = { hasServices: true, resolveStream, getTranscodeHLS: vi.fn(async () => null) };
+    mockStreams.rows = [{ result: TorrentResult.fromSearch({ infoHash: "HASH", title: "show.mp4", sizeBytes: 1_000, seeders: 1, leechers: 0, indexerName: "test" }), cachedOn: "real_debrid" }];
+    render(<Detail />);
+    await userEvent.click(screen.getByTestId("resolve-and-play-stream"));
+    await waitFor(() => expect(screen.getByTestId("player")).toHaveAttribute("data-url", old.streamURL));
+    return { old, fresh };
+  }
+  it("[recovery117-resolve] failed fresh resolution never invokes old-reader cleanup", async () => {
+    const f = await recovery117(false); const cleanup = vi.fn(async () => {});
+    await expect(capturedRefreshCurrentSource!(88, {}, cleanup)).rejects.toThrow("fresh resolve failed");
+    expect(cleanup).not.toHaveBeenCalled(); expect(screen.getByTestId("player")).toHaveAttribute("data-url", f.old.streamURL);
+  });
+  it("[recovery117-order] awaits cleanup before committing a freshly resolved stream", async () => {
+    const f = await recovery117(); let release!: () => void;
+    const cleanup = vi.fn(() => new Promise<void>(r => { release = r; }));
+    let task!: Promise<void>; act(() => { task = capturedRefreshCurrentSource!(88, {}, cleanup); });
+    await waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+    expect(screen.getByTestId("player")).toHaveAttribute("data-url", f.old.streamURL);
+    await act(async () => { release(); await task; });
+    expect(screen.getByTestId("player")).toHaveAttribute("data-url", f.fresh.streamURL);
+  });
+  it("[recovery117-stale] a close during awaited cleanup never mounts or warms a successor", async () => {
+    await recovery117(); let release!: () => void;
+    const cleanup = vi.fn(() => new Promise<void>(r => { release = r; }));
+    let task!: Promise<void>; act(() => { task = capturedRefreshCurrentSource!(88, {}, cleanup); });
+    await waitFor(() => expect(cleanup).toHaveBeenCalledOnce());
+    await userEvent.click(screen.getByRole("button", { name: "close-player" }));
+    await act(async () => { release(); await task; });
+    expect(screen.queryByTestId("player")).toBeNull();
+  });
+  it.each(["409", "503", "timeout"])("[recovery117-refusal] cleanup %s never commits the fresh stream", async failure => {
+    const f = await recovery117(); const cleanup = vi.fn(async () => { throw new Error(failure); });
+    await expect(capturedRefreshCurrentSource!(88, {}, cleanup)).rejects.toThrow(failure);
+    expect(cleanup).toHaveBeenCalledOnce(); expect(screen.getByTestId("player")).toHaveAttribute("data-url", f.old.streamURL);
+  });
+
 });

@@ -2673,3 +2673,99 @@ describe("prepared replacement activation", () => {
     } finally { await f.cleanup(); }
   });
 });
+
+describe("exact generation recovery release117", () => {
+  async function fixture(max = 1) {
+    const f = capacityRegistryFixture(max);
+    seedTranscodeSession(f.database, "release117");
+    const dir = await f.registry.ensureJob("release117", "https://provider.example/old", { quality: "480p" });
+    const generation = f.registry.generationFor("release117", dir)!;
+    const pointer = () => (f.database.sqlite.prepare("SELECT transcode_dir FROM stream_sessions WHERE id = 'release117'").get() as { transcode_dir: string | null }).transcode_dir;
+    const cleanup = async () => { f.children.forEach(c => c.finish()); await f.registry.stop(); f.database.close(); rmSync(f.dataDir, { recursive: true, force: true }); vi.useRealTimers(); };
+    return { ...f, dir, generation, pointer, cleanup };
+  }
+  it("[release117-exit] coalesces exact release and waits for actual exit before admitting the successor at max1", async () => {
+    const f = await fixture();
+    try {
+      const first = f.registry.releaseGeneration("release117", f.generation);
+      expect(f.registry.releaseGeneration("release117", f.generation)).toBe(first);
+      let settled = false; void first.then(() => { settled = true; });
+      await Promise.resolve(); expect(settled).toBe(false); expect(f.children[0]!.kills).toBe(1);
+      expect(f.pointer()).toBe(f.dir);
+      await expect(f.registry.ensureJob("too-early117", "https://provider.example/new", { quality: "480p" })).rejects.toMatchObject({ statusCode: 503 });
+      f.children[0]!.finish();
+      await expect(first).resolves.toBe("released"); expect(f.pointer()).toBeNull(); expect(existsSync(f.dir)).toBe(false);
+      await expect(f.registry.ensureJob("successor117", "https://provider.example/new", { quality: "480p" })).resolves.toEqual(expect.any(String));
+      expect(f.children.filter(c => c.running)).toHaveLength(1);
+      expect(f.registry.releaseGeneration("release117", f.generation)).toBe(first);
+      expect(f.children[0]!.kills).toBe(1);
+      await expect(f.registry.ensureJob("release117", "https://provider.example/old", { quality: "480p" })).rejects.toMatchObject({ statusCode: 410 });
+    } finally { await f.cleanup(); }
+  });
+  it("[release117-conflict] refuses missing/wrong/prepared/pending generation without touching any child", async () => {
+    const f = await fixture(3);
+    try {
+      await expect(f.registry.releaseGeneration("absent", f.generation)).resolves.toBe("released");
+      await expect(f.registry.releaseGeneration("release117", "transcode-wrong")).resolves.toBe("conflict");
+      const pending = f.registry.ensureJob("release117", "https://provider.example/old", { quality: "360p" });
+      await expect(f.registry.releaseGeneration("release117", f.generation)).resolves.toBe("conflict");
+      const prepared = await pending;
+      await expect(f.registry.releaseGeneration("release117", f.generation)).resolves.toBe("conflict");
+      await expect(f.registry.releaseGeneration("release117", f.registry.generationFor("release117", prepared)!)).resolves.toBe("conflict");
+      expect(f.pointer()).toBe(f.dir); expect(f.children.every(c => c.kills === 0)).toBe(true);
+    } finally { await f.cleanup(); }
+  });
+  it("[release117-pointer] conditionally clears only the released output pointer", async () => {
+    const f = await fixture();
+    try {
+      const release = f.registry.releaseGeneration("release117", f.generation);
+      f.database.sqlite.prepare("UPDATE stream_sessions SET transcode_dir = 'newer-output' WHERE id = 'release117'").run();
+      f.children[0]!.finish(); await expect(release).resolves.toBe("released");
+      expect(f.pointer()).toBe("newer-output");
+    } finally { await f.cleanup(); }
+  });
+  it("[release117-unconfirmed] timeout never calls a signal an exit or allows a second producer", async () => {
+    const f = await fixture(); vi.useFakeTimers();
+    try {
+      const release = f.registry.releaseGeneration("release117", f.generation);
+      await vi.advanceTimersByTimeAsync(4001);
+      await expect(release).resolves.toBe("unconfirmed"); expect(f.pointer()).toBe(f.dir);
+      expect(f.children[0]!.kills).toBe(2); expect(existsSync(f.dir)).toBe(true);
+      await expect(f.registry.ensureJob("too-early117", "https://provider.example/new", { quality: "480p" })).rejects.toMatchObject({ statusCode: 503 });
+      expect(f.registry.releaseGeneration("release117", f.generation)).toBe(release);
+    } finally { vi.useRealTimers(); await f.cleanup(); }
+  });
+  it("[release117-reaped] an already-reaped exact session releases without guessing a DB pointer", async () => {
+    const f = await fixture();
+    try {
+      f.children[0]!.finish(); await f.registry.kill("release117");
+      f.database.sqlite.prepare("UPDATE stream_sessions SET transcode_dir = 'unknown-stale-output' WHERE id = 'release117'").run();
+      await expect(f.registry.releaseGeneration("release117", f.generation)).resolves.toBe("released");
+      expect(f.pointer()).toBe("unknown-stale-output");
+      await expect(f.registry.ensureJob("release117", "https://provider.example/old")).rejects.toMatchObject({ statusCode: 410 });
+    } finally { await f.cleanup(); }
+  });
+  it("[release117-lateexit] a later actual exit can confirm an unconfirmed exact release without resignalling", async () => {
+    const f = await fixture(); vi.useFakeTimers();
+    try {
+      const first = f.registry.releaseGeneration("release117", f.generation); await vi.advanceTimersByTimeAsync(4001);
+      await expect(first).resolves.toBe("unconfirmed"); f.children[0]!.finish();
+      vi.useRealTimers(); await expect(f.registry.releaseGeneration("release117", f.generation)).resolves.toBe("released");
+      expect(f.children[0]!.kills).toBe(2); expect(f.pointer()).toBeNull();
+    } finally { vi.useRealTimers(); await f.cleanup(); }
+  });
+  it("[release117-reap] expires inactive tombstones only after session expiry and clears them on stop", async () => {
+    const f = await fixture();
+    const state = f.registry as unknown as { generationReleases: Map<string, unknown>; reap(): void };
+    try {
+      f.children[0]!.finish(); await f.registry.releaseGeneration("release117", f.generation);
+      state.reap(); expect(state.generationReleases.has("release117")).toBe(true);
+      f.database.sqlite.prepare("UPDATE stream_sessions SET revoked_at = '2026-01-01' WHERE id = 'release117'").run();
+      state.reap(); expect(state.generationReleases.has("release117")).toBe(false);
+      await f.registry.releaseGeneration("absent117", f.generation); expect(state.generationReleases.size).toBe(1);
+      state.reap(); expect(state.generationReleases.size).toBe(0);
+      await f.registry.releaseGeneration("absent117", f.generation); await f.registry.stop(); expect(state.generationReleases.size).toBe(0);
+    } finally { await f.cleanup(); }
+  });
+
+});

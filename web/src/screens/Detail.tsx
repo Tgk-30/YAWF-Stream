@@ -1647,6 +1647,7 @@ export function Detail() {
   async function handleRefreshCurrentSource(
     absolutePositionSeconds: number,
     playbackHandoff: NonNullable<ActivePlayer["playbackHandoff"]>,
+    beforeCommit?: () => Promise<void>,
   ): Promise<void> {
     if (player != null && !activePlayerOwnsLiveSelection(player)) {
       throw new Error(
@@ -1687,6 +1688,15 @@ export function Detail() {
       const stream = await withFreshStreamResolutionTimeout(
         resolveSelectedStream(row, episodeHint, position, backend),
       );
+      if (
+        refreshGenerationRef.current !== requestGeneration ||
+        playbackEpochRef.current !== capturedEpoch ||
+        playerRef.current !== activePlayer ||
+        detailIdRef.current !== capturedDetailId
+      ) return;
+      await beforeCommit?.();
+      // The old reader may take time to stop. Never commit across a close,
+      // detail selection change or a newer source request during that await.
       if (
         refreshGenerationRef.current !== requestGeneration ||
         playbackEpochRef.current !== capturedEpoch ||
