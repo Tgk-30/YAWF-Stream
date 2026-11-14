@@ -127,13 +127,14 @@ function preparationCancelled(): Error {
 function encoderArgs(
   encoder: TranscodeVideoEncoder,
   bitrates: readonly string[],
+  heights: readonly number[],
 ): string[] {
   const result: string[] = [];
   for (let index = 0; index < bitrates.length; index += 1) {
     const bitrate = bitrates[index]!;
     result.push(`-c:v:${index}`, encoder);
     if (encoder === "libx264") {
-      result.push(`-preset:v:${index}`, "veryfast", `-crf:v:${index}`, "25");
+      result.push(`-preset:v:${index}`, heights[index]! <= 480 ? "superfast" : "veryfast", `-crf:v:${index}`, "25");
     } else if (encoder === "h264_nvenc") {
       result.push(`-preset:v:${index}`, "p4", `-cq:v:${index}`, "27");
     } else if (encoder === "h264_qsv") {
@@ -158,6 +159,16 @@ function encoderArgs(
 function toneMapPrefix(policy: TranscodeHdrPolicy): string {
   if (policy !== "tone-map") return "";
   return "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p,";
+}
+
+// Optimized playback trades high-frame-rate output for producer headroom. Keep
+// known lower rates intact; unknown nominal rates still need a valid fps value.
+const OPTIMIZED_FRAME_RATE_FILTER = "fps=fps='if(gt(source_fps,0),min(source_fps,30),30)'";
+
+function optimizedScaleFlags(height: number): string {
+  // Low-resolution optimized playback favors producer headroom. Keep higher
+  // quality selections on the existing scaler rather than weakening them.
+  return height <= 480 ? ":flags=fast_bilinear" : "";
 }
 
 /** Build seek-aware HLS without duplicate source-sized Auto encodes. Unknown
@@ -217,17 +228,19 @@ function buildHlsArgs(
 
   if (quality === "auto") {
     const prefix = toneMapPrefix(hdrPolicy);
+    // Drop surplus frames once, before per-rendition scaling or tone mapping.
+    const input = `[0:v:0]${OPTIMIZED_FRAME_RATE_FILTER},`;
     const split = ladder.length === 1 ? "" :
-      `[0:v:0]split=${ladder.length}${ladder.map((level) => `[v${level.height}i]`).join("")};`;
+      `${input}split=${ladder.length}${ladder.map((level) => `[v${level.height}i]`).join("")};`;
     const filters = ladder.map((level) =>
-      `${ladder.length === 1 ? "[0:v:0]" : `[v${level.height}i]`}${prefix}scale=w=-2:h='min(${level.height},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2[v${level.height}]`).join(";");
+      `${ladder.length === 1 ? input : `[v${level.height}i]`}${prefix}scale=w=-2:h='min(${level.height},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2${optimizedScaleFlags(level.height)}[v${level.height}]`).join(";");
     args.push(
       "-filter_complex",
       split + filters,
       ...ladder.flatMap((level) => ["-map", `[v${level.height}]`]),
       ...(includeAudio ? ladder.flatMap(() => ["-map", audioMap]) : []),
       ...(includeSubtitle ? ["-map", "0:s:0"] : []),
-      ...encoderArgs(encoder, ladder.map((level) => level.video)),
+      ...encoderArgs(encoder, ladder.map((level) => level.video), ladder.map((level) => level.height)),
       ...(includeAudio
         ? [
             "-c:a",
@@ -282,7 +295,7 @@ function buildHlsArgs(
       "360p": { height: 360, videoBitrate: "700k", audioBitrate: "64k" },
     }[quality];
     const videoFilter =
-      `${toneMapPrefix(hdrPolicy)}scale=w=-2:h='min(${fixed.height},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2`;
+      `${OPTIMIZED_FRAME_RATE_FILTER},${toneMapPrefix(hdrPolicy)}scale=w=-2:h='min(${fixed.height},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2${optimizedScaleFlags(fixed.height)}`;
     args.push(
       "-map",
       "0:v:0",
@@ -290,7 +303,7 @@ function buildHlsArgs(
       ...(includeSubtitle ? ["-map", "0:s:0"] : []),
       "-vf",
       videoFilter,
-      ...encoderArgs(encoder, [fixed.videoBitrate]),
+      ...encoderArgs(encoder, [fixed.videoBitrate], [fixed.height]),
       ...(includeAudio
         ? [
             "-c:a",
