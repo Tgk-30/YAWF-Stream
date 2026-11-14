@@ -22,6 +22,7 @@ import { TorrentResult } from "../services/indexers/models";
 
 // --- mutable mock state -----------------------------------------------------
 
+let playerSuspension: Promise<void> | null = null;
 let mockDetailItem: MediaPreview | null = null;
 let mockDetail: DetailState;
 let mockStreams: StreamsState;
@@ -495,10 +496,13 @@ vi.mock("../components/VideoPlayer", () => ({
     serverOptimized,
     scrobbleContext,
   }: any) => {
+    if (playerSuspension != null) throw playerSuspension;
     capturedRefreshCurrentSource = refreshCurrentSource ?? null;
     capturedTryNextSource = onTryNextSource ?? null;
     return createPortal(
     <div
+      role="dialog"
+      aria-label="Playing test"
       data-testid="player"
       data-url={url}
       data-title={title}
@@ -711,6 +715,7 @@ function downloadRow(
 }
 
 beforeEach(() => {
+  playerSuspension = null;
   mockDetailItem = preview("m1", { type: "movie", title: "Selected" });
   mockDetail = detailState();
   mockStreams = streamsState();
@@ -1553,6 +1558,53 @@ describe("Detail base render", () => {
 
     await waitFor(() => expect(refreshContinueWatching).toHaveBeenCalledTimes(1));
     expect(screen.queryByTestId("player")).not.toBeInTheDocument();
+  });
+
+  it("hides and inerts Detail while the portalled player is mounted, then restores it on close", async () => {
+    render(<Detail />);
+    const detail = screen.getByRole("dialog", { name: "Selected details" });
+    const action = screen.getByTestId("play-stream");
+    await userEvent.click(action);
+    const player = await screen.findByRole("dialog", { name: "Playing test" });
+    expect(player.parentElement).toBe(document.body);
+    expect(player.closest("[inert], [aria-hidden=true]")).toBeNull();
+    expect(detail).toHaveAttribute("inert");
+    expect(detail).toHaveAttribute("aria-hidden", "true");
+    expect(action.closest("[inert]")).toBe(detail);
+    expect(screen.queryByRole("dialog", { name: "Selected details" })).toBeNull();
+    expect(screen.getByRole("button", { name: "close-player" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "close-player" }));
+    expect(detail).not.toHaveAttribute("inert");
+    expect(detail).not.toHaveAttribute("aria-hidden");
+    expect(screen.getByRole("dialog", { name: "Selected details" })).toBe(detail);
+    expect(action).toBeEnabled();
+  });
+
+  it("keeps Detail uncovered while the lazy player is suspended", async () => {
+    let resume!: () => void;
+    playerSuspension = new Promise<void>((resolve) => { resume = resolve; });
+    render(<Detail />);
+    const detail = screen.getByRole("dialog", { name: "Selected details" });
+    await userEvent.click(screen.getByTestId("play-stream"));
+    expect(await screen.findByText("Loading player…")).toBeInTheDocument();
+    expect(detail).not.toHaveAttribute("inert");
+    expect(detail).not.toHaveAttribute("aria-hidden");
+    playerSuspension = null;
+    await act(async () => { resume(); });
+    await screen.findByTestId("player");
+    expect(detail).toHaveAttribute("inert");
+  });
+
+  it("restores covered Detail attributes when the player is unmounted with Detail", async () => {
+    const { unmount } = render(<Detail />);
+    const detail = screen.getByRole("dialog", { name: "Selected details" });
+    await userEvent.click(screen.getByTestId("play-stream"));
+    await screen.findByTestId("player");
+    expect(detail).toHaveAttribute("inert");
+    unmount();
+    expect(detail).not.toHaveAttribute("inert");
+    expect(detail).not.toHaveAttribute("aria-hidden");
+    expect(screen.queryByTestId("player")).toBeNull();
   });
 
   it("omits the hero when the detail item is null (no metadata yet)", () => {
