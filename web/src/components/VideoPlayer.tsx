@@ -129,7 +129,8 @@ import {
   stopAndroidTVPlayback,
   type AndroidTVPlaybackProgress,
 } from "../lib/androidTV";
-import { parseServerHlsSnapshot, renewServerHlsLease, serverHlsLeaseIdentity, releaseServerHlsGeneration, serverHlsLeaseTarget, serverHlsSnapshotAdmits, type ServerHlsSnapshot } from "../lib/serverApi";
+import { parseServerHlsSnapshot, renewServerHlsLease, serverHlsLeaseTarget, serverHlsSnapshotAdmits, type ServerHlsSnapshot } from "../lib/serverApi";
+import { serverHlsLeaseIdentity, releaseServerHlsGeneration } from "../lib/serverHlsRelease";
 import { notifyUnauthorized } from "../lib/serverSession";
 import type {
   ServerAudioInventoryLoadOptions,

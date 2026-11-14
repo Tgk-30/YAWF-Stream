@@ -24,6 +24,7 @@ vi.mock("./serverSession", () => ({
 }));
 
 import * as api from "./serverApi";
+import { serverHlsLeaseIdentity, releaseServerHlsGeneration } from "./serverHlsRelease";
 
 // ── fetch test double ────────────────────────────────────────────────────────
 type FakeResponse = {
@@ -1427,7 +1428,7 @@ describe("exact HLS generation cleanup", () => {
   });
 
   it("binds the same trusted rendition, session and generation", () => {
-    expect(api.serverHlsLeaseIdentity(target)).toEqual({ target, sessionId: "stream_one", generation: "transcode-actual" });
+    expect(serverHlsLeaseIdentity(target)).toEqual({ target, sessionId: "stream_one", generation: "transcode-actual" });
   });
 
   it.each([
@@ -1439,15 +1440,15 @@ describe("exact HLS generation cleanup", () => {
     target + "&start=1",
     target.replace("transcode-actual", "../other"),
   ])("rejects an untrusted cleanup target without sending credentials: %s", async (candidate) => {
-    expect(api.serverHlsLeaseIdentity(candidate)).toBeNull();
-    await expect(api.releaseServerHlsGeneration(candidate, new AbortController().signal)).rejects.toThrow("Untrusted");
+    expect(serverHlsLeaseIdentity(candidate)).toBeNull();
+    await expect(releaseServerHlsGeneration(candidate, new AbortController().signal)).rejects.toThrow("Untrusted");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("posts only the exact generation with cookies, CSRF, cancellation and no redirects", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }) as never);
     const controller = new AbortController();
-    await expect(api.releaseServerHlsGeneration(target, controller.signal)).resolves.toBeUndefined();
+    await expect(releaseServerHlsGeneration(target, controller.signal)).resolves.toBeUndefined();
     expect(lastCall()).toEqual({ url: "https://server.example/yawf/api/stream/stream_one/transcode/release", init: {
       method: "POST", credentials: "include", cache: "no-store", redirect: "error",
       headers: { "content-type": "application/json", "x-csrf-token": "test-csrf" },
@@ -1457,26 +1458,26 @@ describe("exact HLS generation cleanup", () => {
 
   it("does not mutate without current CSRF state", async () => {
     readCsrfToken.mockReturnValue(null);
-    await expect(api.releaseServerHlsGeneration(target, new AbortController().signal)).rejects.toThrow("Sign in");
+    await expect(releaseServerHlsGeneration(target, new AbortController().signal)).rejects.toThrow("Sign in");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it.each([401, 403, 404, 409, 503])("fails closed on cleanup status %s", async (status) => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ error: "not released" }, { status }) as never);
-    await expect(api.releaseServerHlsGeneration(target, new AbortController().signal)).rejects.toMatchObject({ status });
+    await expect(releaseServerHlsGeneration(target, new AbortController().signal)).rejects.toMatchObject({ status });
     expect(notifyUnauthorized).not.toHaveBeenCalled();
   });
 
   it.each(["", "{}", '{"ok":false}', "not json", "x".repeat(4097)])("requires explicit successful termination confirmation", async (text) => {
     fetchMock.mockResolvedValueOnce(rawResponse(text) as never);
-    await expect(api.releaseServerHlsGeneration(target, new AbortController().signal)).rejects.toThrow("did not confirm");
+    await expect(releaseServerHlsGeneration(target, new AbortController().signal)).rejects.toThrow("did not confirm");
   });
 
   it("retains browser-origin scoping without an explicit server URL", async () => {
     configuredServerURL.mockReturnValue(null);
     vi.stubGlobal("window", { location: { origin: "https://browser.example" } });
     fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }) as never);
-    await api.releaseServerHlsGeneration(target.replace("https://server.example/yawf", "https://browser.example"), new AbortController().signal);
+    await releaseServerHlsGeneration(target.replace("https://server.example/yawf", "https://browser.example"), new AbortController().signal);
     expect(lastCall().url).toBe("https://browser.example/api/stream/stream_one/transcode/release");
   });
 });
