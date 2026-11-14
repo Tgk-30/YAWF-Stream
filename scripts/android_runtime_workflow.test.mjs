@@ -115,6 +115,7 @@ function validateCandidateDelivery(job) {
   const [metadata, assets] = publicAdmissionPython(job);
   for (const literal of [
     'release.get("id") == release_id',
+    'release.get("target_commitish") == source',
     'release.get("draft") is False and release.get("prerelease") is False',
     'release.get("target_commitish") == source',
     'set(observed_assets) == set(expected_assets)',
@@ -339,6 +340,8 @@ test("rejects mutable and wrong public release targets in both API30 jobs", () =
 test("fails closed on public release, producer, tag, and asset inventory changes", () => {
   for (const [name, mutate, expected] of [
     ["draft release", (fixture) => { fixture.release.draft = true; }, /Public release state changed/],
+    ["release branch target", (fixture) => { fixture.release.target_commitish = "main"; }, /Public release target changed/],
+    ["release source", (fixture) => { fixture.release.target_commitish = "0".repeat(40); }, /Public release target changed/],
     ["extra asset", (fixture) => { fixture.release.assets.push({ name: "extra" }); }, /Public asset inventory changed/],
     ["APK digest", (fixture) => { fixture.release.assets[0].digest = `sha256:${"0".repeat(64)}`; }, /Public asset .* digest changed/],
     ["producer source", (fixture) => { fixture.run.head_sha = "0".repeat(40); }, /Producer source changed/],
