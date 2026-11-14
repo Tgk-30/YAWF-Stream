@@ -1183,6 +1183,10 @@ export function VideoPlayer({
     const video = externalHandoffVideoRef.current;
     if (video != null && externalHandoffPauseRef.current?.(video) !== true) video.pause();
   }, []);
+  const requestBrowserExternalHandoff = useCallback(() => {
+    pauseWebviewForExternalHandoff();
+    recordDiagnostic("player", "external.intent_requested");
+  }, [pauseWebviewForExternalHandoff]);
   const [captionsOpen, setCaptionsOpen] = useState(false);
   const [castSuspended, setCastSuspended] = useState(false);
   const [webMenuOpen, setWebMenuOpen] = useState(false);
@@ -3385,6 +3389,7 @@ export function VideoPlayer({
             optimizedTimelineIsPartial={activeOptimized?.partialTimeline ?? initialServerOptimizedTimeline}
             externalHandoffVideoRef={externalHandoffVideoRef}
             externalHandoffPauseRef={externalHandoffPauseRef}
+            onBrowserExternalHandoff={requestBrowserExternalHandoff}
             serverOptimized={serverOptimized}
             preparedLeaseTarget={activeOptimized?.leaseTarget}
             onServerLeaseExpired={expireServerGeneration}
@@ -3458,6 +3463,7 @@ export function VideoPlayer({
             manualExternalUrl={mobileTauri ? externalTarget : null}
             browserExternalLinks={browserExternalLinks}
             browserExternalGuidance={browserExternalHelp}
+            onBrowserExternalHandoff={requestBrowserExternalHandoff}
             onTryNextSource={onTryNextSource}
             onRetry={
               mode === "webview" && externalError != null
@@ -3552,6 +3558,7 @@ function WebviewPlayer({
   optimizedTimelineIsPartial,
   externalHandoffVideoRef,
   externalHandoffPauseRef,
+  onBrowserExternalHandoff,
   onPlaybackError,
   onPlaybackStall,
   canRefreshSource,
@@ -3659,6 +3666,7 @@ function WebviewPlayer({
   optimizedTimelineIsPartial: boolean;
   externalHandoffVideoRef: { current: HTMLVideoElement | null };
   externalHandoffPauseRef: { current: ((video: HTMLVideoElement) => boolean) | null };
+  onBrowserExternalHandoff: () => void;
   onPlaybackError: (message: string, exactHandoffPending: boolean, recovery?: WebviewRecoveryContext) => void;
   onPlaybackStall: (
     absolutePositionSeconds: number,
@@ -8849,7 +8857,7 @@ function WebviewPlayer({
                 className="player-options-action"
                 href={link.href}
                 key={link.id}
-                onClick={() => recordDiagnostic("player", "external.intent_requested")}
+                onClick={onBrowserExternalHandoff}
               >
                 <Icon name="play" size={17} />
                 <span>
@@ -9210,6 +9218,7 @@ function ExternalPanel({
   manualExternalUrl,
   browserExternalLinks,
   browserExternalGuidance,
+  onBrowserExternalHandoff,
   onTryNextSource,
   onRetry,
   retryPending = false,
@@ -9226,6 +9235,7 @@ function ExternalPanel({
   manualExternalUrl: string | null;
   browserExternalLinks: BrowserExternalPlayerLink[];
   browserExternalGuidance: string | null;
+  onBrowserExternalHandoff: () => void;
   onTryNextSource?: () => Promise<void>;
   onRetry?: () => void | Promise<void>;
   retryPending?: boolean;
@@ -9281,7 +9291,7 @@ function ExternalPanel({
               className="btn"
               href={link.href}
               key={link.id}
-              onClick={() => recordDiagnostic("player", "external.intent_requested")}
+              onClick={onBrowserExternalHandoff}
             >
               {link.label}
             </a>
@@ -9386,7 +9396,7 @@ function ExternalPanel({
                     className="btn"
                     href={link.href}
                     key={link.id}
-                    onClick={() => recordDiagnostic("player", "external.intent_requested")}
+                    onClick={onBrowserExternalHandoff}
                   >
                     {link.label}
                   </a>
