@@ -1,0 +1,55 @@
+name: iPad hosted counter-only native canary
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/ipad-native-qa.yml'
+      - 'scripts/ipad-native-qa/**'
+      - 'scripts/ipad_native_qa.test.mjs'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipad-native-counter-only
+  cancel-in-progress: false
+
+jobs:
+  counter:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    name: Fresh iPad26.5 unsigned counter only
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      QA_PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+    steps:
+      - name: Checkout exact canary source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Node24 for bounded QA controller
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.17.0'
+      - name: Counter-only public source and policy contracts
+        run: node --test scripts/ipad-native-qa/hosted-run.test.mjs
+      - name: One fresh owned simulator counter transaction
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+        run: node scripts/ipad-native-qa/hosted-run.mjs
+      - name: Always validate and clean only the recorded new simulator
+        if: always()
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+        run: node scripts/ipad-native-qa/hosted-run.mjs --cleanup-only
+      - name: Retain bounded native result and cleanup evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipad-counter-only-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ipad-native-qa-${{ github.run_id }}-${{ github.run_attempt }}/evidence
+          if-no-files-found: error
+          retention-days: 14

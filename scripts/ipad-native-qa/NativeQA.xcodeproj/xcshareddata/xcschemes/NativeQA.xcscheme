@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Scheme LastUpgradeVersion="2700" version="1.7">
+ <BuildAction parallelizeBuildables="NO" buildImplicitDependencies="YES"><BuildActionEntries>
+  <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="700000000000000000000001" BuildableName="NativeQAAnchor.app" BlueprintName="NativeQAAnchor" ReferencedContainer="container:NativeQA.xcodeproj"/></BuildActionEntry>
+  <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="700000000000000000000002" BuildableName="SafariNativeInputTests.xctest" BlueprintName="SafariNativeInputTests" ReferencedContainer="container:NativeQA.xcodeproj"/></BuildActionEntry>
+ </BuildActionEntries></BuildAction>
+ <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.PosixSpawn" shouldUseLaunchSchemeArgsEnv="NO">
+  <Testables><TestableReference skipped="NO" parallelizable="NO"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="700000000000000000000002" BuildableName="SafariNativeInputTests.xctest" BlueprintName="SafariNativeInputTests" ReferencedContainer="container:NativeQA.xcodeproj"/></TestableReference></Testables>
+  <MacroExpansion><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="700000000000000000000001" BuildableName="NativeQAAnchor.app" BlueprintName="NativeQAAnchor" ReferencedContainer="container:NativeQA.xcodeproj"/></MacroExpansion><EnvironmentVariables><EnvironmentVariable key="QA_EXPECTED_UDID" value="$(QA_EXPECTED_UDID)" isEnabled="YES"/><EnvironmentVariable key="QA_OWNED_DEVICE_NAME" value="$(QA_OWNED_DEVICE_NAME)" isEnabled="YES"/><EnvironmentVariable key="QA_HTTP_PROBE_URL" value="$(QA_HTTP_PROBE_URL)" isEnabled="YES"/><EnvironmentVariable key="QA_EXPECTED_FIXTURE_ID" value="$(QA_EXPECTED_FIXTURE_ID)" isEnabled="YES"/><EnvironmentVariable key="QA_EXPECTED_SOURCE_REVISION" value="$(QA_EXPECTED_SOURCE_REVISION)" isEnabled="YES"/></EnvironmentVariables>
+ </TestAction>
+</Scheme>
