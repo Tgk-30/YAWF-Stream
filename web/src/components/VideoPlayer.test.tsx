@@ -3927,6 +3927,221 @@ describe("WebviewPlayer", () => {
     }
   });
 
+  describe("fresh trusted-server native HLS start", () => {
+    const manifestUrl =
+      "https://server.example/api/stream/session-fresh/index.m3u8?quality=480p&start=0";
+    const manifest = "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n480p.m3u8?generation=transcode-fresh110\n";
+
+    function installStandardMse() {
+      const typeSupported = vi.fn(() => true);
+      class StandardMediaSource {}
+      Object.assign(StandardMediaSource, { isTypeSupported: typeSupported });
+      const restoreMediaSource = replaceProperty(
+        globalThis,
+        "MediaSource",
+        StandardMediaSource as unknown as typeof MediaSource,
+      );
+      const restoreManaged = replaceProperty(globalThis, "ManagedMediaSource", class ManagedMediaSource {});
+      const restoreSourceBuffer = replaceProperty(globalThis, "SourceBuffer", {
+        prototype: { appendBuffer: vi.fn(), remove: vi.fn() },
+      });
+      return { typeSupported, restore: () => {
+        restoreSourceBuffer();
+        restoreManaged();
+        restoreMediaSource();
+      } };
+    }
+
+    function prepareTrustedServerHls() {
+      deviceKindMock.mockReturnValue("ios");
+      globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(manifest, {
+        status: 200,
+        headers: { "Content-Type": "application/vnd.apple.mpegurl" },
+      })));
+    }
+
+    const optimization = {
+      qualities: ["480p"] as ServerTranscodeQuality[],
+      defaultQuality: "480p" as const,
+      request: vi.fn(),
+    };
+
+    it.each([
+      ["native route", "native", false, false],
+      ["hls.js unsupported fallback", "compatibility", true, false],
+      ["compatibility capability revalidation", "compatibility", true, true],
+    ] as const)("pins a fresh zero start through the %s assignment path", async (_label, mode, withMse, revalidate) => {
+      prepareTrustedServerHls();
+      const mse = withMse ? installStandardMse() : null;
+      if (withMse && !revalidate) hlsIsSupported.mockReturnValue(false);
+      try {
+        render(
+          <VideoPlayer
+            url={manifestUrl}
+            title="Fresh server HLS"
+            iosHlsPlaybackMode={mode}
+            serverOptimized={optimization}
+            onClose={() => {}}
+          />,
+        );
+        if (revalidate) mse!.typeSupported.mockReturnValue(false);
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        await waitFor(() => expect(video.src).toBe(`${manifestUrl}#t=0.001`));
+        expect(hlsInstances).toHaveLength(0);
+      } finally {
+        mse?.restore();
+      }
+    });
+
+    it.each([
+      ["explicit zero", 0, "#t=0.001"],
+      ["undefined fresh start", undefined, "#t=0.001"],
+      ["five second fresh start", 5, "#t=5"],
+    ] as const)("uses the native fragment for %s", async (_label, startPositionSeconds, fragment) => {
+      prepareTrustedServerHls();
+      render(
+        <VideoPlayer
+          url={manifestUrl}
+          title="Fresh server HLS boundary"
+          {...(startPositionSeconds === undefined ? {} : { startPositionSeconds })}
+          serverOptimized={optimization}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      await waitFor(() => expect(video.src).toBe(`${manifestUrl}${fragment}`));
+      expect(hlsInstances).toHaveLength(0);
+    });
+
+    it("does not reload the native source on progress renders or optimization-object replacement", async () => {
+      prepareTrustedServerHls();
+      const progress = vi.fn();
+      const view = render(
+        <VideoPlayer
+          url={manifestUrl}
+          title="Stable native server HLS"
+          serverOptimized={optimization}
+          onProgress={progress}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      await waitFor(() => expect(video.src).toBe(`${manifestUrl}#t=0.001`));
+      expect(video.load).not.toHaveBeenCalled();
+      view.rerender(
+        <VideoPlayer
+          url={manifestUrl}
+          title="Stable native server HLS"
+          serverOptimized={{ ...optimization, request: vi.fn() }}
+          onProgress={vi.fn()}
+          onClose={() => {}}
+        />,
+      );
+      video.currentTime = 1;
+      fireEvent.timeUpdate(video);
+      expect(video.src).toBe(`${manifestUrl}#t=0.001`);
+      expect(video.load).not.toHaveBeenCalled();
+    });
+
+    it.each([6, 120, Number.NaN, -1])("does not fragment an ordinary or invalid start %s", async (startPositionSeconds) => {
+      prepareTrustedServerHls();
+      render(
+        <VideoPlayer
+          url={manifestUrl}
+          title="Ordinary server HLS"
+          startPositionSeconds={startPositionSeconds}
+          serverOptimized={optimization}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      await waitFor(() => expect(video.src).toBe(manifestUrl));
+      expect(hlsInstances).toHaveLength(0);
+    });
+
+    it("does not fragment provider HLS or direct media despite server optimization capability", async () => {
+      deviceKindMock.mockReturnValue("ios");
+      globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+      const optimizationWithProvider = { ...optimization };
+      const provider = render(
+        <VideoPlayer
+          url="https://provider.example/stream.m3u8"
+          title="Provider HLS"
+          serverOptimized={optimizationWithProvider}
+          onClose={() => {}}
+        />,
+      );
+      const providerVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      await waitFor(() => expect(providerVideo.src).toBe("https://provider.example/stream.m3u8"));
+      provider.unmount();
+      const direct = render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-fresh/movie.mp4"
+          title="Direct server media"
+          serverOptimized={optimizationWithProvider}
+          onClose={() => {}}
+        />,
+      );
+      const directVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(directVideo.src).toBe("https://server.example/api/stream/session-fresh/movie.mp4");
+      direct.unmount();
+      const unoptimized = render(
+        <VideoPlayer
+          url={manifestUrl}
+          title="Unoptimized server HLS"
+          startPositionSeconds={0}
+          onClose={() => {}}
+        />,
+      );
+      const unoptimizedVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      expect(unoptimizedVideo.src).toBe(manifestUrl);
+      unoptimized.unmount();
+    });
+
+    it("does not opt Android native-HLS fallback into the iOS fresh-start fragment", async () => {
+      deviceKindMock.mockReturnValue("android");
+      globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+      vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
+      hlsIsSupported.mockReturnValue(false);
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(manifest)));
+      render(
+        <VideoPlayer
+          url={manifestUrl}
+          title="Android server HLS fallback"
+          serverOptimized={optimization}
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      await waitFor(() => expect(video.src).toBe(manifestUrl));
+      expect(hlsInstances).toHaveLength(0);
+    });
+
+    it("keeps the hls.js route on its unchanged manifest URL", async () => {
+      prepareTrustedServerHls();
+      const mse = installStandardMse();
+      try {
+        render(
+          <VideoPlayer
+            url={manifestUrl}
+            title="Compatibility server HLS"
+            iosHlsPlaybackMode="compatibility"
+            serverOptimized={optimization}
+            onClose={() => {}}
+          />,
+        );
+        await waitFor(() => expect(hlsInstances).toHaveLength(1));
+        expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(manifestUrl);
+        expect((document.querySelector("video.player-video") as HTMLVideoElement).src).not.toContain("#t=");
+      } finally {
+        mse.restore();
+      }
+    });
+  });
+
   it("pins a nonzero exact native HLS handoff with a WebKit media fragment", async () => {
     deviceKindMock.mockReturnValue("ios");
     (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>) = vi.fn(
@@ -14446,7 +14661,7 @@ describe("server generation HEAD retention", () => {
     expect(video.getAttribute("src")).toBeNull();
     prepared.resolve(new Response(manifest));
     await flushLease();
-    expect(video.src).toBe(master);
+    expect(video.src).toBe(`${master}#t=0.001`);
     expect(fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
     expect(fetcher).toHaveBeenCalledWith(child, expect.objectContaining({ method: "HEAD", credentials: "include", cache: "no-store", redirect: "error" }));
     fireEvent.canPlay(video);
@@ -14526,7 +14741,9 @@ describe("server generation HEAD retention", () => {
     expect(signal.aborted).toBe(true);
     old.resolve(new Response(null, { status: 404 })); await flushLease();
     expect(screen.queryByRole("alert")).toBeNull();
-    expect((document.querySelector("video.player-video") as HTMLVideoElement).src).toBe(nextUrl);
+    expect((document.querySelector("video.player-video") as HTMLVideoElement).src).toBe(
+      nextUrl === master ? `${master}#t=0.001` : nextUrl,
+    );
   });
   it("aborts one stalled HEAD at five seconds and coalesces foreground checks onto the 30 second cadence", async () => {
     setupNative();
@@ -14642,7 +14859,7 @@ describe("server generation HEAD retention", () => {
     render(<VideoPlayer url={master} engine="webview-hls-transcode" title="Lease" serverOptimized={optimized} onClose={() => {}} />);
     await flushLease();
     const video = document.querySelector("video.player-video") as HTMLVideoElement;
-    expect(video.src).toBe(master);
+    expect(video.src).toBe(`${master}#t=0.001`);
     fireEvent.canPlay(video); fireEvent.pause(video);
     await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
     expect(fetcher).toHaveBeenCalledTimes(1);
@@ -14830,7 +15047,7 @@ describe("server generation HEAD retention", () => {
     act(() => { startTransition(() => scenario.choose(true)); }); await flushLease();
     expect(scenario.speculativeRenders()).toBeGreaterThan(0);
     expect(document.querySelector("video.player-video")).toBe(video);
-    expect(video.src).toBe(master);
+    expect(video.src).toBe(`${master}#t=0.001`);
     expect(fetcher.mock.calls.find(([, init]) => init?.method === "HEAD")![1]!.signal!.aborted).toBe(false);
     head.resolve(new Response(null, { status: 404 })); await flushLease();
     expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
