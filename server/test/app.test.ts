@@ -4103,6 +4103,108 @@ describe("DebridStreamer server", () => {
     }>(created).session;
   }
 
+  it("transcode release: stops only the exact encoder while raw and external grants keep working", async () => {
+    upstream = createServer((_req, res) => { res.writeHead(200, { "content-type": "video/mp4" }); res.end("sample"); });
+    await new Promise<void>((resolve) => upstream?.listen(0, "127.0.0.1", resolve));
+    const address = upstream.address();
+    if (address == null || typeof address === "string") throw new Error("Expected TCP test server.");
+    const fake = makeFakeTranscoder();
+    const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({}, fake);
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner, `http://127.0.0.1:${address.port}/video`);
+      const root = `/api/stream/${session.id}/`;
+      const manifest = await request(owner, { method: "GET", url: root + "index.m3u8?quality=480p" });
+      const child = manifest.body.match(/^480p\.m3u8\?generation=(transcode-[A-Za-z0-9_-]+)/m)!;
+      expect(child).not.toBeNull();
+      const process = spawn.mock.results[0]!.value as ReturnType<Transcoder["spawnHls"]>;
+      const kill = vi.spyOn(process, "kill");
+      const released = await request(owner, { method: "POST", url: root + "transcode/release", csrf: true, payload: { generation: child[1] } });
+      expect(released.statusCode).toBe(200);
+      expect(json(released)).toEqual({ ok: true });
+      expect(kill).toHaveBeenCalledTimes(1);
+      expect((await request(owner, { method: "HEAD", url: root + child[0] })).statusCode).toBe(404);
+      expect((await request(owner, { method: "GET", url: session.playbackUrl })).statusCode).toBe(200);
+      const bearer = session.playbackAuthorization.slice("Bearer ".length);
+      expect((await request({ app: on, cookies: new Map() }, { method: "GET", url: `/api/external-stream/${session.id}/${bearer}` })).statusCode).toBe(200);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect((await request(owner, { method: "POST", url: root + "transcode/release", csrf: true, payload: { generation: child[1] } })).statusCode).toBe(200);
+    } finally { await on.close(); }
+  });
+
+  it("transcode release: requires cookie auth, CSRF and the exact active profile without revealing foreign sessions", async () => {
+    const on = await buildTranscodeApp();
+    const release = vi.spyOn(TranscodeRegistry.prototype, "releaseGeneration").mockResolvedValue("released");
+    try {
+      const owner = await setupOwner(on);
+      await createProfile(owner, "release-other", "release-other-password");
+      const other = await login(on, "release-other", "release-other-password");
+      const session = await createRawSession(owner);
+      const url = `/api/stream/${session.id}/transcode/release`;
+      const payload = { generation: "transcode-exact" };
+      expect((await request({ app: on, cookies: new Map() }, { method: "POST", url, payload, headers: { authorization: session.playbackAuthorization } })).statusCode).toBe(401);
+      expect((await request(owner, { method: "POST", url, payload })).statusCode).toBe(403);
+      expect((await request(other, { method: "POST", url, payload, csrf: true })).statusCode).toBe(404);
+      expect((await request(owner, { method: "POST", url: "/api/stream/missing/transcode/release", payload, csrf: true })).statusCode).toBe(404);
+      expect(release).not.toHaveBeenCalled();
+      expect((await request(owner, { method: "POST", url, payload, csrf: true })).statusCode).toBe(200);
+      expect(release).toHaveBeenCalledExactlyOnceWith(session.id, "transcode-exact");
+    } finally { release.mockRestore(); await on.close(); }
+  });
+
+  it("transcode release: rejects malformed generation bodies and bounds repeated mutations", async () => {
+    const on = await buildTranscodeApp();
+    const release = vi.spyOn(TranscodeRegistry.prototype, "releaseGeneration").mockResolvedValue("released");
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const url = `/api/stream/${session.id}/transcode/release`;
+      for (const payload of [{}, { generation: "../other" }, { generation: "transcode-" }, { generation: "transcode-exact", sessionId: "other" }]) {
+        expect((await request(owner, { method: "POST", url, csrf: true, payload })).statusCode).toBe(400);
+      }
+      expect(release).not.toHaveBeenCalled();
+      for (let n = 0; n < 6; n++) expect((await request(owner, { method: "POST", url, csrf: true, payload: { generation: "transcode-exact" } })).statusCode).toBe(200);
+      expect((await request(owner, { method: "POST", url, csrf: true, payload: { generation: "transcode-exact" } })).statusCode).toBe(429);
+      expect(release).toHaveBeenCalledTimes(6);
+    } finally { release.mockRestore(); await on.close(); }
+  });
+
+  it.each([["conflict", 409], ["unconfirmed", 503]] as const)("transcode release: %s cannot confirm a stopped encoder", async (outcome, status) => {
+    const on = await buildTranscodeApp();
+    const release = vi.spyOn(TranscodeRegistry.prototype, "releaseGeneration").mockResolvedValue(outcome);
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const result = await request(owner, { method: "POST", url: `/api/stream/${session.id}/transcode/release`, csrf: true, payload: { generation: "transcode-exact" } });
+      expect(result.statusCode).toBe(status);
+      expect(json(result)).not.toEqual({ ok: true });
+    } finally { release.mockRestore(); await on.close(); }
+  });
+
+  it("transcode release: refuses expired, revoked and direct-torrent rows before touching an encoder", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "yawf-release117-"));
+    const databasePath = join(dir, "test.sqlite");
+    const on = await buildTranscodeApp({ databasePath });
+    const release = vi.spyOn(TranscodeRegistry.prototype, "releaseGeneration").mockResolvedValue("released");
+    let db: DatabaseSync | undefined;
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      db = new DatabaseSync(databasePath);
+      const post = () => request(owner, { method: "POST", url: `/api/stream/${session.id}/transcode/release`, csrf: true, payload: { generation: "transcode-exact" } });
+      expect((await post()).statusCode).toBe(200);
+      release.mockClear();
+      db.prepare("UPDATE stream_sessions SET source_kind = 'direct_torrent' WHERE id = ?").run(session.id);
+      expect((await post()).statusCode).toBe(404);
+      db.prepare("UPDATE stream_sessions SET source_kind = 'http', expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").run(session.id);
+      expect((await post()).statusCode).toBe(404);
+      db.prepare("UPDATE stream_sessions SET expires_at = '2099-01-01T00:00:00.000Z', revoked_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").run(session.id);
+      expect((await post()).statusCode).toBe(404);
+      expect(release).not.toHaveBeenCalled();
+    } finally { db?.close(); release.mockRestore(); await on.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it.each(["exit", "error"] as const)("transcode: rejects a child playlist when %s occurs after lookup but before read completes", async (failure) => {
     const fake = makeFakeTranscoder();
     const spawn = vi.spyOn(fake, "spawnHls");

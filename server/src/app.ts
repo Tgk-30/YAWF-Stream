@@ -6274,6 +6274,29 @@ function registerRoutes(
   // When transcoding isn't available (flag off OR ffmpeg absent), both routes
   // 404 - indistinguishable from "not found" - and nothing above changes.
 
+  // A reader must detach before releasing its exact encoder generation.
+  // This is cookie-only mutation, not stream-grant revocation.
+  app.post("/api/stream/:id/transcode/release", async (request) => {
+    const auth = requireAuth(db, request);
+    requireCsrf(request);
+    const id = sessionIdParamSchema.parse((request.params as { id: string }).id);
+    const { generation } = z.object({
+      generation: z.string().regex(/^transcode-[A-Za-z0-9_-]{1,100}$/),
+    }).strict().parse(request.body);
+    const row = db.sqlite.prepare(
+      `SELECT source_kind FROM stream_sessions
+       WHERE id = ? AND profile_id = ? AND revoked_at IS NULL AND expires_at > ?`,
+    ).get(id, auth.profileId, nowISO()) as { source_kind: string } | undefined;
+    if (row == null || row.source_kind !== "http" || !transcode.ready) {
+      throw httpError(404, "Active stream generation not found.");
+    }
+    rateLimit(request, `streams:release:${auth.profileId}:${id}`, 6, 60_000);
+    const outcome = await transcode.registry.releaseGeneration(id, generation);
+    if (outcome === "conflict") throw httpError(409, "The stream generation changed.");
+    if (outcome !== "released") throw httpError(503, "The previous encoder has not stopped.");
+    return { ok: true };
+  });
+
   /** Load + ownership-validate a stream session (same scoping as the proxy). */
   const loadTranscodeSession = (
     request: FastifyRequest,

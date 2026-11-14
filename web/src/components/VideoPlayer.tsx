@@ -129,7 +129,7 @@ import {
   stopAndroidTVPlayback,
   type AndroidTVPlaybackProgress,
 } from "../lib/androidTV";
-import { parseServerHlsSnapshot, renewServerHlsLease, serverHlsLeaseTarget, serverHlsSnapshotAdmits, type ServerHlsSnapshot } from "../lib/serverApi";
+import { parseServerHlsSnapshot, renewServerHlsLease, serverHlsLeaseIdentity, releaseServerHlsGeneration, serverHlsLeaseTarget, serverHlsSnapshotAdmits, type ServerHlsSnapshot } from "../lib/serverApi";
 import { notifyUnauthorized } from "../lib/serverSession";
 import type {
   ServerAudioInventoryLoadOptions,
@@ -277,6 +277,7 @@ interface VideoPlayerProps {
   refreshCurrentSource?: (
     absolutePositionSeconds: number,
     handoffState: PlaybackHandoffState,
+    beforeCommit?: () => Promise<void>,
   ) => Promise<void>;
   /** Runtime controls captured before a fresh source replacement. */
   initialHandoffState?: PlaybackHandoffState | null;
@@ -1178,6 +1179,7 @@ export function VideoPlayer({
   const [webviewPaused, setWebviewPaused] = useState(false);
   const externalHandoffVideoRef = useRef<HTMLVideoElement | null>(null);
   const externalHandoffPauseRef = useRef<((video: HTMLVideoElement) => boolean) | null>(null);
+  const recoveryReleaseRef = useRef<RecoveryReleaseRegistration | null>(null);
   const ownedWebviewStateRef = useRef<{ video: HTMLVideoElement; source: { key: string }; read: () => PlaybackHandoffState | null } | null>(null);
   const pauseWebviewForExternalHandoff = useCallback(() => {
     const video = externalHandoffVideoRef.current;
@@ -1253,6 +1255,7 @@ export function VideoPlayer({
   }, [webviewSource]);
   const webviewPending = webviewReadiness?.source !== webviewSource || webviewReadiness.pending;
   const [serverLeaseExpired, setServerLeaseExpired] = useState(false);
+  const [retainedRecoveryErrorSource, setRetainedRecoveryErrorSource] = useState<typeof webviewSource | null>(null);
   const activeWebSourceRef = useRef(effectiveUrl);
   const [activeSubtitleUrl, setActiveSubtitleUrl] = useState<string | null>(null);
   const [androidTVError, setAndroidTVError] = useState<string | null>(null);
@@ -1346,7 +1349,8 @@ export function VideoPlayer({
     mode === "webview" &&
     !androidTVNative &&
     ((dk === "ios" && !underTauri) || androidAppUi);
-  const webviewChildShown = mode === "webview" && externalError == null;
+  const retainRecoveryErrorReader = retainedRecoveryErrorSource === webviewSource;
+  const webviewChildShown = mode === "webview" && (externalError == null || retainRecoveryErrorReader);
   useLayoutEffect(() => {
     if (!webviewChildShown) retainedPhysicalReaderRef.current = null;
   }, [webviewChildShown]);
@@ -1495,6 +1499,18 @@ export function VideoPlayer({
     return true;
   }, [playbackOwner, webviewSource]);
 
+  const reportUnreleasedRecoveryProgress = useCallback((video: HTMLVideoElement) => {
+    const registration = recoveryReleaseRef.current;
+    if (retainedRecoveryErrorSource !== webviewSource || !playerMountedRef.current ||
+        playbackOwnerRef.current !== playbackOwner || currentWebviewSourceRef.current !== webviewSource ||
+        externalHandoffVideoRef.current !== video || !video.isConnected || registration?.video !== video ||
+        registration.source !== webviewSource || registration.detached) return;
+    // The old decoder recovered without any cleanup. Dismiss only its error
+    // panel, without rearming the content's automatic recovery budget.
+    setRetainedRecoveryErrorSource(null);
+    setExternalError(null);
+  }, [playbackOwner, retainedRecoveryErrorSource, webviewSource]);
+
   const reportNativeRecoveryPlaybackHealthy = useCallback((): boolean => {
     if (!playerMountedRef.current || playbackOwnerRef.current !== playbackOwner ||
         currentWebviewSourceRef.current !== webviewSource || freshStreamRequestRef.current != null ||
@@ -1505,6 +1521,23 @@ export function VideoPlayer({
     recordDiagnostic("player", "stall.refresh_rearmed");
     return true;
   }, [playbackOwner, webviewSource]);
+
+  const recoveryBeforeCommit = useCallback((ownsRequest: () => boolean): (() => Promise<void>) | undefined => {
+    if (mode !== "webview" || serverOptimized == null || !isTrustedServerHlsManifestURL(effectiveUrl)) return undefined;
+    const registration = recoveryReleaseRef.current;
+    const video = externalHandoffVideoRef.current;
+    let used = false;
+    return async () => {
+      if (used || !ownsRequest() || registration == null || registration !== recoveryReleaseRef.current ||
+          registration.source !== currentWebviewSourceRef.current || registration.video !== video ||
+          video == null || externalHandoffVideoRef.current !== video || !video.isConnected) {
+        throw new Error("The recovering stream no longer owns its reader.");
+      }
+      used = true;
+      await registration.release();
+      if (!ownsRequest()) throw new Error("The recovering stream was superseded during release.");
+    };
+  }, [effectiveUrl, mode, serverOptimized]);
 
   const recoverPostStartStall = useCallback(async (
     absolutePositionSeconds: number,
@@ -1525,6 +1558,7 @@ export function VideoPlayer({
       automaticStallRecoveryAttemptedRef.current ||
       stallRecoveryPendingRef.current
     ) {
+      if (refreshCurrentSource != null && recoveryReleaseRef.current?.source === source) setRetainedRecoveryErrorSource(source);
       setExternalError(
         "Playback stopped making progress. Retry to request a fresh stream, or choose another source.",
       );
@@ -1540,7 +1574,10 @@ export function VideoPlayer({
     setWebRecoveryPending(true);
     recordDiagnostic("player", "stall.refresh_started", "warning");
     try {
-      await withFreshStreamResolutionTimeout(refreshCurrentSource(position, handoff));
+      const beforeCommit = recoveryBeforeCommit(ownsRequest);
+      await withFreshStreamResolutionTimeout(beforeCommit == null
+        ? refreshCurrentSource(position, handoff)
+        : refreshCurrentSource(position, handoff, beforeCommit));
       if (ownsRequest()) recordDiagnostic("player", "stall.refresh_ready");
       return true;
     } catch {
@@ -1548,6 +1585,7 @@ export function VideoPlayer({
       setExternalError(
         "A fresh stream could not be prepared. Retry, or choose another source.",
       );
+      if (recoveryReleaseRef.current?.source === source) setRetainedRecoveryErrorSource(source);
       recordDiagnostic("player", "stall.refresh_failed", "error");
       return false;
     } finally {
@@ -1557,7 +1595,7 @@ export function VideoPlayer({
         setWebRecoveryPending(false);
       }
     }
-  }, [physicalContentScope, playbackOwner, refreshCurrentSource, webviewSource]);
+  }, [physicalContentScope, playbackOwner, recoveryBeforeCommit, refreshCurrentSource, webviewSource]);
 
   const retryFreshStream = useCallback(async (): Promise<void> => {
     const context = lastStallContextRef.current;
@@ -1572,9 +1610,10 @@ export function VideoPlayer({
     setManualRecoveryPending(true);
     recordDiagnostic("player", "stall.manual_retry_started");
     try {
-      await withFreshStreamResolutionTimeout(
-        refreshCurrentSource(context.position, context.handoff),
-      );
+      const beforeCommit = recoveryBeforeCommit(ownsRequest);
+      await withFreshStreamResolutionTimeout(beforeCommit == null
+        ? refreshCurrentSource(context.position, context.handoff)
+        : refreshCurrentSource(context.position, context.handoff, beforeCommit));
       if (!ownsRequest()) return;
       // A successful resolver must publish a new source owner. Until then an
       // expired generation cannot be remounted under its old URL.
@@ -1585,6 +1624,7 @@ export function VideoPlayer({
       setExternalError(
         "A fresh stream could not be prepared. Retry, or choose another source.",
       );
+      if (recoveryReleaseRef.current?.source === source) setRetainedRecoveryErrorSource(source);
       recordDiagnostic("player", "stall.manual_retry_failed", "error");
     } finally {
       if (ownsRequest()) {
@@ -1592,7 +1632,7 @@ export function VideoPlayer({
         setManualRecoveryPending(false);
       }
     }
-  }, [manualRecoveryPending, playbackOwner, refreshCurrentSource, serverLeaseExpired, webviewSource]);
+  }, [manualRecoveryPending, playbackOwner, recoveryBeforeCommit, refreshCurrentSource, serverLeaseExpired, webviewSource]);
 
   const expireServerGeneration = useCallback((
     source: string,
@@ -3332,11 +3372,12 @@ export function VideoPlayer({
           />
         )}
 
-        {webviewChildShown ? (
+        {webviewChildShown && (
           <WebviewPlayer
             key={physicalReaderKey}
             sourceIdentity={webviewSource}
             ownedPlaybackStateRef={ownedWebviewStateRef}
+            recoveryReleaseRef={recoveryReleaseRef}
             presentation={videoPresentation}
             onPresentationChange={changeVideoPresentation}
             url={effectiveUrl}
@@ -3358,6 +3399,7 @@ export function VideoPlayer({
             onPendingHandoffPausedChange={updatePendingHandoffPaused}
             onVerifiedPlaybackProgress={reportVerifiedPlaybackProgress}
             onRecoveryPlaybackHealthy={reportRecoveryPlaybackHealthy}
+            onUnreleasedRecoveryProgress={reportUnreleasedRecoveryProgress}
             onCaptionsOpenChange={setCaptionsOpen}
             onMenuOpenChange={setWebMenuOpen}
             onScrubbingChange={setWebScrubbing}
@@ -3448,8 +3490,10 @@ export function VideoPlayer({
             onRemoteClose={onClose}
             autoCountdown={autoCountdown}
           />
-        ) : (
+        )}
+        {(!webviewChildShown || externalError != null) && (
           <ExternalPanel
+            retainedReaderOverlay={webviewChildShown}
             underTauri={desktopTauri}
             externalPlaybackAvailable={externalPlaybackAvailable}
             status={externalStatus}
@@ -3499,12 +3543,21 @@ export function VideoPlayer({
   );
 }
 
+type RecoveryReleaseRegistration = {
+  source: { key: string };
+  video: HTMLVideoElement;
+  target: string;
+  detached: boolean;
+  release: () => Promise<void>;
+};
+
 /** The in-webview `<video>` path with the custom scrub-thumbnail bar + captions
  * OSD. Split out so the subtitle/thumbnail hooks mount only on this path (never
  * for the external mpv/VLC hand-off, where there's no frame source). */
 function WebviewPlayer({
   sourceIdentity,
   ownedPlaybackStateRef,
+  recoveryReleaseRef,
   presentation,
   onPresentationChange,
   url,
@@ -3534,6 +3587,7 @@ function WebviewPlayer({
   onPendingHandoffPausedChange,
   onVerifiedPlaybackProgress,
   onRecoveryPlaybackHealthy,
+  onUnreleasedRecoveryProgress,
   onCaptionsOpenChange,
   onMenuOpenChange,
   onScrubbingChange,
@@ -3601,6 +3655,7 @@ function WebviewPlayer({
   onAbsolutePositionChange,
 }: {
   sourceIdentity: { key: string };
+  recoveryReleaseRef: { current: RecoveryReleaseRegistration | null };
   ownedPlaybackStateRef: { current: { video: HTMLVideoElement; source: { key: string }; read: () => PlaybackHandoffState | null } | null };
   presentation: VideoPresentation;
   onPresentationChange: (patch: Partial<VideoPresentation>) => void;
@@ -3632,6 +3687,7 @@ function WebviewPlayer({
   onPendingHandoffPausedChange: (paused: boolean) => void;
   onVerifiedPlaybackProgress: () => void;
   onRecoveryPlaybackHealthy: (video: HTMLVideoElement) => boolean;
+  onUnreleasedRecoveryProgress: (video: HTMLVideoElement) => void;
   onCaptionsOpenChange: (open: boolean) => void;
   onMenuOpenChange: (open: boolean) => void;
   onScrubbingChange: (scrubbing: boolean) => void;
@@ -3737,8 +3793,9 @@ function WebviewPlayer({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const committedSourceRef = useRef(sourceIdentity);
   const sourceLoadRef = useRef<{ source: typeof sourceIdentity; reused: boolean; started: boolean; expected: string | null }>({ source: sourceIdentity, reused: false, started: true, expected: null });
+  const releasedSourceRef = useRef<typeof sourceIdentity | null>(null);
   function ownsSource(video: HTMLVideoElement): boolean {
-    return videoRef.current === video && committedSourceRef.current === sourceIdentity;
+    return releasedSourceRef.current !== sourceIdentity && videoRef.current === video && committedSourceRef.current === sourceIdentity;
   }
   function mediaEventsCurrent(video: HTMLVideoElement): boolean {
     return ownsSource(video) && sourceLoadRef.current.source === sourceIdentity && sourceLoadRef.current.started;
@@ -5336,6 +5393,8 @@ function WebviewPlayer({
   onPlaybackErrorRef.current = onPlaybackError;
   const onPlaybackStallRef = useRef(onPlaybackStall);
   onPlaybackStallRef.current = onPlaybackStall;
+  const onUnreleasedRecoveryProgressRef = useRef(onUnreleasedRecoveryProgress);
+  onUnreleasedRecoveryProgressRef.current = onUnreleasedRecoveryProgress;
   const onRecoveryPlaybackHealthyRef = useRef(onRecoveryPlaybackHealthy);
   onRecoveryPlaybackHealthyRef.current = onRecoveryPlaybackHealthy;
   const canRefreshSourceRef = useRef(canRefreshSource);
@@ -5691,6 +5750,9 @@ function WebviewPlayer({
         !video.paused && !video.ended && !video.seeking && !rendererSeekingRef.current && !scrubbingRef.current &&
         !exactHandoffPendingRef.current && pendingNativeHlsSeekRef.current == null && !recoveryBuffering &&
         !suspendedRef.current && !documentSuspendedRef.current && document.visibilityState !== "hidden";
+      if (eligible && Number.isFinite(video.currentTime) && video.currentTime > lastPosition + 0.05) {
+        onUnreleasedRecoveryProgressRef.current(video);
+      }
       if (recoveryProgress.note(performance.now(), video.currentTime, video.playbackRate, eligible)) {
         rearmHlsRecoveryRef.current?.(video);
         if (!recoveryProgressReported) recoveryProgressReported = onRecoveryPlaybackHealthyRef.current(video);
@@ -6403,6 +6465,52 @@ function WebviewPlayer({
   const stopLeaseRef = useRef<() => void>(() => {});
   const leaseLastAttemptRef = useRef<{ target: string; at: number } | null>(null);
 
+  useLayoutEffect(() => {
+    const video = videoRef.current;
+    const identity = leaseTarget == null ? null : serverHlsLeaseIdentity(leaseTarget);
+    if (!needsServerPreparation || video == null || identity == null) return;
+    let releasePromise: Promise<void> | null = null;
+    let detached = false;
+    const registration: RecoveryReleaseRegistration = {
+      source: sourceIdentity, video, target: identity.target, detached: false,
+      release: () => {
+        if (releasePromise != null) return releasePromise;
+        const currentIdentity = leaseTarget == null ? null : serverHlsLeaseIdentity(leaseTarget);
+        if (recoveryReleaseRef.current !== registration ||
+            !(ownsSource(video) || (registration.detached && videoRef.current === video && committedSourceRef.current === sourceIdentity)) || !video.isConnected ||
+            currentIdentity?.target !== identity.target || currentIdentity.sessionId !== identity.sessionId ||
+            currentIdentity.generation !== identity.generation) {
+          return Promise.reject(new Error("The stream release no longer owns this generation."));
+        }
+        releasePromise = (async () => {
+          if (!detached) {
+            // Fence all delayed media/import callbacks before detaching or awaiting.
+            registration.detached = true;
+            releasedSourceRef.current = sourceIdentity;
+            terminalRecoveryVideoRef.current = video;
+            terminalRecoverySourceRef.current = sourceIdentity;
+            terminalRecoveryStateRef.current = currentRecoveryState(video);
+            stopLeaseRef.current();
+            stallWatchdogRef.current?.stop();
+            video.pause();
+            const hls = hlsRef.current;
+            hls?.destroy();
+            if (hlsRef.current === hls) hlsRef.current = null;
+            video.removeAttribute("src");
+            video.load();
+            detached = true;
+          }
+          const controller = new AbortController();
+          await promiseWithinTimeout(releaseServerHlsGeneration(identity.target, controller.signal),
+            6_000, "The previous stream could not be stopped.", () => controller.abort());
+        })().catch((error: unknown) => { releasePromise = null; throw error; });
+        return releasePromise;
+      },
+    };
+    recoveryReleaseRef.current = registration;
+    return () => { if (recoveryReleaseRef.current === registration) recoveryReleaseRef.current = null; };
+  }, [leaseTarget, needsServerPreparation, recoveryReleaseRef, sourceIdentity]);
+
   useEffect(() => {
     if (!needsServerPreparation || preparedLeaseTarget !== undefined) return;
     const video = videoRef.current;
@@ -6839,7 +6947,7 @@ function WebviewPlayer({
       window.clearTimeout(retryTimer);
       if (rearmHlsRecoveryRef.current === rearmRecovery) rearmHlsRecoveryRef.current = null;
       removeCaptionListeners();
-      instance?.destroy();
+      if (releasedSourceRef.current !== sourceIdentity) instance?.destroy();
       if (hlsRef.current === instance) hlsRef.current = null;
       setHlsLevels([]);
       setHlsAudioTracks([]);
@@ -9207,6 +9315,7 @@ function UpNextOverlay({
 }
 
 function ExternalPanel({
+  retainedReaderOverlay = false,
   underTauri,
   externalPlaybackAvailable,
   status,
@@ -9224,6 +9333,7 @@ function ExternalPanel({
   retryPending = false,
   freshResolutionRequired = false,
 }: {
+  retainedReaderOverlay?: boolean;
   underTauri: boolean;
   externalPlaybackAvailable: boolean;
   status: string | null;
@@ -9246,7 +9356,7 @@ function ExternalPanel({
   >({ kind: "idle" });
   if (onRetry != null || freshResolutionRequired) {
     return (
-      <div className="player-external">
+      <div className="player-external" style={retainedReaderOverlay ? { position: "absolute", inset: 0, zIndex: 5, background: "#000" } : undefined}>
         <Icon name="info" size={36} className="t-warning" />
         <h3 className="player-external-title">Playback interrupted</h3>
         <p className="player-external-err" role="alert">

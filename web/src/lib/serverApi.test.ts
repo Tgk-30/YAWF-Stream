@@ -1419,6 +1419,68 @@ describe("server HLS generation retention", () => {
 });
 
 
+describe("exact HLS generation cleanup", () => {
+  const target = "https://server.example/yawf/api/stream/stream_one/480p.m3u8?generation=transcode-actual";
+  beforeEach(() => {
+    configuredServerURL.mockReturnValue("https://server.example/yawf");
+    readCsrfToken.mockReturnValue("test-csrf");
+  });
+
+  it("binds the same trusted rendition, session and generation", () => {
+    expect(api.serverHlsLeaseIdentity(target)).toEqual({ target, sessionId: "stream_one", generation: "transcode-actual" });
+  });
+
+  it.each([
+    target.replace("server.example", "provider.example"),
+    target.replace("/yawf/", "/different/"),
+    target.replace("stream_one", "other%2Fstream"),
+    target.replace("https://", "https://user:password@"),
+    target + "#fragment",
+    target + "&start=1",
+    target.replace("transcode-actual", "../other"),
+  ])("rejects an untrusted cleanup target without sending credentials: %s", async (candidate) => {
+    expect(api.serverHlsLeaseIdentity(candidate)).toBeNull();
+    await expect(api.releaseServerHlsGeneration(candidate, new AbortController().signal)).rejects.toThrow("Untrusted");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("posts only the exact generation with cookies, CSRF, cancellation and no redirects", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }) as never);
+    const controller = new AbortController();
+    await expect(api.releaseServerHlsGeneration(target, controller.signal)).resolves.toBeUndefined();
+    expect(lastCall()).toEqual({ url: "https://server.example/yawf/api/stream/stream_one/transcode/release", init: {
+      method: "POST", credentials: "include", cache: "no-store", redirect: "error",
+      headers: { "content-type": "application/json", "x-csrf-token": "test-csrf" },
+      body: JSON.stringify({ generation: "transcode-actual" }), signal: controller.signal,
+    } });
+  });
+
+  it("does not mutate without current CSRF state", async () => {
+    readCsrfToken.mockReturnValue(null);
+    await expect(api.releaseServerHlsGeneration(target, new AbortController().signal)).rejects.toThrow("Sign in");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([401, 403, 404, 409, 503])("fails closed on cleanup status %s", async (status) => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "not released" }, { status }) as never);
+    await expect(api.releaseServerHlsGeneration(target, new AbortController().signal)).rejects.toMatchObject({ status });
+    expect(notifyUnauthorized).not.toHaveBeenCalled();
+  });
+
+  it.each(["", "{}", '{"ok":false}', "not json", "x".repeat(4097)])("requires explicit successful termination confirmation", async (text) => {
+    fetchMock.mockResolvedValueOnce(rawResponse(text) as never);
+    await expect(api.releaseServerHlsGeneration(target, new AbortController().signal)).rejects.toThrow("did not confirm");
+  });
+
+  it("retains browser-origin scoping without an explicit server URL", async () => {
+    configuredServerURL.mockReturnValue(null);
+    vi.stubGlobal("window", { location: { origin: "https://browser.example" } });
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }) as never);
+    await api.releaseServerHlsGeneration(target.replace("https://server.example/yawf", "https://browser.example"), new AbortController().signal);
+    expect(lastCall().url).toBe("https://browser.example/api/stream/stream_one/transcode/release");
+  });
+});
+
 describe("published HLS handoff metadata", () => {
   const url = "https://server.example/api/stream/one/index.m3u8?quality=360p&start=29&audio=1";
   const body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n360p.m3u8?generation=transcode-one\n";

@@ -14479,12 +14479,12 @@ describe("server generation HEAD retention", () => {
     fireEvent.pause(video);
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
-    expect(document.querySelector("video.player-video")).toBeNull();
-    expect(refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused: true, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null });
+    expect(document.querySelector("video.player-video")).toBe(video);
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused: true, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null }, expect.any(Function));
     fireEvent.click(screen.getByRole("button", { name: /Retry/ }));
     await flushLease();
     expect(refresh).toHaveBeenCalledTimes(2);
-    expect(refresh).toHaveBeenLastCalledWith(53.25, { paused: true, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null });
+    expect(refresh).toHaveBeenLastCalledWith(53.25, { paused: true, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null }, expect.any(Function));
     expect(fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
   });
   it("does not offer old-URL Retry when an expired owner has no fresh resolver", async () => {
@@ -14727,8 +14727,8 @@ describe("server generation HEAD retention", () => {
     act(() => scenario.choose(false)); // Abort the never-committed replacement.
     fireEvent.click(screen.getByRole("button", { name: "Retry playback" }));
     await flushLease();
-    expect(refresh).toHaveBeenCalledWith(6.25, expect.objectContaining({ paused: true }));
-    expect(document.querySelector("video.player-video")).toBeNull();
+    expect(refresh).toHaveBeenCalledWith(6.25, expect.objectContaining({ paused: true }), expect.any(Function));
+    expect(document.querySelector("video.player-video")).toBe(committed);
   });
   it("settles the committed expired Retry while a speculative replacement is suspended and aborted", async () => {
     setupNative();
@@ -14738,6 +14738,7 @@ describe("server generation HEAD retention", () => {
     const scenario = suspendedReplacement(() => refresh.promise);
     render(<scenario.Scenario />);
     await flushLease();
+    const retained117 = document.querySelector("video.player-video");
     expect(screen.getByText("Preparing a fresh stream…")).toBeVisible();
     act(() => { startTransition(() => scenario.choose(true)); });
     await flushLease();
@@ -14748,7 +14749,7 @@ describe("server generation HEAD retention", () => {
     expect(screen.getByRole("button", { name: "Retry playback" })).toBeEnabled();
     act(() => scenario.choose(false));
     expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
-    expect(document.querySelector("video.player-video")).toBeNull();
+    expect(document.querySelector("video.player-video")).toBe(retained117);
   });
 
   it("keeps native retention alive after an ignored null-MediaError poster event", async () => {
@@ -14836,8 +14837,8 @@ describe("server generation HEAD retention", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
     act(() => scenario.choose(false));
     fireEvent.click(screen.getByRole("button", { name: "Retry playback" })); await flushLease();
-    expect(refresh).toHaveBeenCalledWith(8.25, expect.objectContaining({ paused: true }));
-    expect(document.querySelector("video.player-video")).toBeNull();
+    expect(refresh).toHaveBeenCalledWith(8.25, expect.objectContaining({ paused: true }), expect.any(Function));
+    expect(document.querySelector("video.player-video")).toBe(video);
   });
   it("publishes the expiry callback when an engine-only transition really commits on the reused child", async () => {
     setupNative();
@@ -15278,7 +15279,7 @@ describe("matching-audio retained quality93", () => {
     const state = f.states.get(old)!;
     state.time = 1; fireEvent.timeUpdate(old); state.time = 2; fireEvent.timeUpdate(old);
     fireMediaError(old, 2); await settleQuality93();
-    expect(refresh).toHaveBeenCalledExactlyOnceWith(position + 2, expect.objectContaining({ paused: false }));
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(position + 2, expect.objectContaining({ paused: false }), expect.any(Function));
     const [absolute, handoff] = refresh.mock.calls[0]!;
     await act(async () => { pending.resolve(); }); await settleQuality93();
     // The controlled parent publishes Detail's exact captured handoff after resolution.
@@ -15934,7 +15935,7 @@ describe("mobile background playback lifecycle", () => {
   it.each([[403, false], [403, true], [404, false], [404, true]] as const)(
     "[expiry-reader93] HEAD%s retains the activated reader and exact paused=%s handoff", async (status, paused) => {
       const f = await expiredReader93(status, paused);
-      expect(f.refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null });
+      expect(f.refresh).toHaveBeenCalledExactlyOnceWith(53.25, { paused, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: null }, expect.any(Function));
       expect(document.querySelector("video.player-video")).toBe(f.old);
       expect(f.old.isConnected).toBe(true); expect(screen.queryByRole("alert")).toBeNull();
       expect(screen.getByText("Preparing a fresh stream…")).toBeVisible();
@@ -15969,7 +15970,7 @@ describe("mobile background playback lifecycle", () => {
   });
   it.each([false, true])("[expiry-reader93] foreground expiry keeps owned paused=%s despite its internal pause event", async paused => {
     const f = await expiredReader93(404, paused, true), position = paused ? 53.25 : 56.25;
-    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(position, expect.objectContaining({ paused }));
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(position, expect.objectContaining({ paused }), expect.any(Function));
     expect(document.querySelector("video.player-video")).toBe(f.old);
     fireEvent.pointerMove(f.old.closest(".webview-player")!); // Reveal normally hidden chrome without changing playback intent.
     expect(screen.getByRole("button", { name: paused ? "Play" : "Pause" })).toBeVisible();
@@ -15986,7 +15987,7 @@ describe("mobile background playback lifecycle", () => {
     f.pending.reject(new Error("Synthetic fresh resolution failure")); await flush();
     expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
     expect(screen.getByRole("button", { name: "Retry playback" })).toBeEnabled();
-    expect(document.querySelector("video.player-video")).toBeNull(); expect(f.refresh).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("video.player-video")).toBe(f.old); expect(f.refresh).toHaveBeenCalledTimes(1);
     expect(f.fixture.fetcher.mock.calls.filter(([, init]) => init?.method !== "HEAD")).toHaveLength(1);
   });
   it("[expiry-reader93] unavailable automatic resolution stays terminal without old-URL Retry", async () => {
@@ -16357,7 +16358,7 @@ describe("mobile background playback lifecycle", () => {
       act(() => window.dispatchEvent(new Event("pagehide")));
       if (order === "hide-before-pause") resetPausedDecoder(f);
       await foregroundExpired(f);
-      expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: { id: "jp", language: "jpn" } }));
+      expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false, volume: 0.4, muted: true, playbackRate: 1.25, audioPreference: { id: "jp", language: "jpn" } }), expect.any(Function));
     },
   );
 
@@ -16367,7 +16368,7 @@ describe("mobile background playback lifecycle", () => {
     f.state.paused = true; fireEvent.pause(f.video);
     act(() => window.dispatchEvent(new Event("pagehide")));
     resetPausedDecoder(f); await foregroundExpired(f);
-    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: true }));
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: true }), expect.any(Function));
   });
 
   it.each([0, 100])("[lease-owned-snapshot] pending requested seek%s survives hidden pause without using stale300", async (target) => {
@@ -16377,7 +16378,7 @@ describe("mobile background playback lifecycle", () => {
     f.state.seeking = true; fireEvent.seeking(f.video);
     act(() => window.dispatchEvent(new Event("pagehide")));
     resetPausedDecoder(f); await foregroundExpired(f);
-    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(target, expect.objectContaining({ paused: false }));
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(target, expect.objectContaining({ paused: false }), expect.any(Function));
   });
 
   it.each([0, 100])("[lease-owned-snapshot] confirmed requested seek%s remains legitimate after hidden reset", async (target) => {
@@ -16388,14 +16389,14 @@ describe("mobile background playback lifecycle", () => {
     f.state.seeking = false; fireEvent.seeked(f.video);
     act(() => window.dispatchEvent(new Event("pagehide")));
     resetPausedDecoder(f); await foregroundExpired(f);
-    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(target, expect.objectContaining({ paused: false }));
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(target, expect.objectContaining({ paused: false }), expect.any(Function));
   });
 
   it("[lease-owned-snapshot] visible pause without suspension remains genuine pause intent", async () => {
     const f = await ownedLease(404);
     f.state.paused = true; fireEvent.pause(f.video); f.expire();
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); }); await flush();
-    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: true }));
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: true }), expect.any(Function));
   });
 
   it("[lease-owned-snapshot] explicit Play supersedes an earlier visible Pause before hiding", async () => {
@@ -16406,7 +16407,7 @@ describe("mobile background playback lifecycle", () => {
     f.state.paused = false; fireEvent.play(f.video); fireEvent.playing(f.video);
     resetPausedDecoder(f); act(() => window.dispatchEvent(new Event("pagehide")));
     await foregroundExpired(f);
-    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false }));
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false }), expect.any(Function));
   });
 
   it.each([[0, false], [1001, true], [30_000, true]] as const)("[lease-owned-pause-controls] unattributed raw pause held%s ms uses bounded background correlation", async (held, staysPaused) => {
@@ -16418,7 +16419,7 @@ describe("mobile background playback lifecycle", () => {
       act(() => window.dispatchEvent(new Event("pagehide")));
       if (held > 0) resetPausedDecoder(f); // A later reset cannot revoke an established pause.
       await foregroundExpired(f);
-      expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: staysPaused }));
+      expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: staysPaused }), expect.any(Function));
     } finally { clock.mockRestore(); }
   });
 
@@ -16430,7 +16431,7 @@ describe("mobile background playback lifecycle", () => {
     f.state.seeking = false; fireEvent.seeked(f.video);
     act(() => window.dispatchEvent(new Event("pagehide")));
     resetPausedDecoder(f); await foregroundExpired(f);
-    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(target, expect.objectContaining({ paused: false }));
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(target, expect.objectContaining({ paused: false }), expect.any(Function));
   });
 
   it("[lease-owned-snapshot] quiet replay1 and2 before expired HEAD settles cannot replace owned300", async () => {
@@ -16445,7 +16446,7 @@ describe("mobile background playback lifecycle", () => {
       f.video.currentTime = 2; fireEvent.timeUpdate(f.video);
     });
     await flush();
-    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false }));
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false }), expect.any(Function));
   });
 
   it.each(["Pause", "Play"] as const)("[lease-clock-intent] explicit %s cannot authorize quiet replay2 as the new clock", async (intent) => {
@@ -16470,7 +16471,7 @@ describe("mobile background playback lifecycle", () => {
     f.state.paused = intent === "Pause";
     fireEvent(f.video, new Event(f.state.paused ? "pause" : "play"));
     head.resolve(new Response(null, { status: 404 })); await flush();
-    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: intent === "Pause" }));
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: intent === "Pause" }), expect.any(Function));
   });
 
   it("[lease-owned-snapshot] terminal failure after hidden reset uses the same owned300 playing snapshot", async () => {
@@ -16478,7 +16479,7 @@ describe("mobile background playback lifecycle", () => {
     resetPausedDecoder(f); act(() => window.dispatchEvent(new Event("pagehide")));
     Object.defineProperty(f.video, "error", { configurable: true, value: { code: 2 } });
     fireEvent.error(f.video); await flush();
-    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false }));
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(300, expect.objectContaining({ paused: false }), expect.any(Function));
   });
 
   it("[resume-lease] bounds StrictMode automatic expiry recovery then retries the same paused snapshot without old attach", async () => {
@@ -16504,10 +16505,10 @@ describe("mobile background playback lifecycle", () => {
     fireEvent.click(screen.getByRole("button", { name: "Preparing fresh stream" }));
     await flush();
     expect(refresh).toHaveBeenCalledTimes(2);
-    expect(refresh.mock.calls[0]).toEqual([3607.25, { paused: true, volume: 0.3, muted: true, playbackRate: 1.5, audioPreference: null }]);
-    expect(refresh.mock.calls[1]).toEqual(refresh.mock.calls[0]);
+    expect(refresh.mock.calls[0]).toEqual([3607.25, { paused: true, volume: 0.3, muted: true, playbackRate: 1.5, audioPreference: null }, expect.any(Function)]);
+    expect(refresh.mock.calls[1]).toEqual([3607.25, { paused: true, volume: 0.3, muted: true, playbackRate: 1.5, audioPreference: null }, expect.any(Function)]);
     pending.resolve(); retry.resolve(); await flush();
-    expect(document.querySelector("video.player-video")).toBeNull();
+    expect(document.querySelector("video.player-video")).toBe(video);
     await act(async () => { await vi.advanceTimersByTimeAsync(120_001); });
     expect(refresh).toHaveBeenCalledTimes(2);
   });
@@ -16544,7 +16545,7 @@ describe("mobile background playback lifecycle", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
-    expect(document.querySelector("video.player-video")).toBeNull();
+    expect(document.querySelector("video.player-video")).toBe(video);
   });
 
   it("[resume-lease] keeps 401 unauthorized handling separate from expired-generation recovery", async () => {
@@ -16767,7 +16768,7 @@ describe("terminal post-start source recovery", () => {
     if (paused) { state.paused = true; fireEvent.pause(video); }
     video.currentTime = 30; state.ended = true; state.paused = true; fireEvent.pause(video); fireEvent.ended(video);
     await flushTerminal();
-    expect(refresh).toHaveBeenCalledExactlyOnceWith(3630, expect.objectContaining({ paused, volume: 0.35, muted: true, playbackRate: 1.25 }));
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(3630, expect.objectContaining({ paused, volume: 0.35, muted: true, playbackRate: 1.25 }), expect.any(Function));
     expect(ended).not.toHaveBeenCalled(); expect(next).not.toHaveBeenCalled();
     fireEvent.ended(video); await flushTerminal(); expect(refresh).toHaveBeenCalledTimes(1);
   });
@@ -16798,7 +16799,7 @@ describe("terminal post-start source recovery", () => {
     expect(ended).not.toHaveBeenCalled(); expect(next).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Retry playback" })); await flushTerminal();
     expect(refresh).toHaveBeenCalledTimes(2);
-    expect(refresh).toHaveBeenLastCalledWith(160, expect.objectContaining({ paused: false }));
+    expect(refresh).toHaveBeenLastCalledWith(160, expect.objectContaining({ paused: false }), expect.any(Function));
   });
 
   it.each([[2, false, 0], [2, true, 0], [4, false, 1.25], [3, false, 0], [3, true, 0]] as const)("[terminal-network] refreshes confirmed error=%s with owned paused=%s and failed clock=%s", async (code, paused, failedClock) => {
@@ -16836,7 +16837,7 @@ describe("terminal post-start source recovery", () => {
     if (paused) { state.paused = true; fireEvent.pause(video); }
     state.ended = true; state.paused = true; fireEvent.pause(video); fireEvent.ended(video);
     await flushTerminal();
-    expect(refresh).toHaveBeenCalledExactlyOnceWith(3625.75, expect.objectContaining({ paused, volume: 0.35, muted: true, playbackRate: 1.25 }));
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(3625.75, expect.objectContaining({ paused, volume: 0.35, muted: true, playbackRate: 1.25 }), expect.any(Function));
     expect(onEnded).not.toHaveBeenCalled(); expect(onNext).not.toHaveBeenCalled(); expect(request).not.toHaveBeenCalled();
     expect(document.querySelector("video.player-video")).toBe(video);
   });
@@ -19649,4 +19650,131 @@ describe("automatic starvation95 adaptation", () => {
     expect(document.querySelector("video.player-video")).not.toBe(p.video);
     expect((document.querySelector("video.player-video") as HTMLVideoElement).src).toContain("quality=360p");
   });
+});
+
+describe("owned server HLS recovery release117", () => {
+  const master117 = "https://server.example/api/stream/recovery117/index.m3u8?quality=480p";
+  const manifest117 = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1800000\n480p.m3u8?generation=transcode-owned117\n";
+  const handoff117 = { paused: false, volume: .4, muted: false, playbackRate: 1 };
+  async function flush117() { await act(async () => { for (let n = 0; n < 15; n++) await Promise.resolve(); }); }
+  beforeEach(() => { stallRecoveryObserver.enabled = true; stallRecoveryObserver.callbacks = []; });
+  afterEach(() => { stallRecoveryObserver.enabled = false; stallRecoveryObserver.callbacks = []; });
+  async function setup117(hlsJs = false, url = master117) {
+    vi.useFakeTimers(); deviceKindMock.mockReturnValue(hlsJs ? "desktop" : "ios");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    (HTMLMediaElement.prototype.canPlayType as ReturnType<typeof vi.fn>).mockReturnValue(hlsJs ? "" : "probably");
+    const { setCsrfToken } = await import("../lib/serverSession"); setCsrfToken("synthetic-csrf117");
+    const fresh = deferred<void>(), released = deferred<Response>(); let warmed = 0; let live = 1; let maximum = 1;
+    let beforeCommit: (() => Promise<void>) | undefined;
+    const refresh = vi.fn(async (_position: number, _state: PlaybackHandoffState, hook?: () => Promise<void>) => {
+      beforeCommit = hook; await fresh.promise; await hook?.(); warmed += 1; live += 1; maximum = Math.max(maximum, live);
+    });
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => init?.method === "POST" ? released.promise.then(response => { if (response.ok) live = 0; return response; }) : Promise.resolve(init?.method === "HEAD" ? new Response(null) : new Response(manifest117)));
+    vi.stubGlobal("fetch", fetcher);
+    const props = { url, engine: "webview-hls-transcode" as const, title: "Owned recovery117", serverOptimized: { qualities: ["480p"] as const, request: vi.fn() }, refreshCurrentSource: refresh, onClose: vi.fn() };
+    const view = render(<VideoPlayer {...props} />); await flush117();
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    const recover = stallRecoveryObserver.callbacks.at(-1)!; expect(recover).toBeDefined();
+    let task!: Promise<boolean>;
+    const start = () => act(() => { task = recover(88, handoff117); });
+    return { view, props, video, fresh, released, refresh, fetcher, start, task: () => task, warmed: () => warmed, maximum: () => maximum, hook: () => beforeCommit };
+  }
+  it.each([false, true])("[release117-reader] detaches native/hlsJs%s before release, awaits confirmation, and stops old HEAD", async hlsJs => {
+    const f = await setup117(hlsJs); const oldSrc = f.video.getAttribute("src"); const oldHls = hlsInstances.at(-1);
+    const oldDestroy = oldHls?.destroy.mock.calls.length ?? 0;
+    f.start(); await flush117(); expect(f.hook()).toEqual(expect.any(Function));
+    expect(f.video.getAttribute("src")).toBe(oldSrc); expect(f.fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+    f.fresh.resolve(); await flush117();
+    const posts = () => f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts()).toHaveLength(1); expect(f.video.getAttribute("src")).toBeNull(); expect(f.video.pause).toHaveBeenCalled();
+    if (hlsJs) expect(oldHls!.destroy.mock.calls.length).toBe(oldDestroy + 1);
+    expect(f.warmed()).toBe(0); expect(posts()[0]![0]).toBe("https://server.example/api/stream/recovery117/transcode/release");
+    f.released.resolve(new Response('{"ok":true}', { headers: { "content-type": "application/json" } }));
+    await flush117(); expect(await f.task()).toBe(true); expect(f.warmed()).toBe(1); expect(f.maximum()).toBe(1);
+    const heads = f.fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD").length;
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "HEAD")).toHaveLength(heads);
+  });
+  it("[release117-resolve-failure] never detaches or releases when fresh resolution fails before the hook", async () => {
+    const f = await setup117(); const oldSrc = f.video.getAttribute("src"); f.start(); await flush117();
+    f.fresh.reject(new Error("resolve failed")); await flush117(); expect(await f.task()).toBe(false);
+    expect(f.fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false); expect(f.video.getAttribute("src")).toBe(oldSrc); expect(f.warmed()).toBe(0);
+  });
+  it.each([409, 503, "timeout"])("[release117-cleanup-failure] cleanup%s stays detached and never warms a successor", async status => {
+    const f = await setup117(); f.start(); f.fresh.resolve(); await flush117();
+    if (status === "timeout") await act(async () => vi.advanceTimersByTimeAsync(6_000));
+    else { f.released.resolve(new Response(null, { status: Number(status) })); await flush117(); }
+    expect(await f.task()).toBe(false); expect(f.warmed()).toBe(0); expect(f.video.getAttribute("src")).toBeNull();
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+  });
+  it.each(["owner", "source", "video"])("[release117-stale] stale%s cannot release its captured generation", async stale => {
+    const f = await setup117(); f.start(); await flush117();
+    const parent = f.video.parentElement!;
+    if (stale === "owner") f.view.unmount();
+    else if (stale === "source") f.view.rerender(<VideoPlayer {...f.props} sourceRevision={2} />);
+    else f.video.remove();
+    f.fresh.resolve(); await flush117(); expect(await f.task()).toBe(false);
+    expect(f.fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false); expect(f.warmed()).toBe(0);
+    if (stale === "video") parent.appendChild(f.video);
+  });
+  it("[release117-provider] provider HLS has no cleanup hook or generation mutation", async () => {
+    const f = await setup117(false, "https://provider.example/list.m3u8"); f.start(); await flush117();
+    expect(f.refresh.mock.calls[0]).toHaveLength(2); expect(f.hook()).toBeUndefined();
+    f.fresh.resolve(); await flush117(); expect(await f.task()).toBe(true);
+    expect(f.fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
+  it("[release117-retry] manual retry can confirm an uncertain detached generation without old reattachment", async () => {
+    const f = await setup117(); f.start(); f.fresh.resolve(); await flush117();
+    f.released.resolve(new Response(null, { status: 503 })); await flush117(); expect(await f.task()).toBe(false);
+    const pauses = vi.mocked(f.video.pause).mock.calls.length, loads = vi.mocked(f.video.load).mock.calls.length;
+    f.fetcher.mockResolvedValueOnce(new Response('{"ok":true}', { headers: { "content-type": "application/json" } }));
+    fireEvent.click(screen.getByRole("button", { name: /Retry/ })); await flush117();
+    expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2);
+    expect(f.warmed()).toBe(1); expect(f.video.getAttribute("src")).toBeNull();
+    expect(vi.mocked(f.video.pause).mock.calls).toHaveLength(pauses); expect(vi.mocked(f.video.load).mock.calls).toHaveLength(loads);
+  });
+
+  function healthy117(video: HTMLVideoElement) {
+    Object.defineProperties(video, { paused: { configurable: true, value: false }, seeking: { configurable: true, value: false }, ended: { configurable: true, value: false }, readyState: { configurable: true, value: 4 }, duration: { configurable: true, value: 900 }, currentSrc: { configurable: true, get: () => video.src } });
+    fireEvent.loadStart(video); fireEvent.loadedMetadata(video); fireEvent.canPlay(video); fireEvent.play(video); fireEvent.playing(video);
+    video.currentTime = 1; fireEvent.timeUpdate(video); video.currentTime = 2; fireEvent.timeUpdate(video);
+  }
+  it("[release117-unreleased-recovery] verified forward playback dismisses only the unreleased reader's failure panel", async () => {
+    const f = await setup117(); healthy117(f.video); f.start(); await flush117();
+    f.fresh.reject(new Error("resolve failed")); await flush117(); expect(await f.task()).toBe(false);
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared");
+    f.video.currentTime = 3; fireEvent.timeUpdate(f.video); await flush117();
+    expect(screen.queryByRole("alert")).toBeNull(); expect(document.querySelector("video.player-video")).toBe(f.video); expect(f.video.src).toContain(master117);
+    expect(f.fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+  });
+  it("[release117-released-events] uncertain detached reader events cannot dismiss its error or reattach", async () => {
+    const f = await setup117(); healthy117(f.video); f.start(); f.fresh.resolve(); await flush117();
+    f.released.resolve(new Response(null, { status: 503 })); await flush117(); expect(await f.task()).toBe(false);
+    const plays = vi.mocked(f.video.play).mock.calls.length;
+    fireEvent.playing(f.video); f.video.currentTime = 3; fireEvent.timeUpdate(f.video); fireEvent.canPlay(f.video); await flush117();
+    expect(screen.getByRole("alert")).toHaveTextContent("A fresh stream could not be prepared"); expect(f.video.getAttribute("src")).toBeNull(); expect(vi.mocked(f.video.play).mock.calls).toHaveLength(plays); expect(f.warmed()).toBe(0);
+  });
+
+  it("[release117-detach-error] failed reader detach cannot be skipped by a later manual cleanup retry", async () => {
+    const f = await setup117(); vi.mocked(f.video.pause).mockImplementationOnce(() => { throw new Error("synthetic detach failure"); });
+    f.start(); f.fresh.resolve(); await flush117(); expect(await f.task()).toBe(false);
+    expect(f.fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: /Retry/ })); await flush117();
+    expect(f.video.getAttribute("src")).toBeNull(); expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    f.released.resolve(new Response('{"ok":true}', { headers: { "content-type": "application/json" } })); await flush117(); expect(f.warmed()).toBe(1);
+  });
+
+  it("[release117-budget-retry] exhausted automatic budget retains exact reader ownership for explicit Retry", async () => {
+    const f = await setup117(); healthy117(f.video); f.start(); await flush117();
+    f.fresh.reject(new Error("resolve failed")); await flush117(); expect(await f.task()).toBe(false);
+    f.video.currentTime = 3; fireEvent.timeUpdate(f.video); await flush117(); expect(screen.queryByRole("alert")).toBeNull();
+    f.start(); await flush117(); expect(await f.task()).toBe(false); expect(f.refresh).toHaveBeenCalledTimes(1);
+    expect(document.querySelector("video.player-video")).toBe(f.video);
+    const warmed = vi.fn(); f.refresh.mockImplementationOnce(async (_position, _state, hook) => { await hook?.(); warmed(); });
+    fireEvent.click(screen.getByRole("button", { name: /Retry/ })); await flush117();
+    expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1); expect(f.video.getAttribute("src")).toBeNull();
+    f.released.resolve(new Response('{"ok":true}', { headers: { "content-type": "application/json" } })); await flush117();
+    expect(warmed).toHaveBeenCalledOnce(); expect(f.refresh).toHaveBeenCalledTimes(2);
+  });
+
 });
