@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 import unittest
+from io import BytesIO
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
@@ -190,6 +191,11 @@ def handler_for(state: FixtureState):
 
         def do_GET(self) -> None:  # noqa: N802
             path = urlsplit(self.path).path
+            if self.path == "/favicon.ico":
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if path in ("/tv", "/tv/"):
                 return self.send_file(state.root / "tv.html", "text/html; charset=utf-8", require_auth=False)
             if path == "/__audit":
@@ -243,12 +249,111 @@ def serve(root: Path, host: str, port: int, ready_file: Path, log_path: Path) ->
 
 
 class FixturePolicyTests(unittest.TestCase):
+    @staticmethod
+    def memory_handler(state: FixtureState, path: str, headers: dict[str, str] | None = None):
+        base = handler_for(state)
+
+        class MemoryHandler(base):
+            def __init__(self) -> None:
+                self.path = path
+                self.headers = headers or {}
+                self.wfile = BytesIO()
+                self.status: int | None = None
+                self.response_headers: dict[str, str] = {}
+
+            def send_response(self, code: int, _message: str | None = None) -> None:
+                self.status = code
+
+            def send_header(self, keyword: str, value: str) -> None:
+                self.response_headers[keyword] = value
+
+            def end_headers(self) -> None:
+                return
+
+            def send_error(
+                    self,
+                    code: int,
+                    _message: str | None = None,
+                    _explain: str | None = None) -> None:
+                self.status = code
+
+        return MemoryHandler()
+
     def test_path_stays_under_media(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             self.assertEqual(safe_media_path(root, "/media/master.m3u8"), root / "media/master.m3u8")
             self.assertIsNone(safe_media_path(root, "/media/../secret"))
             self.assertIsNone(safe_media_path(root, "/tv"))
+
+    def test_exact_favicon_is_empty_204_before_media_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            log_path = root / "requests.jsonl"
+            state = FixtureState(root, log_path)
+            handler = self.memory_handler(state, "/favicon.ico")
+
+            handler.do_GET()
+
+            self.assertEqual(handler.status, 204)
+            self.assertEqual(handler.response_headers.get("Content-Length"), "0")
+            self.assertEqual(handler.wfile.getvalue(), b"")
+            self.assertEqual(state.events, [])
+            self.assertFalse(log_path.exists())
+
+            near_match = self.memory_handler(state, "/favicon.ico?unexpected=1")
+            near_match.do_GET()
+            self.assertEqual(near_match.status, 401)
+            self.assertEqual(
+                state.events,
+                [{"sequence": 1, "path": "/favicon.ico", "authorized": False, "range": False}],
+            )
+
+    def test_media_authorization_and_known_assets_remain_guarded(self) -> None:
+        from android_tv_runtime_check import GateError, validate_fixture_audit
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "media").mkdir()
+            media = root / "media/master.m3u8"
+            media.write_bytes(b"#EXTM3U\n")
+            (root / "tv.html").write_text(TV_HTML, encoding="utf-8")
+
+            rejected_state = FixtureState(root, root / "rejected.jsonl")
+            rejected = self.memory_handler(rejected_state, "/media/master.m3u8")
+            rejected.do_GET()
+            self.assertEqual(rejected.status, 401)
+            self.assertEqual(
+                rejected_state.events,
+                [{"sequence": 1, "path": "/media/master.m3u8", "authorized": False, "range": False}],
+            )
+            with self.assertRaises(GateError):
+                validate_fixture_audit(rejected_state.audit())
+
+            accepted_state = FixtureState(root, root / "accepted.jsonl")
+            accepted = self.memory_handler(
+                accepted_state,
+                "/media/master.m3u8",
+                {"Authorization": TOKEN},
+            )
+            accepted.do_GET()
+            self.assertEqual(accepted.status, 200)
+            self.assertEqual(accepted.wfile.getvalue(), b"#EXTM3U\n")
+            self.assertEqual(
+                accepted_state.events,
+                [{"sequence": 1, "path": "/media/master.m3u8", "authorized": True, "range": False}],
+            )
+
+            guarded = self.memory_handler(accepted_state, "/direct-send-file-guard")
+            guarded.send_file(media, "application/vnd.apple.mpegurl", require_auth=True)
+            self.assertEqual(guarded.status, 401)
+            self.assertEqual(guarded.wfile.getvalue(), b"")
+
+            page = self.memory_handler(accepted_state, "/tv")
+            page.do_GET()
+            self.assertEqual(page.status, 200)
+            self.assertIn(b"YAWF TV native bridge runtime fixture", page.wfile.getvalue())
+            self.assertEqual(len(accepted_state.events), 1)
 
     def test_page_uses_exact_bounded_bridge_contract(self) -> None:
         self.assertIn("window.YawfAndroidTV.play", TV_HTML)
