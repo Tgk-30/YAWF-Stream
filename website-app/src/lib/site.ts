@@ -12,7 +12,7 @@ type PublishedRelease = Readonly<{
 export const DESKTOP_RELEASE: PublishedRelease = { version: '2.3.103', tag: 'v2.3.103-web' };
 export const ANDROID_TV_RELEASE: PublishedRelease = { version: '2.3.38', tag: 'v2.3.38-web' };
 export const ANDROID_PHONE_RELEASE: PublishedRelease = { version: '2.3.105', tag: 'android-v2.3.105' };
-export const SERVER_RELEASE: PublishedRelease = { version: '2.3.107', tag: 'v2.3.107' };
+export const SERVER_RELEASE: PublishedRelease = { version: '2.3.108', tag: 'v2.3.108' };
 
 function releaseAsset(release: PublishedRelease, filename: string) {
   return `${GITHUB_RELEASES}/download/${release.tag}/${filename}`;
