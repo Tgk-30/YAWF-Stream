@@ -12885,6 +12885,247 @@ describe("HLS source attach", () => {
 // ---- External panel: browser vs Tauri --------------------------------------
 
 describe("ExternalPanel (browser)", () => {
+  function startPlayingVideo(video: HTMLVideoElement) {
+    let paused = false;
+    let currentTime = 49.2;
+    Object.defineProperties(video, {
+      paused: { configurable: true, get: () => paused },
+      currentTime: {
+        configurable: true,
+        get: () => currentTime,
+        set: (next: number) => { currentTime = next; },
+      },
+      duration: { configurable: true, get: () => 180 },
+      readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+    });
+    const play = vi.mocked(video.play);
+    const pause = vi.mocked(video.pause);
+    play.mockImplementation(function (this: HTMLMediaElement) {
+      expect(this).toBe(video);
+      paused = false;
+      fireEvent.play(this);
+      fireEvent.playing(this);
+      return Promise.resolve();
+    });
+    pause.mockImplementation(function (this: HTMLMediaElement) {
+      expect(this).toBe(video);
+      paused = true;
+      fireEvent.pause(this);
+    });
+    fireEvent.loadedMetadata(video);
+    fireEvent.canPlay(video);
+    fireEvent.play(video);
+    fireEvent.playing(video);
+    fireEvent.timeUpdate(video);
+    play.mockClear();
+    pause.mockClear();
+    return { play, pause, getCurrentTime: () => currentTime };
+  }
+  function clickWithoutNavigation(link: HTMLAnchorElement) {
+    link.addEventListener("click", (event) => event.preventDefault(), { once: true });
+    fireEvent.click(link);
+  }
+
+  it("[browser-external-pause109] wires all three direct-link surfaces to synchronous pause with intent-only telemetry", () => {
+    const source = readFileSync("src/components/VideoPlayer.tsx", "utf8");
+    const linkSites = source.split("href={link.href}").slice(1).map((site) => site.slice(0, 160));
+    expect(linkSites).toHaveLength(3);
+    expect(linkSites.every((site) => site.includes("onClick={onBrowserExternalHandoff}"))).toBe(true);
+    const callback = source.match(
+      /const requestBrowserExternalHandoff = useCallback\(\(\) => \{([\s\S]*?)\}, \[pauseWebviewForExternalHandoff\]\);/,
+    )?.[1];
+    expect(callback).toBeDefined();
+    const pauseIndex = callback!.indexOf("pauseWebviewForExternalHandoff()");
+    const intentIndex = callback!.indexOf('recordDiagnostic("player", "external.intent_requested")');
+    expect(pauseIndex).toBeGreaterThanOrEqual(0);
+    expect(intentIndex).toBeGreaterThan(pauseIndex);
+    expect(callback).not.toContain("external.started");
+  });
+
+  it.each(["mac", "ios"] as const)(
+    "[browser-external-pause109] %s direct custom-scheme intent explicitly pauses and never auto-resumes on return",
+    async (device) => {
+      deviceKindMock.mockReturnValue(device);
+      vi.stubGlobal("location", new URL("https://server.example/watch"));
+      const target = `https://server.example/api/external-stream/session-1/${"P".repeat(43)}`;
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          externalPlaybackUrl={target}
+          title="External pause"
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      const media = startPlayingVideo(video);
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      const link = screen.getByRole("link", { name: device === "mac" ? /Open in IINA/ : /Open in VLC/ }) as HTMLAnchorElement;
+      clickWithoutNavigation(link);
+
+      expect(media.pause).toHaveBeenCalledTimes(1);
+      expect(video.paused).toBe(true);
+      expect(media.getCurrentTime()).toBe(49.2);
+      expect(recordDiagnosticMock).toHaveBeenCalledWith("player", "external.intent_requested");
+      expect(recordDiagnosticMock).not.toHaveBeenCalledWith("player", "external.started");
+
+      // Returning from the OS prompt is not a Play request. Only a later
+      // explicit user action may resume this source.
+      act(() => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+        window.dispatchEvent(new Event("pagehide"));
+        document.dispatchEvent(new Event("visibilitychange"));
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+        window.dispatchEvent(new Event("pageshow"));
+        document.dispatchEvent(new Event("visibilitychange"));
+        fireEvent.canPlay(video);
+        fireEvent.loadedData(video);
+      });
+      expect(video.paused).toBe(true);
+      expect(media.play).not.toHaveBeenCalled();
+
+      await userEvent.click(screen.getByRole("button", { name: "Close playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: /^Play$/ }));
+      expect(media.play).toHaveBeenCalledTimes(1);
+      expect(video.paused).toBe(false);
+    },
+  );
+
+  it.each(["interrupted recovery", "external panel"] as const)(
+    "[browser-external-pause109] %s direct anchor records intent only",
+    async (surface) => {
+      deviceKindMock.mockReturnValue("mac");
+      vi.stubGlobal("location", new URL("https://server.example/watch"));
+      const target = `https://server.example/api/external-stream/session-1/${"Q".repeat(43)}`;
+      const view = render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          externalPlaybackUrl={target}
+          kind={surface === "external panel" ? "external" : undefined}
+          title="External panel"
+          onClose={() => {}}
+        />,
+      );
+      if (surface === "interrupted recovery") {
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        fireMediaError(video);
+        expect(await screen.findByText("Playback interrupted")).toBeInTheDocument();
+      } else {
+        expect(screen.getByText("Use an external player")).toBeInTheDocument();
+      }
+      const link = screen.getByRole("link", { name: /Open in IINA/ }) as HTMLAnchorElement;
+      const pause = vi.mocked(HTMLMediaElement.prototype.pause);
+      pause.mockClear();
+      clickWithoutNavigation(link);
+      expect(recordDiagnosticMock).toHaveBeenCalledWith("player", "external.intent_requested");
+      expect(recordDiagnosticMock).not.toHaveBeenCalledWith("player", "external.started");
+      // A recovery/external panel has no live WebView reader to pause.
+      expect(pause).not.toHaveBeenCalled();
+      view.unmount();
+    },
+  );
+
+  it("[browser-external-pause109] copy, playlist download and selectable link do not pause playback", async () => {
+    deviceKindMock.mockReturnValue("mac");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const target = `https://server.example/api/external-stream/session-1/${"C".repeat(43)}`;
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const createObjectURL = vi.fn(() => "blob:external-playlist");
+    const revokeObjectURL = vi.fn();
+    const restoreCreate = replaceProperty(URL, "createObjectURL", createObjectURL);
+    const restoreRevoke = replaceProperty(URL, "revokeObjectURL", revokeObjectURL);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const restoreClipboard = replaceProperty(navigator, "clipboard", { writeText });
+    try {
+      const view = render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          externalPlaybackUrl={target}
+          title="Copy and download"
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      const media = startPlayingVideo(video);
+      const pause = vi.mocked(HTMLMediaElement.prototype.pause);
+      pause.mockClear();
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(screen.getByRole("button", { name: /Download player playlist/ }));
+      expect(createObjectURL).toHaveBeenCalledTimes(1);
+      expect(click).toHaveBeenCalledTimes(1);
+      await userEvent.click(screen.getByRole("button", { name: /^Copy stream link/ }));
+      expect(writeText).toHaveBeenCalledWith(target);
+      expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false);
+      expect(media.getCurrentTime()).toBe(49.2);
+      expect(recordDiagnosticMock).not.toHaveBeenCalledWith("player", "external.intent_requested");
+
+      view.unmount();
+      isTauriMock.mockReturnValue(true);
+      deviceKindMock.mockReturnValue("android");
+      const selectable = render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          externalPlaybackUrl={target}
+          title="Selectable link"
+          onClose={() => {}}
+        />,
+      );
+      const selectableVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+      const selectableMedia = startPlayingVideo(selectableVideo);
+      pause.mockClear();
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      expect(screen.getByRole("link", { name: "Selectable stream link" })).toHaveAttribute("href", target);
+      clickWithoutNavigation(screen.getByRole("link", { name: "Selectable stream link" }));
+      expect(pause).not.toHaveBeenCalled();
+      expect(selectableVideo.paused).toBe(false);
+      expect(selectableMedia.getCurrentTime()).toBe(49.2);
+      expect(recordDiagnosticMock).not.toHaveBeenCalledWith("player", "external.intent_requested");
+      selectable.unmount();
+    } finally {
+      click.mockRestore();
+      restoreCreate();
+      restoreRevoke();
+      restoreClipboard();
+    }
+  });
+
+  it("[browser-external-pause109] replacement source owns the pause after direct-link targets update", async () => {
+    deviceKindMock.mockReturnValue("mac");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const first = `https://server.example/api/external-stream/first/${"A".repeat(43)}`;
+    const second = `https://server.example/api/external-stream/second/${"B".repeat(43)}`;
+    const view = render(
+      <VideoPlayer url="https://server.example/stream/first" externalPlaybackUrl={first} title="Owner" onClose={() => {}} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    const staleLink = screen.getByRole("link", { name: /Open in IINA/ }) as HTMLAnchorElement;
+    const oldVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+    const pause = vi.mocked(HTMLMediaElement.prototype.pause);
+    pause.mockClear();
+    view.rerender(
+      <VideoPlayer url="https://server.example/stream/second" externalPlaybackUrl={second} title="Owner" sourceRevision={1} onClose={() => {}} />,
+    );
+    const currentVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+    await waitFor(() => expect(currentVideo).not.toBe(oldVideo));
+    pause.mockClear();
+    expect(staleLink).not.toBeInTheDocument();
+    expect(staleLink.isConnected).toBe(false);
+    clickWithoutNavigation(staleLink);
+    expect(pause).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    startPlayingVideo(currentVideo);
+    expect(screen.getByRole("link", { name: /Open in IINA/ })).toHaveAttribute(
+      "href",
+      `iina://open?url=${encodeURIComponent(second)}&new_window=1`,
+    );
+    pause.mockClear();
+    clickWithoutNavigation(screen.getByRole("link", { name: /Open in IINA/ }));
+    expect(pause).toHaveBeenCalledTimes(1);
+    expect(pause.mock.contexts[0]).toBe(currentVideo);
+    expect(pause.mock.contexts[0]).not.toBe(oldVideo);
+    expect(recordDiagnosticMock).toHaveBeenCalledWith("player", "external.intent_requested");
+  });
+
   it("does not expose a provider URL to browser external actions", () => {
     render(<VideoPlayer url="https://x/movie.mkv" title="T" onClose={() => {}} />);
     expect(screen.getByText("Use an external player")).toBeInTheDocument();
