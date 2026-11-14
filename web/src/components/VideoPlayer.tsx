@@ -416,6 +416,33 @@ function nativeHlsSourceWithExactStart(
   return `${url}${separator}t=${fragmentTarget}`;
 }
 
+function nativeHlsSourceForPlayback(
+  url: string,
+  startPositionSeconds: number | undefined,
+  exactHandoff: boolean,
+  hasServerOptimization: boolean,
+): string {
+  if (exactHandoff) {
+    return nativeHlsSourceWithExactStart(url, startPositionSeconds);
+  }
+
+  // A fresh server rendition can be a growing EVENT playlist. Pin WebKit to
+  // the beginning so its initial live-edge choice cannot skip buffered media.
+  // Provider HLS, direct media, and hls.js retain their existing startup path.
+  const freshStart = startPositionSeconds ?? 0;
+  if (
+    deviceKind() === "ios" &&
+    hasServerOptimization &&
+    isTrustedServerHlsManifestURL(url) &&
+    Number.isFinite(freshStart) &&
+    freshStart >= 0 &&
+    freshStart <= 5
+  ) {
+    return nativeHlsSourceWithExactStart(url, freshStart);
+  }
+  return url;
+}
+
 interface WebKitPlaybackTargetAvailabilityEvent extends Event {
   availability?: "available" | "not-available";
 }
@@ -6512,6 +6539,11 @@ function WebviewPlayer({
     };
   }, [ended, leasePreparationReady, leaseTarget, serverOptimizationPending, sourceIdentity, suspended, url]);
 
+  // Keep dependency on the capability bit only. The server optimization object
+  // contains render-scoped callbacks and must not reassign a native source on
+  // otherwise unrelated playback-progress renders.
+  const hasServerOptimization = serverOptimized != null;
+
   // Wire hls.js for HLS streams when the browser can't play them natively.
   useEffect(() => {
     const video = videoRef.current;
@@ -6542,9 +6574,12 @@ function WebviewPlayer({
       } else {
         video.removeAttribute("crossorigin");
       }
-      const sourceUrl = requiresExactHandoffRef.current
-        ? nativeHlsSourceWithExactStart(url, startPositionRef.current)
-        : url;
+      const sourceUrl = nativeHlsSourceForPlayback(
+        url,
+        startPositionRef.current,
+        requiresExactHandoffRef.current,
+        hasServerOptimization,
+      );
       nativeExactHlsFragmentRef.current = requiresExactHandoffRef.current;
       assignNativeSource(sourceUrl);
       return;
@@ -6612,9 +6647,12 @@ function WebviewPlayer({
           } else {
             element.removeAttribute("crossorigin");
           }
-          const sourceUrl = requiresExactHandoffRef.current
-            ? nativeHlsSourceWithExactStart(url, startPositionRef.current)
-            : url;
+          const sourceUrl = nativeHlsSourceForPlayback(
+            url,
+            startPositionRef.current,
+            requiresExactHandoffRef.current,
+            hasServerOptimization,
+          );
           nativeExactHlsFragmentRef.current = requiresExactHandoffRef.current;
           assignNativeSource(sourceUrl);
           return;
@@ -6651,9 +6689,12 @@ function WebviewPlayer({
           } else {
             element.removeAttribute("crossorigin");
           }
-          const sourceUrl = requiresExactHandoffRef.current
-            ? nativeHlsSourceWithExactStart(url, startPositionRef.current)
-            : url;
+          const sourceUrl = nativeHlsSourceForPlayback(
+            url,
+            startPositionRef.current,
+            requiresExactHandoffRef.current,
+            hasServerOptimization,
+          );
           nativeExactHlsFragmentRef.current = requiresExactHandoffRef.current;
           assignNativeSource(sourceUrl);
           return;
@@ -6845,7 +6886,7 @@ function WebviewPlayer({
       setHlsAudioTracks([]);
       setHlsAudioInventoryKnown(false);
     };
-  }, [engine, sourceIdentity, url, isHls, iosHlsPlaybackMode, leasePreparationReady]);
+  }, [engine, sourceIdentity, url, isHls, iosHlsPlaybackMode, leasePreparationReady, hasServerOptimization]);
 
   const beginConfirmedNativeHlsSeek = (
     video: HTMLVideoElement,
