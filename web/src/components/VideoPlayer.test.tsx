@@ -20064,3 +20064,115 @@ describe("passive playback interruption export", () => {
     expect(reportMedia()).toHaveLength(closedCount);
   });
 });
+
+describe("current video PiP capability admission", () => {
+  const restores113: Array<() => void> = [];
+  function property113(target: object, key: PropertyKey, value: unknown) {
+    restores113.push(replaceProperty(target, key, value));
+  }
+  afterEach(() => { restores113.reverse().forEach((restore) => restore()); restores113.length = 0; });
+  function webkit113(predicate: unknown) {
+    property113(document, "pictureInPictureEnabled", false);
+    property113(document, "pictureInPictureElement", null);
+    property113(HTMLVideoElement.prototype, "requestPictureInPicture", undefined);
+    const setter = vi.fn();
+    property113(HTMLVideoElement.prototype, "webkitSetPresentationMode", setter);
+    property113(HTMLVideoElement.prototype, "webkitSupportsPresentationMode", predicate);
+    property113(HTMLVideoElement.prototype, "webkitPresentationMode", "inline");
+    return setter;
+  }
+  function mount113() {
+    const view = render(<VideoPlayer url="https://x/pip.mp4" title="PiP capability" onClose={() => {}} />);
+    return { view, video: document.querySelector("video.player-video") as HTMLVideoElement };
+  }
+
+  it.each(["false", "missing", "throwing", "truthy", "not-a-function"] as const)("[pip113-detection] setter alone never admits a %s support predicate", (kind) => {
+    const predicate = kind === "false" ? vi.fn(() => false) : kind === "throwing" ? vi.fn(() => { throw new Error("Unsupported source"); })
+      : kind === "truthy" ? vi.fn(() => "yes") : kind === "not-a-function" ? true : undefined;
+    const setter = webkit113(predicate);
+    mount113();
+    expect(screen.queryByRole("button", { name: "Picture in picture" })).toBeNull();
+    expect(setter).not.toHaveBeenCalled();
+  });
+
+  it("[pip113-detection] requires an actual setter even when the predicate returns true", () => {
+    webkit113(vi.fn(() => true)); property113(HTMLVideoElement.prototype, "webkitSetPresentationMode", true);
+    mount113(); expect(screen.queryByRole("button", { name: "Picture in picture" })).toBeNull();
+  });
+
+  it.each(["loadedmetadata", "canplay"] as const)("[pip113-readiness] gains current support on %s and loses it on emptied", (event) => {
+    const predicate = vi.fn(function (this: HTMLVideoElement, mode: string) {
+      expect(this).toBeInstanceOf(HTMLVideoElement); expect(mode).toBe("picture-in-picture");
+      return this.readyState >= HTMLMediaElement.HAVE_METADATA;
+    });
+    const setter = webkit113(predicate); const { video } = mount113();
+    expect(screen.queryByRole("button", { name: "Picture in picture" })).toBeNull();
+    property113(video, "readyState", HTMLMediaElement.HAVE_CURRENT_DATA);
+    fireEvent(video, new Event(event)); expect(screen.getByRole("button", { name: "Picture in picture" })).toBeInTheDocument();
+    property113(video, "readyState", HTMLMediaElement.HAVE_NOTHING);
+    fireEvent.emptied(video); expect(screen.queryByRole("button", { name: "Picture in picture" })).toBeNull();
+    expect(predicate.mock.contexts.every((context) => context === video)).toBe(true);
+    expect(setter).not.toHaveBeenCalled();
+  });
+
+  it("[pip113-webkit] calls the true predicate with the video receiver and preserves active exit after enter support is lost", () => {
+    const predicate = vi.fn(function (this: HTMLVideoElement, mode: string) { return this instanceof HTMLVideoElement && mode === "picture-in-picture"; });
+    const setter = webkit113(predicate); const { video } = mount113();
+    expect(predicate).toHaveBeenCalledWith("picture-in-picture"); expect(predicate.mock.contexts.every((context) => context === video)).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Picture in picture" }));
+    expect(setter).toHaveBeenLastCalledWith("picture-in-picture"); expect(setter.mock.contexts.at(-1)).toBe(video);
+    property113(video, "webkitPresentationMode", "picture-in-picture"); fireEvent(video, new Event("webkitpresentationmodechanged"));
+    predicate.mockReturnValue(false); fireEvent.canPlay(video);
+    expect(screen.getByRole("button", { name: "Exit picture in picture" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Exit picture in picture" }));
+    expect(setter).toHaveBeenLastCalledWith("inline");
+    property113(video, "webkitPresentationMode", "inline"); fireEvent(video, new Event("webkitpresentationmodechanged"));
+    expect(screen.queryByRole("button", { name: "Picture in picture" })).toBeNull();
+  });
+
+  it.each(["false", "missing", "throwing"] as const)("[pip113-click] rejects live %s support after the control was exposed, without an intervening readiness event", (kind) => {
+    const predicate = vi.fn(() => true); const setter = webkit113(predicate); const { video } = mount113();
+    const control = screen.getByRole("button", { name: "Picture in picture" });
+    property113(video, "webkitSupportsPresentationMode", kind === "missing" ? undefined : kind === "false" ? () => false : () => { throw new Error("Capability disappeared"); });
+    fireEvent.click(control);
+    expect(setter).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Picture in picture" })).toBeNull();
+  });
+
+  it("[pip113-standard] keeps standard enter independent of WebKit false and retains active standard exit after enter capability disappears", () => {
+    const webkit = webkit113(vi.fn(() => false));
+    const request = vi.fn().mockResolvedValue(undefined), exit = vi.fn().mockResolvedValue(undefined);
+    property113(document, "pictureInPictureEnabled", true);
+    property113(document, "exitPictureInPicture", exit);
+    property113(HTMLVideoElement.prototype, "requestPictureInPicture", request);
+    const { video } = mount113(); fireEvent.click(screen.getByRole("button", { name: "Picture in picture" }));
+    expect(request).toHaveBeenCalledOnce(); expect(request.mock.contexts[0]).toBe(video); expect(webkit).not.toHaveBeenCalled();
+    property113(document, "pictureInPictureElement", video); fireEvent(video, new Event("enterpictureinpicture"));
+    property113(document, "pictureInPictureEnabled", false); property113(video, "requestPictureInPicture", undefined);
+    fireEvent.canPlay(video); fireEvent.click(screen.getByRole("button", { name: "Exit picture in picture" }));
+    expect(exit).toHaveBeenCalledOnce(); expect(request).toHaveBeenCalledOnce(); expect(webkit).not.toHaveBeenCalled();
+    property113(document, "pictureInPictureElement", null); fireEvent(video, new Event("leavepictureinpicture"));
+    expect(screen.queryByRole("button", { name: "Picture in picture" })).toBeNull();
+  });
+
+  it("[pip113-source] removes all capability listeners and fences saved callbacks and old video events on replacement/unmount", () => {
+    const predicate = vi.fn(() => true); webkit113(predicate);
+    const add = vi.spyOn(HTMLVideoElement.prototype, "addEventListener");
+    const remove = vi.spyOn(HTMLVideoElement.prototype, "removeEventListener");
+    const props = { title: "PiP owner", onClose: () => {} };
+    const view = render(<VideoPlayer {...props} url="https://x/old.mp4" sourceRevision={1} />);
+    const oldVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+    const bindings = add.mock.calls.filter(([, handler]) => (handler as EventListener).name === "syncPictureInPicture");
+    expect(bindings.map(([event]) => event)).toEqual(["loadedmetadata", "canplay", "emptied", "enterpictureinpicture", "leavepictureinpicture", "webkitpresentationmodechanged"]);
+    view.rerender(<VideoPlayer {...props} url="https://x/new.mp4" sourceRevision={2} />);
+    const current = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(current).not.toBe(oldVideo);
+    for (const [event, handler] of bindings) expect(remove).toHaveBeenCalledWith(event, handler);
+    property113(current, "webkitSupportsPresentationMode", () => false); fireEvent.canPlay(current);
+    expect(screen.queryByRole("button", { name: "Picture in picture" })).toBeNull();
+    const count = predicate.mock.calls.length;
+    for (const [event, handler] of bindings) { fireEvent(oldVideo, new Event(event)); (handler as EventListener)(new Event(event)); }
+    expect(predicate).toHaveBeenCalledTimes(count); expect(screen.queryByRole("button", { name: "Picture in picture" })).toBeNull();
+    view.unmount(); fireEvent.canPlay(current); expect(predicate).toHaveBeenCalledTimes(count);
+  });
+});
