@@ -31,7 +31,7 @@ def output(value=None):
 class Fake(m.System):
  platform='linux'
  def __init__(self,root,admission):
-  self.environ={'RUNNER_TEMP':str(root),'GITHUB_ACTIONS':'true','PATH':'/public/tools'};self.admission=admission;self.calls=[];self.bad_cert=False;self.bad_package=False;self.debug=False;self.wrong_runner=False;self.extra=False;self.changed=False;self.changed_command=False;self.timeout=False;self.empty_target_version=False;self.unqualified=False
+  self.environ={'RUNNER_TEMP':str(root),'GITHUB_ACTIONS':'true','PATH':'/public/tools'};self.admission=admission;self.calls=[];self.bad_cert=False;self.bad_package=False;self.debug=False;self.wrong_runner=False;self.extra=False;self.changed=False;self.changed_command=False;self.timeout=False;self.empty_target_version=False;self.unqualified=False;self.wrong_avd=False
  def process(self,pid):
   item=next(x for x in [self.admission['emulator'],self.admission['adbServer']]if x['pid']==pid);return item['startTicks']+int(self.changed),[x.encode()for x in item['cmdline']]+([b'foreign']if self.changed_command else [])
  def port_owned(self,pid,port):return pid==2345 and port==5142
@@ -44,7 +44,7 @@ class Fake(m.System):
    command=argv[7:]
    if command==['devices','-l']:text='List of devices attached\nemulator-5568 device product:public model:public transport_id:1\n'+('other device\n'if self.extra else '')
    elif command==['shell','getprop','ro.build.version.sdk']:text='36\n'
-   elif command==['emu','avd','name']:text='owned36\nOK\n'
+   elif command==['shell','getprop','ro.boot.qemu.avd_name']:text=('foreign36' if self.wrong_avd else 'owned36')+'\n'
    elif command[:4]==['shell','pm','list','packages']:text=''
    elif command[0]=='install':text='Performing Push Install\nSuccess\n'
    elif command[:3]==['shell','am','instrument']:
@@ -91,7 +91,7 @@ function run(body){
 }
 
 test('runtime controller refuses wrong host, target, signer and live process/device bindings before install',()=>run(String.raw`
-for mode,code in [('platform','HOST_NOT_ADMITTED'),('empty-target-version','TARGET_APK_METADATA'),('package','TARGET_APK_METADATA'),('debug','TARGET_APK_METADATA'),('certificate','APK_CERTIFICATE'),('runner','TEST_INSTRUMENTATION'),('birth','OWNED_PROCESS_CHANGED'),('inventory','DEVICE_INVENTORY'),('hash','APK_BINDING'),('cmdline','OWNED_PROCESS_CHANGED'),('reserve','STORAGE_BOUND'),('allocation','STORAGE_BOUND'),('port','CLI_IDENTITY'),('symlink','NONCANONICAL_PATH')]:
+for mode,code in [('platform','HOST_NOT_ADMITTED'),('empty-target-version','TARGET_APK_METADATA'),('package','TARGET_APK_METADATA'),('debug','TARGET_APK_METADATA'),('certificate','APK_CERTIFICATE'),('runner','TEST_INSTRUMENTATION'),('birth','OWNED_PROCESS_CHANGED'),('inventory','DEVICE_INVENTORY'),('guest-name','GUEST_AVD_NAME'),('hash','APK_BINDING'),('cmdline','OWNED_PROCESS_CHANGED'),('reserve','STORAGE_BOUND'),('allocation','STORAGE_BOUND'),('port','CLI_IDENTITY'),('symlink','NONCANONICAL_PATH')]:
  f=Fixture()
  try:
   if mode=='platform':f.fake.platform='darwin'
@@ -102,6 +102,7 @@ for mode,code in [('platform','HOST_NOT_ADMITTED'),('empty-target-version','TARG
   if mode=='runner':f.fake.wrong_runner=True
   if mode=='birth':f.fake.changed=True
   if mode=='inventory':f.fake.extra=True
+  if mode=='guest-name':f.fake.wrong_avd=True
   if mode=='cmdline':f.fake.changed_command=True
   if mode=='reserve':f.fake.free=lambda root:m.RESERVE-1
   if mode=='allocation':f.fake.allocation=lambda root:m.CAP+1

@@ -431,7 +431,7 @@ class Controller:
         test = self.apk(self.test, self.admission["testApk"], False)
         dex = no_tauri_definitions(self.test)
         require(self.text(self.adb + ["shell", "getprop", "ro.build.version.sdk"]).strip() == "36", "GUEST_API")
-        require(self.text(self.adb + ["emu", "avd", "name"]).splitlines() == [self.admission["avdName"], "OK"], "GUEST_AVD_NAME")
+        require(self.text(self.adb + ["shell", "getprop", "ro.boot.qemu.avd_name"]).splitlines() == [self.admission["avdName"]], "GUEST_AVD_NAME")
         for package in (TARGET, TEST_PACKAGE):
             require(self.text(self.adb + ["shell", "pm", "list", "packages", package]).strip() == "", "PACKAGE_NOT_FRESH")
         for path, extra in ((self.target, []), (self.test, ["-t"])):
