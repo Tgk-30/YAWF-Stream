@@ -31,8 +31,14 @@ def focused_snapshot():
 def tap_timing():
  return dict(tapTimeoutMs=100,minimumHoldMs=117,longPressTimeoutMs=400,deadlineOffsetMs=183,actualHoldMs=130,enqueuedOffsetMs=10,enteredOffsetMs=11,completedOffsetMs=12,sampleCount=1)
 
+def async_main_probe():
+ return dict(instrumentationThreadIsMain=None,handlerSameMainLooper=None,callbackSameMainLooper=None,enqueuedOffsetMs=None,enteredOffsetMs=None,completedOffsetMs=None,closedOffsetMs=None,outcome='not-attempted')
+
+def observed_async_probe(outcome='pressed'):
+ return dict(instrumentationThreadIsMain=False,handlerSameMainLooper=True,callbackSameMainLooper=True,enqueuedOffsetMs=13,enteredOffsetMs=14,completedOffsetMs=15,closedOffsetMs=127,outcome=outcome)
+
 def proof():
- value={key:True for key in m.BOOL_FIELDS};value.update(schemaVersion=1,scope='selected_first_plugin_load_failure_then_one_native_retry',phase='QUALIFIED_SELECTED_STARTUP_RETRY_ONLY',qualification=True,failureCode='',elapsedMs=10000,tapCount=1,targetActivityCreates=1,pluginLoadCount=2,retryDownCallElapsedMs=10,retryPressedObservationOutcome='pressed',retryAdmissionFirstBlockingReason='none',retryAdmissionLastBlockingReason='none',retryAdmissionElapsedMs=17,retryAdmissionSampleCount=2,retryFocusSnapshot=focus_snapshot(),retryTapTiming=tap_timing());return value
+ value={key:True for key in m.BOOL_FIELDS};value.update(schemaVersion=1,scope='selected_first_plugin_load_failure_then_one_native_retry',phase='QUALIFIED_SELECTED_STARTUP_RETRY_ONLY',qualification=True,failureCode='',elapsedMs=10000,tapCount=1,targetActivityCreates=1,pluginLoadCount=2,retryDownCallElapsedMs=10,retryPressedObservationOutcome='pressed',retryAdmissionFirstBlockingReason='none',retryAdmissionLastBlockingReason='none',retryAdmissionElapsedMs=17,retryAdmissionSampleCount=2,retryFocusSnapshot=focus_snapshot(),retryTapTiming=tap_timing(),retryAsyncMainProbe=async_main_probe());return value
 
 def output(value=None):
  return '\n'.join(['INSTRUMENTATION_STATUS: class='+m.TEST_CLASS,'INSTRUMENTATION_STATUS: test='+m.METHOD,'INSTRUMENTATION_STATUS: numtests=1','INSTRUMENTATION_STATUS: owned_destroy_evidence='+json.dumps(value or proof()),'INSTRUMENTATION_STATUS_CODE: 0','INSTRUMENTATION_RESULT: stream=','OK (1 test)','INSTRUMENTATION_CODE: -1',''])
@@ -292,6 +298,90 @@ for before,after,timing,code in mutants:
  try:probe(api,timing,code)
  except AssertionError:pass
  else:raise AssertionError('timing guard mutant survived')
+`));
+
+test('paired async main diagnostic is strictly bounded, retained and never substitutes ordinary pressed proof',()=>run(String.raw`
+assert m.evidence(output())==proof()
+pending=dict(observed_async_probe('observation-timeout'),callbackSameMainLooper=None,enteredOffsetMs=None,completedOffsetMs=None)
+unavailable=dict(async_main_probe(),instrumentationThreadIsMain=False,closedOffsetMs=127,outcome='unavailable')
+wrong_handler=dict(unavailable,handlerSameMainLooper=False,outcome='state-mismatch')
+wrong_callback=dict(observed_async_probe('state-mismatch'),callbackSameMainLooper=False)
+for diagnostic in [async_main_probe(),unavailable,wrong_handler,wrong_callback,pending,dict(pending,callbackSameMainLooper=True,enteredOffsetMs=14),dict(unavailable,outcome='observation-error')]+[observed_async_probe(outcome)for outcome in ['pressed','unpressed','state-mismatch','observation-error']]:
+ value=proof();value['retryAsyncMainProbe']=diagnostic
+ assert m.evidence(output(value))==value,'optional async negative must not weaken or replace ordinary evidence'
+ value['qualification']=False
+ try:m.evidence(output(value))
+ except m.Refusal as error:assert str(error)=='MODULE_UNQUALIFIED'and error.module_evidence['retryAsyncMainProbe']==diagnostic
+ else:raise AssertionError('async diagnostic qualified a negative case')
+for outcome in m.PRESSED_OBSERVATION_OUTCOMES-{'pressed'}:
+ value=proof();value.update(retryPressedObservationOutcome=outcome,retryAsyncMainProbe=observed_async_probe())
+ rejects(lambda:m.evidence(output(value)),'MODULE_INPUT_FACTS')
+value=proof();value.update(retryDownPressed=False,retryAsyncMainProbe=observed_async_probe())
+rejects(lambda:m.evidence(output(value)),'MODULE_FACTS')
+value=proof();value.update(retryPressedObservationOutcome='observation-timeout',retryDownPressed=False,retryAsyncMainProbe=observed_async_probe(),retryTapTiming=dict(tap_timing(),enteredOffsetMs=None,completedOffsetMs=None,sampleCount=0),qualification=False,phase='ONE_VERIFIED_NATIVE_TAP',failureCode='ONE_VERIFIED_NATIVE_TAP_FAILED')
+try:m.evidence(output(value))
+except m.Refusal as error:
+ assert str(error)=='MODULE_UNQUALIFIED'and error.module_evidence['retryAsyncMainProbe']['outcome']=='pressed'
+ assert error.module_evidence['retryTapTiming']['sampleCount']==0 and error.module_evidence['retryPressedObservationOutcome']=='observation-timeout'
+else:raise AssertionError('async-only entry became ordinary proof')
+for diagnostic in [None,[],dict(observed_async_probe(),private='PRIVATE_ASYNC'),{key:value for key,value in observed_async_probe().items()if key!='outcome'}]:
+ value=proof();value['retryAsyncMainProbe']=diagnostic
+ try:m.evidence(output(value))
+ except m.Refusal as error:assert str(error)=='ASYNC_MAIN_PROBE_SCHEMA'and error.module_evidence is None
+ else:raise AssertionError('private async schema retained')
+for field in m.ASYNC_MAIN_PROBE_BOOLS:
+ for bad in [0,1,'PRIVATE_ASYNC',[],{}]:
+  value=proof();value['retryAsyncMainProbe']=dict(observed_async_probe(),**{field:bad})
+  try:m.evidence(output(value))
+  except m.Refusal as error:assert str(error)=='ASYNC_MAIN_PROBE_TYPE'and error.module_evidence is None
+  else:raise AssertionError('arbitrary async bool retained')
+for field in m.ASYNC_MAIN_PROBE_TIMES:
+ for bad in [True,False,-1,150001,1.5,'PRIVATE_ASYNC',[],{}]:
+  value=proof();value['retryAsyncMainProbe']=dict(observed_async_probe(),**{field:bad})
+  try:m.evidence(output(value))
+  except m.Refusal as error:assert str(error)=='ASYNC_MAIN_PROBE_TYPE'and error.module_evidence is None
+  else:raise AssertionError('arbitrary async timing retained')
+for bad in [None,True,1,[],{},'PRIVATE_ASYNC']:
+ value=proof();value['retryAsyncMainProbe']=dict(observed_async_probe(),outcome=bad)
+ try:m.evidence(output(value))
+ except m.Refusal as error:assert str(error)=='ASYNC_MAIN_PROBE_OUTCOME'and error.module_evidence is None
+ else:raise AssertionError('arbitrary async outcome retained')
+for changes in [dict(outcome='not-attempted'),dict(outcome='unavailable'),dict(outcome='observation-timeout'),dict(instrumentationThreadIsMain=None),dict(handlerSameMainLooper=False),dict(callbackSameMainLooper=False),dict(closedOffsetMs=None),dict(closedOffsetMs=131),dict(enqueuedOffsetMs=9),dict(enteredOffsetMs=12),dict(completedOffsetMs=13),dict(completedOffsetMs=128),dict(enteredOffsetMs=None),dict(completedOffsetMs=None)]:
+ value=proof();value['retryAsyncMainProbe']=dict(observed_async_probe(),**changes)
+ try:m.evidence(output(value))
+ except m.Refusal as error:assert str(error)=='ASYNC_MAIN_PROBE_STATE'and error.module_evidence is None
+ else:raise AssertionError('inconsistent async diagnostic retained')
+`));
+
+test('actual async schema and ordinary-only qualification reject individual mutants after original positives',()=>run(String.raw`
+original=pathlib.Path(m.__file__).read_text()
+def probe(api,diagnostic,code,normal='pressed'):
+ value=proof();value.update(retryAsyncMainProbe=diagnostic,retryPressedObservationOutcome=normal)
+ try:
+  if normal=='validate-only':api['validate_async_main_probe'](diagnostic,dict(tap_timing(),actualHoldMs=150002))
+  else:api['evidence'](output(value))
+ except api['Refusal']as error:
+  assert str(error)==code
+  if code.startswith('ASYNC_'):assert error.module_evidence is None
+ else:raise AssertionError('async guard lost')
+mutants=[
+ ('set(value) == ASYNC_MAIN_PROBE_KEYS','True',dict(observed_async_probe(),private='PRIVATE_ASYNC'),'ASYNC_MAIN_PROBE_SCHEMA','pressed'),
+ ('type(value[name]) is bool for name in ASYNC_MAIN_PROBE_BOOLS','value[name] in (False, True) for name in ASYNC_MAIN_PROBE_BOOLS',dict(async_main_probe(),instrumentationThreadIsMain=False,handlerSameMainLooper=0,closedOffsetMs=127,outcome='observation-error'),'ASYNC_MAIN_PROBE_TYPE','pressed'),
+ ('type(value[name]) is int and value[name] >= 0 and value[name] <= 150000','type(value[name]) is int and value[name] >= 0',dict(observed_async_probe(),closedOffsetMs=150001),'ASYNC_MAIN_PROBE_TYPE','validate-only'),
+ ('value["outcome"] in ASYNC_MAIN_PROBE_OUTCOMES','True',dict(observed_async_probe(),outcome='PRIVATE_ASYNC'),'ASYNC_MAIN_PROBE_OUTCOME','pressed'),
+ ('closed <= actual_hold','True',dict(observed_async_probe(),closedOffsetMs=131),'ASYNC_MAIN_PROBE_STATE','pressed'),
+ ('timing["enqueuedOffsetMs"] <= enqueued <= min(deadline, closed)','enqueued <= min(deadline, closed)',dict(observed_async_probe(),enqueuedOffsetMs=9),'ASYNC_MAIN_PROBE_STATE','pressed'),
+ ('entered <= completed <= min(deadline, closed)','entered <= completed',dict(observed_async_probe(),completedOffsetMs=128),'ASYNC_MAIN_PROBE_STATE','pressed'),
+ ('value["callbackSameMainLooper"] is True and completed is not None','completed is not None',dict(observed_async_probe(),callbackSameMainLooper=False),'ASYNC_MAIN_PROBE_STATE','pressed'),
+ ('value["retryPressedObservationOutcome"] == "pressed"','(value["retryPressedObservationOutcome"] == "pressed" or value["retryAsyncMainProbe"]["outcome"] == "pressed")',observed_async_probe(),'MODULE_INPUT_FACTS','observation-timeout'),
+]
+for before,after,diagnostic,code,normal in mutants:
+ probe(vars(m),diagnostic,code,normal);assert original.count(before)==1
+ api={'__name__':'owned_async_mutant','__file__':m.__file__}
+ exec(compile(original.replace(before,after,1),'<owned-async-mutant>','exec'),api)
+ try:probe(api,diagnostic,code,normal)
+ except AssertionError:pass
+ else:raise AssertionError('async diagnostic mutant survived')
 `));
 
 test('admission history and bounds are mandatory, private unknown facts are refused before retention',()=>run(String.raw`

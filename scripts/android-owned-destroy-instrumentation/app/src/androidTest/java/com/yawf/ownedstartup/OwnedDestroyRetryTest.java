@@ -72,6 +72,7 @@ public final class OwnedDestroyRetryTest {
     private Long retryDownCallElapsedMs;
     private PressedObservationOutcome retryPressedObservationOutcome = PressedObservationOutcome.NOT_ATTEMPTED;
     private TapObservation retryTapObservation;
+    private AsyncMainProbe retryAsyncMainProbe;
     private TapAdmissionState retryAdmissionState;
     private final FocusSnapshotCapture retryFocusSnapshot = new FocusSnapshotCapture();
     private boolean sameActivityAfterRetry;
@@ -603,6 +604,7 @@ public final class OwnedDestroyRetryTest {
             }
             if (SystemClock.uptimeMillis() + holdMillis <= observationDeadline) {
                 observer = new PressedObserver(tap, retryTapObservation);
+                retryAsyncMainProbe = observer.asyncProbe;
                 observer.start();
                 SystemClock.sleep(holdMillis);
                 retryPressedObservationOutcome = observer.awaitResult();
@@ -664,9 +666,30 @@ public final class OwnedDestroyRetryTest {
         private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
         private final CountDownLatch observed = new CountDownLatch(1);
         private final Runnable read;
+        private final AsyncMainProbe asyncProbe;
+        private final Runnable asyncRead;
+        private android.os.Handler asyncMain;
 
         PressedObserver(TapPlan tap, TapObservation observation) {
             this.observation = observation;
+            asyncProbe = new AsyncMainProbe(observation.downTime, observation.deadlineUptime);
+            asyncRead = () -> {
+                boolean sameLooper = android.os.Looper.myLooper() == main.getLooper();
+                if (!asyncProbe.begin(SystemClock.uptimeMillis(), sameLooper)) return;
+                try {
+                    if (!sameLooper) {
+                        asyncProbe.complete(SystemClock.uptimeMillis(), AsyncProbeOutcome.STATE_MISMATCH);
+                        return;
+                    }
+                    Rect bounds = verifiedRetryScreenBoundsOnMain(tap.activity, tap.button);
+                    AsyncProbeOutcome value = bounds == null || !bounds.equals(tap.screenBounds)
+                            ? AsyncProbeOutcome.STATE_MISMATCH
+                            : tap.button.isPressed() ? AsyncProbeOutcome.PRESSED : AsyncProbeOutcome.UNPRESSED;
+                    asyncProbe.complete(SystemClock.uptimeMillis(), value);
+                } catch (Throwable ignored) {
+                    asyncProbe.complete(SystemClock.uptimeMillis(), AsyncProbeOutcome.OBSERVATION_ERROR);
+                }
+            };
             read = new Runnable() {
                 @Override public void run() {
                     if (!observation.beginSample(SystemClock.uptimeMillis())) { observed.countDown(); return; }
@@ -693,10 +716,26 @@ public final class OwnedDestroyRetryTest {
 
         void start() {
             try {
-                if (observation.enqueue(SystemClock.uptimeMillis()) && main.post(read)) return;
+                if (observation.enqueue(SystemClock.uptimeMillis()) && main.post(read)) {
+                    startAsyncDiagnostic();
+                    return;
+                }
             } catch (RuntimeException ignored) { }
             observation.error(SystemClock.uptimeMillis());
             observed.countDown();
+        }
+
+        private void startAsyncDiagnostic() {
+            // Public API28 probe only. It never supplies ordinary pressed proof or waits.
+            if (!asyncProbe.start(SystemClock.uptimeMillis(),
+                    android.os.Looper.myLooper() == main.getLooper(), Build.VERSION.SDK_INT >= 28)) return;
+            try {
+                asyncMain = android.os.Handler.createAsync(main.getLooper());
+                if (!asyncProbe.handlerReady(SystemClock.uptimeMillis(),
+                        asyncMain.getLooper() == main.getLooper() && main.getLooper() == android.os.Looper.getMainLooper())) return;
+                if (asyncProbe.enqueue(SystemClock.uptimeMillis()) && asyncMain.post(asyncRead)) return;
+            } catch (RuntimeException | LinkageError ignored) { }
+            asyncProbe.error(SystemClock.uptimeMillis());
         }
 
         PressedObservationOutcome awaitResult() {
@@ -714,6 +753,8 @@ public final class OwnedDestroyRetryTest {
 
         void close() {
             observation.close();
+            asyncProbe.close(SystemClock.uptimeMillis());
+            try { if (asyncMain != null) asyncMain.removeCallbacks(asyncRead); } catch (RuntimeException | LinkageError ignored) { }
             try { main.removeCallbacks(read); } catch (RuntimeException | LinkageError ignored) { }
         }
     }
@@ -796,6 +837,7 @@ public final class OwnedDestroyRetryTest {
         evidence.put("retryDownCallElapsedMs", retryDownCallElapsedMs == null ? JSONObject.NULL : retryDownCallElapsedMs);
         evidence.put("retryPressedObservationOutcome", retryPressedObservationOutcome.wireValue);
         evidence.put("retryTapTiming", new JSONObject(TapObservation.wireValues(retryTapObservation)));
+        evidence.put("retryAsyncMainProbe", new JSONObject(AsyncMainProbe.wireValues(retryAsyncMainProbe)));
         evidence.put("retryAdmissionAdmitted", retryAdmissionState != null && retryAdmissionState.admitted && !retryAdmissionState.refused);
         evidence.put("retryAdmissionFirstBlockingReason", retryAdmissionState == null ? "not-started" : retryAdmissionState.firstBlocking.wireValue);
         evidence.put("retryAdmissionLastBlockingReason", retryAdmissionState == null ? "not-started" : retryAdmissionState.lastBlocking.wireValue);
@@ -1136,6 +1178,79 @@ public final class OwnedDestroyRetryTest {
         }
     }
     // END PURE TAP OBSERVATION POLICY
+
+    // BEGIN PURE ASYNC MAIN PROBE POLICY
+    private enum AsyncProbeOutcome {
+        NOT_ATTEMPTED("not-attempted"), UNAVAILABLE("unavailable"), OBSERVATION_TIMEOUT("observation-timeout"),
+        STATE_MISMATCH("state-mismatch"), UNPRESSED("unpressed"), PRESSED("pressed"), OBSERVATION_ERROR("observation-error");
+        final String wireValue;
+        AsyncProbeOutcome(String wireValue) { this.wireValue = wireValue; }
+    }
+
+    private static final class AsyncMainProbe {
+        private final long downTime, deadline;
+        private boolean started, closed;
+        private Boolean instrumentationThreadIsMain, handlerSameMainLooper, callbackSameMainLooper;
+        private Long enqueued, entered, completed, closedAt;
+        private AsyncProbeOutcome outcome = AsyncProbeOutcome.NOT_ATTEMPTED;
+
+        AsyncMainProbe(long downTime, long deadline) { this.downTime = downTime; this.deadline = deadline; }
+        private boolean within(long now) { return downTime <= now && now <= deadline; }
+        private long offset(long now) { return Math.min(150_000L, Math.max(0L, now - downTime)); }
+        synchronized boolean start(long now, boolean callerMain, boolean supported) {
+            if (closed || started || !within(now)) return false;
+            started = true; instrumentationThreadIsMain = callerMain;
+            outcome = supported ? AsyncProbeOutcome.OBSERVATION_TIMEOUT : AsyncProbeOutcome.UNAVAILABLE;
+            return supported;
+        }
+        synchronized boolean handlerReady(long now, boolean sameLooper) {
+            if (closed || !started || handlerSameMainLooper != null ||
+                    outcome != AsyncProbeOutcome.OBSERVATION_TIMEOUT || !within(now)) return false;
+            handlerSameMainLooper = sameLooper;
+            if (!sameLooper) outcome = AsyncProbeOutcome.STATE_MISMATCH;
+            return sameLooper;
+        }
+        synchronized boolean enqueue(long now) {
+            if (closed || enqueued != null || !Boolean.TRUE.equals(handlerSameMainLooper) ||
+                    outcome != AsyncProbeOutcome.OBSERVATION_TIMEOUT || !within(now)) return false;
+            enqueued = offset(now); return true;
+        }
+        synchronized boolean begin(long now, boolean sameLooper) {
+            if (closed || enqueued == null || entered != null || !within(now) || offset(now) < enqueued) return false;
+            entered = offset(now); callbackSameMainLooper = sameLooper; return true;
+        }
+        synchronized void complete(long now, AsyncProbeOutcome value) {
+            if (closed || entered == null || completed != null || !within(now) || offset(now) < entered) return;
+            completed = offset(now);
+            if (!Boolean.TRUE.equals(callbackSameMainLooper)) outcome = AsyncProbeOutcome.STATE_MISMATCH;
+            else outcome = value == AsyncProbeOutcome.PRESSED || value == AsyncProbeOutcome.UNPRESSED ||
+                    value == AsyncProbeOutcome.STATE_MISMATCH ? value : AsyncProbeOutcome.OBSERVATION_ERROR;
+        }
+        synchronized void error(long now) {
+            if (!closed && started && completed == null && within(now)) outcome = AsyncProbeOutcome.OBSERVATION_ERROR;
+        }
+        synchronized void close(long now) {
+            if (closed) return;
+            closed = true;
+            if (started) closedAt = offset(now);
+        }
+        static java.util.Map<String, Object> wireValues(AsyncMainProbe probe) {
+            if (probe != null) return probe.snapshot();
+            java.util.Map<String, Object> values = new java.util.LinkedHashMap<>();
+            for (String key : new String[] { "instrumentationThreadIsMain", "handlerSameMainLooper", "callbackSameMainLooper",
+                    "enqueuedOffsetMs", "enteredOffsetMs", "completedOffsetMs", "closedOffsetMs" }) values.put(key, null);
+            values.put("outcome", AsyncProbeOutcome.NOT_ATTEMPTED.wireValue); return values;
+        }
+        private synchronized java.util.Map<String, Object> snapshot() {
+            java.util.Map<String, Object> values = wireValues(null);
+            values.put("instrumentationThreadIsMain", instrumentationThreadIsMain);
+            values.put("handlerSameMainLooper", handlerSameMainLooper); values.put("callbackSameMainLooper", callbackSameMainLooper);
+            values.put("enqueuedOffsetMs", enqueued); values.put("enteredOffsetMs", entered);
+            values.put("completedOffsetMs", completed); values.put("closedOffsetMs", closedAt);
+            values.put("outcome", outcome.wireValue); return values;
+        }
+    }
+    // END PURE ASYNC MAIN PROBE POLICY
 
     private static final class TapPlan {
         final Activity activity;

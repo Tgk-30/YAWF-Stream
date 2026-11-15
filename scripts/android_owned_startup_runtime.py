@@ -51,6 +51,11 @@ PRESSED_OBSERVATION_OUTCOMES = {"not-attempted", "budget-skipped", "observation-
                                 "state-mismatch", "unpressed", "pressed", "observation-error"}
 TAP_TIMING_FIELDS = {"tapTimeoutMs", "minimumHoldMs", "longPressTimeoutMs", "deadlineOffsetMs",
                      "actualHoldMs", "enqueuedOffsetMs", "enteredOffsetMs", "completedOffsetMs"}
+ASYNC_MAIN_PROBE_BOOLS = {"instrumentationThreadIsMain", "handlerSameMainLooper", "callbackSameMainLooper"}
+ASYNC_MAIN_PROBE_TIMES = {"enqueuedOffsetMs", "enteredOffsetMs", "completedOffsetMs", "closedOffsetMs"}
+ASYNC_MAIN_PROBE_KEYS = ASYNC_MAIN_PROBE_BOOLS | ASYNC_MAIN_PROBE_TIMES | {"outcome"}
+ASYNC_MAIN_PROBE_OUTCOMES = {"not-attempted", "unavailable", "observation-timeout", "state-mismatch",
+                            "unpressed", "pressed", "observation-error"}
 ADMISSION_REASONS = {"not-started", "none", "owner", "liveness", "identity", "fault", "cleanup", "focus", "screen-asleep", "keyguard-locked",
                      "attachment", "interaction", "listener", "dimensions", "root", "visible-bounds", "intersection",
                      "unstable-geometry", "observation-timeout", "observation-error", "deadline", "sample-limit", "sample-interval"}
@@ -65,7 +70,7 @@ EVIDENCE_KEYS = set(BOOL_FIELDS) | {
     "tapCount", "targetActivityCreates", "pluginLoadCount", "retryDownCallElapsedMs",
     "retryPressedObservationOutcome",
     "retryAdmissionFirstBlockingReason", "retryAdmissionLastBlockingReason", "retryAdmissionElapsedMs", "retryAdmissionSampleCount",
-    "retryFocusSnapshot", "retryTapTiming",
+    "retryFocusSnapshot", "retryTapTiming", "retryAsyncMainProbe",
 }
 
 
@@ -159,6 +164,40 @@ def validate_tap_timing(value):
     require(completed is None or (entered is not None and entered <= completed), "TAP_TIMING_STATE")
 
 
+def validate_async_main_probe(value, timing):
+    # Diagnostic only. No async state supplies or replaces ordinary pressed proof.
+    require(type(value) is dict and set(value) == ASYNC_MAIN_PROBE_KEYS, "ASYNC_MAIN_PROBE_SCHEMA")
+    require(all(value[name] is None or type(value[name]) is bool for name in ASYNC_MAIN_PROBE_BOOLS), "ASYNC_MAIN_PROBE_TYPE")
+    require(all(value[name] is None or (type(value[name]) is int and value[name] >= 0 and value[name] <= 150000)
+                for name in ASYNC_MAIN_PROBE_TIMES), "ASYNC_MAIN_PROBE_TYPE")
+    require(type(value["outcome"]) is str and value["outcome"] in ASYNC_MAIN_PROBE_OUTCOMES, "ASYNC_MAIN_PROBE_OUTCOME")
+    outcome = value["outcome"]
+    if outcome == "not-attempted":
+        require(all(value[name] is None for name in ASYNC_MAIN_PROBE_BOOLS | ASYNC_MAIN_PROBE_TIMES), "ASYNC_MAIN_PROBE_STATE")
+        return
+    enqueued, entered, completed, closed = (value[name] for name in
+                                           ("enqueuedOffsetMs", "enteredOffsetMs", "completedOffsetMs", "closedOffsetMs"))
+    deadline, actual_hold = timing["deadlineOffsetMs"], timing["actualHoldMs"]
+    require(type(value["instrumentationThreadIsMain"]) is bool and type(closed) is int and
+            type(deadline) is int and type(actual_hold) is int and closed <= actual_hold, "ASYNC_MAIN_PROBE_STATE")
+    require(enqueued is None or (value["handlerSameMainLooper"] is True and
+            type(timing["enqueuedOffsetMs"]) is int and timing["enqueuedOffsetMs"] <= enqueued <= min(deadline, closed)), "ASYNC_MAIN_PROBE_STATE")
+    require((entered is None) == (value["callbackSameMainLooper"] is None), "ASYNC_MAIN_PROBE_STATE")
+    require(entered is None or (enqueued is not None and enqueued <= entered <= min(deadline, closed)), "ASYNC_MAIN_PROBE_STATE")
+    require(completed is None or (entered is not None and entered <= completed <= min(deadline, closed)), "ASYNC_MAIN_PROBE_STATE")
+    if outcome == "unavailable":
+        require(all(value[name] is None for name in (ASYNC_MAIN_PROBE_BOOLS - {"instrumentationThreadIsMain"}) |
+                    (ASYNC_MAIN_PROBE_TIMES - {"closedOffsetMs"})), "ASYNC_MAIN_PROBE_STATE")
+    elif outcome == "observation-timeout":
+        require(completed is None, "ASYNC_MAIN_PROBE_STATE")
+    elif outcome in {"pressed", "unpressed"}:
+        require(value["callbackSameMainLooper"] is True and completed is not None, "ASYNC_MAIN_PROBE_STATE")
+    elif outcome == "state-mismatch":
+        require(value["handlerSameMainLooper"] is False or completed is not None, "ASYNC_MAIN_PROBE_STATE")
+    elif completed is not None:
+        require(value["callbackSameMainLooper"] is True, "ASYNC_MAIN_PROBE_STATE")
+
+
 def evidence(output):
     """Parse the module's actual Bundle key, not a fabricated OWNED_STARTUP prefix."""
     key = "INSTRUMENTATION_STATUS: owned_destroy_evidence="
@@ -184,6 +223,7 @@ def evidence(output):
         require(type(value[name]) is int and 0 <= value[name] <= cap, "EVIDENCE_TYPE")
     validate_focus_snapshot(value["retryFocusSnapshot"])
     validate_tap_timing(value["retryTapTiming"])
+    validate_async_main_probe(value["retryAsyncMainProbe"], value["retryTapTiming"])
     safe = dict(value)
     safe["phase"] = value["phase"] if value["phase"] in PHASES else "UNRECOGNIZED_MODULE_PHASE"
     safe["failureCode"] = value["failureCode"] if value["failureCode"] in FAILURE_CODES else "UNRECOGNIZED_MODULE_FAILURE"

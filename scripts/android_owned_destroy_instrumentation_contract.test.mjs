@@ -423,6 +423,193 @@ test('actual concurrent pressed-observation policy rejects timing and late-publi
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('paired public async probe posts second on the same main looper without changing ordinary touch proof', async () => {
+  const source = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java');
+  const contract = (code) => {
+    const start = code.slice(code.indexOf('        void start() {'), code.indexOf('        PressedObservationOutcome awaitResult()'));
+    const close = code.slice(code.indexOf('        void close() {'), code.indexOf('    private boolean awaitOriginalButtonDetachedAfterUp'));
+    const asyncRead = code.slice(code.indexOf('            asyncRead = () -> {'), code.indexOf('            read = new Runnable()'));
+    return [
+      'private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());',
+      'retryAsyncMainProbe = observer.asyncProbe;',
+      'new AsyncMainProbe(observation.downTime, observation.deadlineUptime)',
+      'asyncMain = android.os.Handler.createAsync(main.getLooper());',
+      'android.os.Looper.myLooper() == main.getLooper(), Build.VERSION.SDK_INT >= 28',
+      'asyncMain.getLooper() == main.getLooper() && main.getLooper() == android.os.Looper.getMainLooper()',
+      'if (asyncProbe.enqueue(SystemClock.uptimeMillis()) && asyncMain.post(asyncRead)) return;',
+      'retryDownPressed = retryPressedObservationOutcome == PressedObservationOutcome.PRESSED;',
+      'require(retryDownPressed, "RETRY_DOWN_NOT_OBSERVED_PRESSED");',
+      'evidence.put("retryAsyncMainProbe", new JSONObject(AsyncMainProbe.wireValues(retryAsyncMainProbe)));',
+    ].every((part) => code.includes(part)) &&
+      /if \(observation\.enqueue\(SystemClock\.uptimeMillis\(\)\) && main\.post\(read\)\) \{\s*startAsyncDiagnostic\(\);\s*return;/.test(start) &&
+      /observation\.close\(\);\s*asyncProbe\.close\(SystemClock\.uptimeMillis\(\)\);\s*try \{ if \(asyncMain != null\) asyncMain\.removeCallbacks\(asyncRead\);/.test(close) &&
+      /if \(!asyncProbe\.begin\(SystemClock\.uptimeMillis\(\), sameLooper\)\) return;/.test(asyncRead) &&
+      /if \(!sameLooper\) \{\s*asyncProbe\.complete\(SystemClock\.uptimeMillis\(\), AsyncProbeOutcome\.STATE_MISMATCH\);\s*return;/.test(asyncRead) &&
+      asyncRead.includes('Rect bounds = verifiedRetryScreenBoundsOnMain(tap.activity, tap.button);') &&
+      asyncRead.includes('tap.button.isPressed() ? AsyncProbeOutcome.PRESSED : AsyncProbeOutcome.UNPRESSED') &&
+      asyncRead.includes('asyncProbe.complete(SystemClock.uptimeMillis(), value);') &&
+      !/sleep|await\(|postDelayed|setPressed|performClick|reflect|sendPointer|dispatchTouch|\.set[A-Z]/.test(start + asyncRead) &&
+      (code.match(/Handler\.createAsync\(/g) ?? []).length === 1 &&
+      (code.match(/asyncMain\.post\(/g) ?? []).length === 1 &&
+      /if \(observer != null\) observer\.close\(\);\s*long upTime = SystemClock\.uptimeMillis\(\);/.test(code);
+  };
+  assert.equal(contract(source), true);
+  for (const [from, to] of [
+    ['observation.enqueue(SystemClock.uptimeMillis()) && main.post(read)', 'main.post(read) || observation.enqueue(SystemClock.uptimeMillis())'],
+    ['asyncMain = android.os.Handler.createAsync(main.getLooper());', 'asyncMain = new android.os.Handler(main.getLooper());'],
+    ['asyncMain.post(asyncRead)', 'main.post(asyncRead)'],
+    ['Build.VERSION.SDK_INT >= 28', 'true'],
+    ['asyncProbe.close(SystemClock.uptimeMillis());', ''],
+    ['asyncMain.removeCallbacks(asyncRead)', 'main.removeCallbacks(asyncRead)'],
+    ['asyncProbe.complete(SystemClock.uptimeMillis(), value);', 'asyncProbe.complete(SystemClock.uptimeMillis(), AsyncProbeOutcome.PRESSED);'],
+    ['retryDownPressed = retryPressedObservationOutcome == PressedObservationOutcome.PRESSED;', 'retryDownPressed = true;'],
+    ['startAsyncDiagnostic();', 'startAsyncDiagnostic(); SystemClock.sleep(1L);'],
+  ]) {
+    assert.equal(source.split(from).length, 2, `one async binding needle: ${from}`);
+    assert.equal(contract(source.replace(from, to)), false);
+  }
+});
+
+test('actual paired async policy freezes one read and never promotes async-only entry to ordinary proof', async () => {
+  const source = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java');
+  const extract = (label) => {
+    const begin = `    // BEGIN PURE ${label} POLICY\n`, end = `    // END PURE ${label} POLICY\n`;
+    assert.equal(source.split(begin).length, 2); assert.equal(source.split(end).length, 2);
+    return source.slice(source.indexOf(begin) + begin.length, source.indexOf(end));
+  };
+  const policy = extract('ASYNC MAIN PROBE'), ordinaryPolicy = extract('TAP OBSERVATION');
+  assert.doesNotMatch(policy, /android\.|SystemClock|\b(?:Activity|Button|Rect|Instrumentation)\b/);
+  const checks = String.raw`
+        static void check(boolean value, String code) { if (!value) throw new AssertionError(code); }
+        static AsyncMainProbe setup() {
+            AsyncMainProbe probe = new AsyncMainProbe(1000, 1183);
+            check(probe.start(1065, false, true) && probe.handlerReady(1065, true) && probe.enqueue(1065), "ordinary enqueue at 1064 precedes async attempt");
+            return probe;
+        }
+        static String outcome(AsyncMainProbe probe) { return (String) AsyncMainProbe.wireValues(probe).get("outcome"); }
+        static void exercise(String name) throws Exception {
+            TapObservation ordinary = new TapObservation(1000, 100, 117, 400, 1183);
+            check(ordinary.enqueue(1064), "ordinary handler policy enqueues first");
+            AsyncMainProbe probe = setup();
+            if (name.equals("paired") || name.equals("async-only")) {
+                if (name.equals("paired")) {
+                    check(ordinary.beginSample(1068), "ordinary callback");
+                    ordinary.completeSample(1069, PressedObservationOutcome.PRESSED);
+                }
+                check(probe.begin(1070, true), "async callback same looper");
+                probe.complete(1071, AsyncProbeOutcome.PRESSED); probe.close(1181);
+                check(outcome(probe).equals("pressed"), "async positive diagnostic");
+                check(ordinary.finish(1181, name.equals("paired")) == (name.equals("paired") ?
+                    PressedObservationOutcome.PRESSED : PressedObservationOutcome.OBSERVATION_TIMEOUT), "async cannot qualify missing ordinary callback");
+                java.util.Map<String, Object> wire = AsyncMainProbe.wireValues(probe);
+                check(wire.size() == 8 && wire.get("enqueuedOffsetMs").equals(65L) && wire.get("enteredOffsetMs").equals(70L) &&
+                    wire.get("completedOffsetMs").equals(71L) && wire.get("closedOffsetMs").equals(181L) &&
+                    wire.get("handlerSameMainLooper").equals(true) && wire.get("instrumentationThreadIsMain").equals(false), "fixed public facts only");
+            } else if (name.equals("unavailable")) {
+                probe = new AsyncMainProbe(1000, 1183);
+                check(!probe.start(1065, false, false) && !probe.handlerReady(1065, true) && !probe.enqueue(1065), "public API unavailable is not a synchronous replacement");
+                probe.close(1181); check(outcome(probe).equals("unavailable"), "unavailable stays inconclusive");
+            } else if (name.equals("once")) {
+                check(!probe.start(1066, false, true) && !probe.enqueue(1066), "one attempt and one async post");
+                check(probe.begin(1068, true) && !probe.begin(1069, true), "exactly one callback read");
+                probe.complete(1070, AsyncProbeOutcome.UNPRESSED); probe.complete(1071, AsyncProbeOutcome.PRESSED);
+                check(outcome(probe).equals("unpressed"), "no resample or overwrite");
+            } else if (name.equals("wrong-looper")) {
+                check(probe.begin(1068, false), "record actual callback mismatch");
+                probe.complete(1069, AsyncProbeOutcome.PRESSED); probe.close(1181);
+                check(outcome(probe).equals("state-mismatch"), "wrong callback loop cannot publish pressed");
+                probe = new AsyncMainProbe(1000, 1183); check(probe.start(1065, false, true), "start");
+                check(!probe.handlerReady(1065, false) && !probe.enqueue(1065), "wrong handler loop cannot enqueue");
+            } else if (name.equals("late-read")) {
+                check(!probe.begin(1184, true), "absolute unchanged observation deadline");
+                probe.close(1184); check(outcome(probe).equals("observation-timeout"), "no callback is not unpressed or blocked-thread proof");
+            } else if (name.equals("late-completion")) {
+                check(probe.begin(1180, true), "timely entry"); probe.complete(1184, AsyncProbeOutcome.PRESSED);
+                probe.close(1185); check(outcome(probe).equals("observation-timeout"), "late traversal cannot publish a result");
+            } else if (name.equals("closed-read")) {
+                probe.close(1181); check(!probe.begin(1182, true), "UP fence rejects queued callback");
+            } else if (name.equals("closed-publication")) {
+                check(probe.begin(1068, true), "in-flight read"); probe.close(1181);
+                java.util.Map<String, Object> frozen = AsyncMainProbe.wireValues(probe);
+                probe.complete(1182, AsyncProbeOutcome.PRESSED); probe.error(1182);
+                check(frozen.equals(AsyncMainProbe.wireValues(probe)), "no post-close result or error publication");
+            } else if (name.equals("jdk-inflight-close")) {
+                final AsyncMainProbe shared = probe;
+                java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1), release = new java.util.concurrent.CountDownLatch(1);
+                java.util.concurrent.atomic.AtomicReference<Throwable> failure = new java.util.concurrent.atomic.AtomicReference<>();
+                Thread callback = new Thread(() -> { try {
+                    check(shared.begin(1068, true), "callback begins"); entered.countDown();
+                    check(release.await(1, java.util.concurrent.TimeUnit.SECONDS), "bounded release");
+                    shared.complete(1182, AsyncProbeOutcome.PRESSED);
+                } catch (Throwable error) { failure.set(error); } });
+                callback.setDaemon(true); callback.start();
+                try {
+                    check(entered.await(1, java.util.concurrent.TimeUnit.SECONDS), "callback entered without UI stubs");
+                    shared.close(1181);
+                    java.util.Map<String, Object> frozen = AsyncMainProbe.wireValues(shared);
+                    release.countDown(); callback.join(1000);
+                    check(!callback.isAlive() && failure.get() == null && frozen.equals(AsyncMainProbe.wireValues(shared)), "JDK in-flight publication fence");
+                } finally { release.countDown(); callback.join(1000); }
+            } else if (name.equals("freeze")) {
+                probe.close(1181); java.util.Map<String, Object> frozen = AsyncMainProbe.wireValues(probe);
+                probe.close(1182); check(frozen.equals(AsyncMainProbe.wireValues(probe)), "idempotent closure timestamp");
+            } else if (name.equals("negative")) {
+                check(probe.begin(1068, true), "timely callback"); probe.complete(1069, AsyncProbeOutcome.UNPRESSED);
+                probe.close(1181); check(outcome(probe).equals("unpressed"), "true negative remains negative");
+            } else if (name.equals("bounded")) {
+                probe.close(999999); check(AsyncMainProbe.wireValues(probe).get("closedOffsetMs").equals(150000L), "bounded public offsets");
+                check(AsyncMainProbe.wireValues(null).get("enteredOffsetMs") == null, "missing probe unknown, not false");
+            } else throw new AssertionError("unknown fixture case");
+        }
+  `;
+  const mutations = [
+    ['unavailable', 'return supported;', 'return true;'],
+    ['once', 'closed || enqueued != null', 'closed || false'],
+    ['wrong-looper', '!Boolean.TRUE.equals(callbackSameMainLooper)', 'false'],
+    ['late-read', 'entered != null || !within(now)', 'entered != null'],
+    ['late-completion', 'completed != null || !within(now)', 'completed != null'],
+    ['closed-read', 'closed || enqueued == null', 'enqueued == null'],
+    ['closed-publication', 'closed || entered == null', 'entered == null'],
+    ['jdk-inflight-close', 'closed || entered == null', 'entered == null'],
+    ['freeze', 'if (closed) return;', 'if (false) return;'],
+    ['negative', '? value : AsyncProbeOutcome.OBSERVATION_ERROR', '? AsyncProbeOutcome.PRESSED : AsyncProbeOutcome.OBSERVATION_ERROR'],
+    ['bounded', 'Math.min(150_000L, Math.max(0L, now - downTime))', 'Math.max(0L, now - downTime)'],
+  ];
+  const wrappers = [policy, ...mutations.map(([, from, to]) => {
+    assert.equal(policy.split(from).length, 2, `exact async mutation: ${from}`); return policy.replace(from, to);
+  })];
+  const generated = `public final class AsyncMainProbeFixture {\n${wrappers.map((code, index) =>
+    `private static final class Policy${index} {\n${ordinaryPolicy}\n${code}\n${checks}\n}`).join('\n')}\n` +
+    `public static void main(String[] args) throws Exception { switch (Integer.parseInt(args[0])) {\n${wrappers.map((_, index) =>
+      `case ${index}: Policy${index}.exercise(args[1]); break;`).join('\n')}\ndefault: throw new AssertionError("unknown policy"); } System.out.print("PASS"); }\n}`;
+  const temporaryRoot = process.env.RUNNER_TEMP || process.env.TMPDIR;
+  assert.ok(temporaryRoot && isAbsolute(temporaryRoot), 'an owned absolute test temporary directory is required');
+  const directory = mkdtempSync(join(temporaryRoot, 'owned-async-main-probe-'));
+  const javac = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin/javac') : 'javac';
+  const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin/java') : 'java';
+  const invoke = (command, args) => spawnSync(command, args, {
+    encoding: 'utf8', timeout: 20_000, maxBuffer: 1024 * 1024, killSignal: 'SIGKILL', cwd: directory, env: { ...process.env, TMPDIR: directory },
+  });
+  const requireProcess = (result, status) => {
+    assert.equal(result.error, undefined); assert.equal(result.signal, null); assert.equal(result.status, status, result.stdout + result.stderr);
+  };
+  try {
+    const file = join(directory, 'AsyncMainProbeFixture.java'); writeFileSync(file, generated);
+    requireProcess(invoke(javac, ['--release', '17', '-d', directory, file]), 0);
+    for (const name of ['paired', 'async-only', 'unavailable', 'once', 'wrong-looper', 'late-read', 'late-completion', 'closed-read', 'closed-publication', 'jdk-inflight-close', 'freeze', 'negative', 'bounded']) {
+      const positive = invoke(java, ['-Xmx64m', '-cp', directory, 'AsyncMainProbeFixture', '0', name]);
+      requireProcess(positive, 0); assert.equal(positive.stdout, 'PASS');
+    }
+    for (const [index, [name]] of mutations.entries()) {
+      const positive = invoke(java, ['-Xmx64m', '-cp', directory, 'AsyncMainProbeFixture', '0', name]);
+      requireProcess(positive, 0); assert.equal(positive.stdout, 'PASS');
+      const negative = invoke(java, ['-Xmx64m', '-cp', directory, 'AsyncMainProbeFixture', String(index + 1), name]);
+      requireProcess(negative, 1); assert.match(negative.stderr, /java\.lang\.AssertionError:/, name);
+      assert.doesNotMatch(negative.stderr, /(?:NoClassDefFoundError|ExceptionInInitializerError|StackOverflowError)/, name);
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('admission keeps the original identity and bounded read-only samples before one gesture', async () => {
   const source = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java');
   const section = (code, from, to) => code.slice(code.indexOf(from), code.indexOf(to));
