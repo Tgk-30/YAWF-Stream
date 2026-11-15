@@ -10,6 +10,8 @@ import { act, fireEvent, render, screen, within, waitFor } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { StrictMode, Suspense, startTransition, useState } from "react";
 import { readFileSync } from "node:fs";
+import { buildDiagnosticsReport, clearDiagnostics } from "../lib/diagnostics";
+import { defaultSettings } from "../data/settings";
 import type {
   ServerAudioInventoryLoadOptions,
   ServerAudioTrack,
@@ -120,9 +122,16 @@ const { scrobbleStartMock, scrobblePauseMock, scrobbleStopMock } = vi.hoisted(()
   scrobblePauseMock: vi.fn(),
   scrobbleStopMock: vi.fn(),
 }));
-vi.mock("../lib/diagnostics", () => ({
-  recordDiagnostic: (...args: unknown[]) => recordDiagnosticMock(...args),
-}));
+vi.mock("../lib/diagnostics", async (original) => {
+  const actual = await original<typeof import("../lib/diagnostics")>();
+  return {
+    ...actual,
+    recordDiagnostic: (...args: Parameters<typeof actual.recordDiagnostic>) => {
+      recordDiagnosticMock(...args);
+      actual.recordDiagnostic(...args);
+    },
+  };
+});
 vi.mock("../data/traktScrobble", () => ({
   scrobblePlaybackStart: (...args: unknown[]) => scrobbleStartMock(...args),
   scrobblePlaybackPause: (...args: unknown[]) => scrobblePauseMock(...args),
@@ -511,6 +520,7 @@ beforeEach(() => {
   // Keep all HTTP synthetic; individual transport tests supply real fixture URIs.
   vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n")));
   recordDiagnosticMock.mockClear();
+  clearDiagnostics();
   scrobbleStartMock.mockClear();
   scrobblePauseMock.mockClear();
   scrobbleStopMock.mockClear();
@@ -16743,7 +16753,17 @@ describe("mobile background playback lifecycle", () => {
     recordDiagnosticMock.mockClear();
     pending.reject(new Error("Old generation resolution failed")); await flush();
     expect(document.querySelector("video.player-video")).toBe(successor);
-    expect(screen.queryByRole("alert")).toBeNull(); expect(recordDiagnosticMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).toBeNull();
+    // jsdom can dispatch the successor's queued ratechange after this rejection.
+    // No stale recovery diagnostic or any other event is allowed through.
+    if (change === "revision") {
+      const calls = recordDiagnosticMock.mock.calls;
+      expect(calls.length).toBeLessThanOrEqual(1);
+      for (const [area, code, level, detail] of calls) {
+        expect([area, code, level]).toEqual(["player", "media.ratechange", "info"]);
+        expect(JSON.parse(detail)).toMatchObject({ engine: "webview-direct", currentTime: 0, paused: true });
+      }
+    } else expect(recordDiagnosticMock).not.toHaveBeenCalled();
   });
 
   it("[resume-lease] coalesces expiry with the current fresh request instead of starting a second resolver", async () => {
@@ -19994,4 +20014,53 @@ describe("owned server HLS recovery release117", () => {
     expect(warmed).toHaveBeenCalledOnce(); expect(f.refresh).toHaveBeenCalledTimes(2);
   });
 
+});
+
+
+describe("passive playback interruption export", () => {
+  function reportMedia() {
+    return buildDiagnosticsReport({ appVersion: "2.3.111", runtime: "browser", platform: "test", serverMode: false, settings: defaultSettings() })
+      .events.filter((event) => event.code.startsWith("media."));
+  }
+
+  it("[diagnostics112] exports actual mounted video waiting/playing/pause facts without opening Info or exposing the source", () => {
+    const view = render(<VideoPlayer url="https://private.invalid/private-movie.mp4" engine="webview-direct" title="Private movie title" onClose={() => {}} />);
+    const video = document.querySelector("video.player-video") as HTMLVideoElement;
+    Object.defineProperties(video, {
+      paused: { configurable: true, value: false }, ended: { configurable: true, value: false }, seeking: { configurable: true, value: false },
+      readyState: { configurable: true, value: 4 }, networkState: { configurable: true, value: 2 },
+      buffered: { configurable: true, value: { length: 0, start: () => 0, end: () => 0 } },
+    });
+    video.currentTime = 123;
+    fireEvent.waiting(video);
+    Object.defineProperty(video, "buffered", { configurable: true, value: { length: 1, start: () => 100, end: () => 160 } });
+    fireEvent.playing(video);
+    Object.defineProperty(video, "paused", { configurable: true, value: true }); fireEvent.pause(video);
+    const events = reportMedia();
+    expect(events.map((event) => event.code)).toEqual(["media.attached", "media.waiting", "media.playing", "media.pause"]);
+    expect(JSON.parse(events[1]!.detail!)).toMatchObject({ currentTime: 123, bufferAhead: 0, paused: false, readyState: 4, networkState: 2, engine: "webview-direct" });
+    expect(JSON.parse(events[2]!.detail!)).toMatchObject({ bufferAhead: 37 });
+    expect(JSON.parse(events[3]!.detail!)).toMatchObject({ paused: true });
+    expect(JSON.stringify(events)).not.toMatch(/private.invalid|private-movie|Private movie title/);
+    view.unmount(); const count = reportMedia().length;
+    fireEvent.waiting(video); document.dispatchEvent(new Event("visibilitychange"));
+    expect(reportMedia()).toHaveLength(count);
+  });
+
+  it("[diagnostics112] retires the old mounted observer on source replacement, including delayed old video events", () => {
+    const props = { title: "Replacement", onClose: () => {} };
+    const view = render(<VideoPlayer {...props} url="https://x/first.mp4" sourceRevision={1} />);
+    const oldVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+    fireEvent.waiting(oldVideo);
+    view.rerender(<VideoPlayer {...props} url="https://x/second.mp4" sourceRevision={2} />);
+    const nextVideo = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(nextVideo).not.toBe(oldVideo);
+    const count = reportMedia().length;
+    fireEvent.waiting(oldVideo); fireEvent.pause(oldVideo);
+    expect(reportMedia()).toHaveLength(count);
+    fireEvent.playing(nextVideo); expect(reportMedia().at(-1)?.code).toBe("media.playing");
+    view.unmount(); const closedCount = reportMedia().length;
+    fireEvent.pause(nextVideo); window.dispatchEvent(new Event("pagehide"));
+    expect(reportMedia()).toHaveLength(closedCount);
+  });
 });

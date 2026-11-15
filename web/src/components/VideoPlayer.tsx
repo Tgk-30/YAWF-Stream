@@ -100,6 +100,7 @@ import {
 } from "./player/PlayerPauseOverlay";
 import { registerPlayerMount } from "../lib/attention";
 import { recordDiagnostic } from "../lib/diagnostics";
+import { observePlaybackDiagnostics } from "../lib/playbackDiagnostics";
 import { mediaErrorMessage, nextHlsRecovery } from "../lib/playerReliability";
 import {
   findPreferredLanguageMatch,
@@ -3831,6 +3832,11 @@ function WebviewPlayer({
   function currentMediaEvent(video: HTMLVideoElement, minimumReadyState = 0): boolean {
     return mediaEventsCurrent(video) && (!sourceLoadRef.current.reused || video.readyState >= minimumReadyState);
   }
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video == null) return;
+    return observePlaybackDiagnostics(video, engine, () => mediaEventsCurrent(video));
+  }, [engine, sourceIdentity]);
   const assignedSourceRef = useRef<{ source: typeof sourceIdentity; url: string } | null>(null);
   const terminalRecoverySourceRef = useRef<typeof sourceIdentity | null>(null);
   function terminalRecoveryOwns(video: HTMLVideoElement): boolean {
