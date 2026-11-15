@@ -18380,7 +18380,7 @@ describe("automatic starvation95 adaptation", () => {
             "x-yawf-hls-snapshot-version": "1", "x-yawf-hls-snapshot-generation": generation,
             "x-yawf-hls-snapshot-frontier": String(frontier), "x-yawf-hls-snapshot-target": "6",
             "x-yawf-hls-snapshot-endlist": options.snapshotEndlist ? "1" : "0", "x-yawf-transcode-quality": "480p",
-            "x-yawf-transcode-start": "106", "x-yawf-transcode-audio": options.audio ? "1" : "0",
+            "x-yawf-transcode-start": new URL(String(input)).searchParams.get("start")!, "x-yawf-transcode-audio": options.audio ? "1" : "0",
           } });
         }
         if (options.pending) return manifest.promise;
@@ -19264,6 +19264,140 @@ describe("automatic starvation95 adaptation", () => {
     if (intent === "seek") expect(current.currentTime).toBe(45);
     if (intent === "pause") expect(current.paused).toBe(true);
   });
+
+  it("[manual-snapshot] preserves the stricter automatic owned-state fence", () => {
+    const source = readFileSync(new URL("./VideoPlayer.tsx", import.meta.url), "utf8");
+    expect(source).toContain('purpose === "automatic-starvation" && (automaticHandoffState == null || state == null)');
+  });
+
+  it("[manual-snapshot] keeps the original through one segment, then hands off at the quiet current clock", async () => {
+    vi.useFakeTimers();
+    const p = await setup({ snapshots: [6, 12] });
+    const original = p.video.src;
+    p.settings(); fireEvent.click(screen.getByRole("button", { name: "480p" })); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 100);
+    expect(document.querySelector("video.player-video")).toBe(p.video);
+    expect(p.video.src).toBe(original);
+    expect(p.video.pause).not.toHaveBeenCalled();
+    expect(hlsInstances).toHaveLength(0);
+    const calls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("starvation95/index.m3u8"));
+    expect(calls).toHaveLength(1);
+    expect(calls[0][1]?.cache).toBe("no-store");
+    p.video.currentTime = 101.894; // No timeupdate: sample the owned decoder at admission.
+    await advance96(500);
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("quality=480p"));
+    expect(hlsInstances.at(-1)?.config.startPosition).toBeCloseTo(1.894);
+  });
+
+  it("[manual-snapshot] applies the current paused/rate state and waits for two-times-rate lead", async () => {
+    vi.useFakeTimers();
+    const p = await setup({ snapshots: [6, 12, 18] });
+    p.settings(); fireEvent.click(screen.getByRole("button", { name: "480p" }));
+    p.video.currentTime = 104; p.video.playbackRate = 2; p.setPaused(true);
+    await settle(); expect(hlsInstances).toHaveLength(0);
+    await advance96(500); expect(hlsInstances).toHaveLength(0);
+    expect(p.video.paused).toBe(true); expect(p.video.pause).not.toHaveBeenCalled();
+    await advance96(500);
+    expect(hlsInstances.at(-1)?.config.startPosition).toBeCloseTo(4);
+  });
+
+  it("[manual-snapshot] accepts a completed short rendition and preserves legacy behavior", async () => {
+    vi.useFakeTimers();
+    const p = await setup({ snapshots: [6], snapshotEndlist: true });
+    p.settings(); fireEvent.click(screen.getByRole("button", { name: "480p" })); await settle();
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("quality=480p"));
+    p.view.unmount(); hlsInstances.length = 0;
+    const legacy = await setup();
+    legacy.settings(); fireEvent.click(screen.getByRole("button", { name: "480p" })); await settle();
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("quality=480p"));
+  });
+
+  it("[manual-snapshot] includes snapshot age when admitting the current clock", async () => {
+    vi.useFakeTimers();
+    const p = await setup({ snapshots: [12, 18] });
+    const baseFetch = globalThis.fetch; let delayFirst = true;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (delayFirst && String(input).includes("starvation95/index.m3u8")) {
+        delayFirst = false;
+        await new Promise<void>((resolve) => setTimeout(resolve, 1_500));
+      }
+      return baseFetch(input, init);
+    }));
+    p.video.currentTime = 104;
+    p.settings(); fireEvent.click(screen.getByRole("button", { name: "480p" })); await settle();
+    p.video.currentTime = 109;
+    await advance96(1_500);
+    expect(hlsInstances).toHaveLength(0); // Seven seconds lead is insufficient after 1.5 seconds in flight.
+    await advance96(500);
+    expect(hlsInstances.at(-1)?.config.startPosition).toBeCloseTo(5);
+  });
+
+  it("[manual-snapshot] preserves selected source audio while waiting for lead", async () => {
+    vi.useFakeTimers(); nativeJapanese95();
+    const p = await setup({ snapshots: [6, 12], audio: true });
+    p.settings(); fireEvent.click(screen.getByRole("button", { name: "480p" })); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 100, 1);
+    expect(hlsInstances).toHaveLength(0);
+    await advance96(500);
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("audio=1"));
+  });
+
+  it("[manual-snapshot] uses owned recovery intent when the original decoder is unsupported", async () => {
+    vi.useFakeTimers();
+    const p = await setup({ snapshots: [6, 12] });
+    Object.defineProperty(p.video, "readyState", { configurable: true, value: HTMLMediaElement.HAVE_NOTHING });
+    Object.defineProperty(p.video, "error", { configurable: true, value: { code: 4 } });
+    p.settings(); fireEvent.click(screen.getByRole("button", { name: "480p" })); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("480p", 100);
+    expect(hlsInstances).toHaveLength(0);
+    await advance96(500);
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("quality=480p"));
+    expect(hlsInstances.at(-1)?.config.startPosition).toBe(0);
+  });
+
+  it("[manual-snapshot] preserves no-state native automatic-default compatibility", async () => {
+    vi.useFakeTimers(); isTauriMock.mockReturnValue(true);
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const request = vi.fn(async (quality: ServerTranscodeQuality, position: number) => ({
+      url: `https://server.example/api/stream/default-native/index.m3u8?quality=${quality}&start=${position}`,
+      timelineOffsetSeconds: position, startPositionSeconds: 0, quality,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n480p.m3u8?generation=transcode-native\n",
+      { headers: { "x-yawf-hls-snapshot-version": "1", "x-yawf-hls-snapshot-generation": "transcode-native",
+        "x-yawf-hls-snapshot-frontier": "6", "x-yawf-hls-snapshot-target": "6", "x-yawf-hls-snapshot-endlist": "0",
+        "x-yawf-transcode-quality": "480p", "x-yawf-transcode-start": "0", "x-yawf-transcode-audio": "0" } },
+    )));
+    render(<VideoPlayer url="https://server.example/api/stream/original.mkv" engine="native-mpv"
+      title="Native default" serverOptimized={{ qualities: ["480p"], defaultQuality: "480p", request }} onClose={() => {}} />);
+    await settle();
+    expect(request).toHaveBeenCalledExactlyOnceWith("480p", 0);
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("default-native/index.m3u8"));
+  });
+
+  it("[manual-snapshot] keeps Auto compatible when the server advertises no snapshot", async () => {
+    vi.useFakeTimers();
+    const p = await setup();
+    p.settings(); fireEvent.click(screen.getByRole("button", { name: "Auto" })); await settle();
+    expect(p.request).toHaveBeenCalledExactlyOnceWith("auto", 100);
+    expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("quality=auto"));
+  });
+
+  it.each(["invalid", "generation change", "unmount", "source", "seek-before-start"] as const)(
+    "[manual-snapshot] never adopts an invalid or superseded preparation: %s", async (scenario) => {
+      vi.useFakeTimers();
+      const p = await setup({ snapshots: scenario === "invalid" ? [Number.NaN] : [6, 12],
+        ...(scenario === "generation change" ? { snapshotGeneration: ["transcode-one", "transcode-two"] } : {}) });
+      const original = p.video.src;
+      p.settings(); fireEvent.click(screen.getByRole("button", { name: "480p" })); await settle();
+      if (scenario === "unmount") p.view.unmount();
+      if (scenario === "source") p.view.rerender(<VideoPlayer {...p.props} url="https://server.example/api/stream/manual-new/movie.mp4" />);
+      if (scenario === "seek-before-start") { p.video.currentTime = 45; fireEvent.seeking(p.video); fireEvent.seeked(p.video); }
+      await advance96(500);
+      if (!["unmount", "source"].includes(scenario)) { expect(p.video.src).toBe(original); expect(p.video.pause).not.toHaveBeenCalled(); }
+      expect(hlsInstances.some((hls) => hls.loadSource.mock.calls.some(([url]) => String(url).includes("starvation95")))).toBe(false);
+    },
+  );
 
   it("[lead101] polls the same master without touching the reader until its live position has a reload-sized lead", async () => {
     vi.useFakeTimers();
