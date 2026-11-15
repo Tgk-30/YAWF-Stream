@@ -1666,12 +1666,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       // synchronously, with one queue owned by this provider across sessions.
       const queue = resumeWriteQueueRef.current ??= createQueue();
       const store = getStore();
-      const remote = store instanceof RemoteStore;
       queue.recordResume(
-        store, profileReadGenerationRef.current, remote,
-        (entry, signal) => remote
-          ? store.recordHistory(entry, signal)
-          : store.recordHistory(entry),
+        store, profileReadGenerationRef.current, store instanceof RemoteStore,
         item, progressSeconds, durationSeconds, episodeId, prefs,
       );
     },

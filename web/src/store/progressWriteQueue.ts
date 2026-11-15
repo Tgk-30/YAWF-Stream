@@ -60,10 +60,11 @@ export class ProgressWriteQueue {
   private draining: Promise<void> | null = null;
 
   recordResume(
-    store: object,
+    store: {
+      recordHistory(entry: WatchHistoryUpsert, signal?: AbortSignal): Promise<unknown>;
+    },
     generation: number,
     remote: boolean,
-    persist: (entry: WatchHistoryUpsert, signal: AbortSignal) => Promise<unknown>,
     item: MediaPreview,
     progressSeconds: number,
     durationSeconds: number | null,
@@ -123,9 +124,9 @@ export class ProgressWriteQueue {
       mergeSnapshot: mergePendingEntries,
       write: (signal, snapshot) => remote
         ? withProgressWriteTimeout(signal, (writeSignal) =>
-            persist(snapshot as typeof entry, writeSignal),
+            store.recordHistory(snapshot as typeof entry, writeSignal),
           )
-        : persist(snapshot as typeof entry, signal),
+        : store.recordHistory(snapshot as typeof entry),
     });
   }
 

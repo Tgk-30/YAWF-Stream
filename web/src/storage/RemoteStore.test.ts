@@ -34,7 +34,6 @@ function recordProgress(
 ): void {
   queue.recordResume(
     remote, 1, true,
-    (entry, signal) => remote.recordHistory(entry, signal),
     { id: mediaId, type: "movie", title: mediaId }, 10, null,
   );
 }
