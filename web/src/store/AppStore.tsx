@@ -57,7 +57,7 @@ import type {
 } from "../storage/models";
 import { getStore, swapLocalProfileStore } from "../storage";
 import { RemoteStore } from "../storage/RemoteStore";
-import type { ProgressWriteJob, ProgressWriteQueue } from "./progressWriteQueue";
+import type { ProgressWriteQueue } from "./progressWriteQueue";
 import { AutoResolveScheduler } from "../lib/autoResolve";
 import { isServerMode } from "../lib/serverMode";
 import { setNetworkMode } from "../lib/networkPolicy";
@@ -66,12 +66,6 @@ import { verifyPassword } from "../lib/passwordHash";
 import type { SettingsSection } from "../lib/settingsNavigation";
 
 const PROFILE_PROGRESS_DRAIN_TIMEOUT_MS = 12_000;
-const MAX_RESUME_WRITES_BEFORE_QUEUE_LOAD = 64;
-
-function sameResumeWriteKey(a: ProgressWriteJob, b: ProgressWriteJob): boolean {
-  return a.store === b.store && a.generation === b.generation &&
-    a.mediaId === b.mediaId && a.episodeId === b.episodeId;
-}
 import {
   dbNameForProfile,
   ensureDefaultProfile,
@@ -311,9 +305,11 @@ export interface AppStore {
     id: string,
     password?: string,
   ) => Promise<{ ok: boolean; reason?: "bad-password" | "not-found" }>;
-  /** Record a real resume position (called from the player). For series pass
-   *  the playing episode's id (`s2e5`); movies omit it / pass null. */
+  /** Record a real resume position. The lazy player screen supplies the queue
+   * factory so its implementation stays off the initial load. For series pass
+   * the playing episode's id (`s2e5`); movies omit it / pass null. */
   recordResume: (
+    createQueue: () => ProgressWriteQueue,
     item: MediaPreview,
     progressSeconds: number,
     durationSeconds: number | null,
@@ -466,8 +462,6 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     [],
   );
   const resumeWriteQueueRef = useRef<ProgressWriteQueue | null>(null);
-  const resumeWriteQueueInitRef = useRef<Promise<ProgressWriteQueue> | null>(null);
-  const pendingResumeWritesBeforeQueueRef = useRef<ProgressWriteJob[]>([]);
   const resumeWritesBlockedRef = useRef(false);
   const [cachedResolutions, setCachedResolutions] = useState<
     Record<string, CachedResolutionRecord>
@@ -529,97 +523,13 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     return auxiliaryRevisionsRef.current[slice];
   }, []);
 
-  const ensureResumeWriteQueue = useCallback((): Promise<ProgressWriteQueue> => {
-    if (resumeWriteQueueRef.current != null) {
-      return Promise.resolve(resumeWriteQueueRef.current);
-    }
-    if (resumeWriteQueueInitRef.current != null) {
-      return resumeWriteQueueInitRef.current;
-    }
-    const loading = import("./progressWriteQueue").then(({ ProgressWriteQueue }) => {
-      const queue = new ProgressWriteQueue();
-      resumeWriteQueueRef.current = queue;
-      const staged = pendingResumeWritesBeforeQueueRef.current.splice(0);
-      for (const job of staged) queue.enqueue(job);
-      return queue;
-    });
-    resumeWriteQueueInitRef.current = loading;
-    void loading.catch(() => {
-      if (resumeWriteQueueInitRef.current === loading) {
-        resumeWriteQueueInitRef.current = null;
-      }
-    });
-    return loading;
-  }, []);
-
-  const enqueueResumeWrite = useCallback((job: ProgressWriteJob) => {
-    const queue = resumeWriteQueueRef.current;
-    if (queue != null) {
-      queue.enqueue(job);
-      return;
-    }
-    const staged = pendingResumeWritesBeforeQueueRef.current;
-    const matches = staged.reduce<number[]>((found, previous, index) => {
-      if (sameResumeWriteKey(previous, job)) found.push(index);
-      return found;
-    }, []);
-    if (matches.length < 2) {
-      // Before the queue chunk arrives, retain both the first report and the
-      // newest report for this key. This mirrors active+coalesced-pending.
-      staged.push(job);
-    } else {
-      const latestIndex = matches[matches.length - 1]!;
-      const previousLatest = staged[latestIndex]!;
-      staged[latestIndex] = job.mergeSnapshot == null
-        ? job
-        : { ...job, snapshot: job.mergeSnapshot(previousLatest.snapshot, job.snapshot) };
-    }
-    const identities: ProgressWriteJob[] = [];
-    for (const candidate of staged) {
-      if (!identities.some((identity) => sameResumeWriteKey(identity, candidate))) {
-        identities.push(candidate);
-      }
-    }
-    while (identities.length > MAX_RESUME_WRITES_BEFORE_QUEUE_LOAD) {
-      const oldest = identities.shift()!;
-      for (let index = staged.length - 1; index >= 0; index -= 1) {
-        if (sameResumeWriteKey(staged[index]!, oldest)) staged.splice(index, 1);
-      }
-    }
-    // ensureResumeWriteQueue installs one rejection observer for the shared
-    // loader promise; do not attach one continuation per playback tick.
-    void ensureResumeWriteQueue();
-  }, [ensureResumeWriteQueue]);
-
   const cancelResumeGeneration = useCallback((generation: number) => {
-    pendingResumeWritesBeforeQueueRef.current =
-      pendingResumeWritesBeforeQueueRef.current.filter((job) => job.generation !== generation);
     resumeWriteQueueRef.current?.cancelGeneration(generation);
   }, []);
 
-  const flushResumeWrites = useCallback(async (initializationTimeoutMs?: number) => {
-    if (
-      resumeWriteQueueRef.current == null &&
-      pendingResumeWritesBeforeQueueRef.current.length > 0
-    ) {
-      const initialization = ensureResumeWriteQueue();
-      if (initializationTimeoutMs == null) {
-        await initialization;
-      } else {
-        let timeout: ReturnType<typeof setTimeout> | undefined;
-        const initialized = await Promise.race([
-          initialization.then(() => true),
-          new Promise<boolean>((resolve) => {
-            timeout = setTimeout(() => resolve(false), initializationTimeoutMs);
-          }),
-        ]);
-        if (timeout != null) clearTimeout(timeout);
-        if (!initialized) return false;
-      }
-    }
+  const flushResumeWrites = useCallback(async () => {
     await resumeWriteQueueRef.current?.flush();
-    return true;
-  }, [ensureResumeWriteQueue]);
+  }, []);
 
   const invalidateProfileReads = useCallback((): number => {
     const previousGeneration = profileReadGenerationRef.current;
@@ -1247,7 +1157,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     // The webview player's final progress report is emitted during unmount.
     // Drain all writes visible at this session boundary before reading the
     // updated slice, including one added while an earlier write is settling.
-    await flushResumeWrites(PROFILE_PROGRESS_DRAIN_TIMEOUT_MS).catch(() => false);
+    await flushResumeWrites().catch(() => {});
     try {
       const loaded = await loadContinueWatching();
       if (!auxiliaryReadIsCurrent(generation, "continueWatching", revision)) return;
@@ -1759,77 +1669,18 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     [auxiliaryReadIsCurrent, bumpAuxiliaryRevision, queueWatchlistWrite, refreshCachedResolutions, settleWatchlistWrite],
   );
 
-  const recordResume = useCallback(
-    (
-      item: MediaPreview,
-      progressSeconds: number,
-      durationSeconds: number | null,
-      episodeId?: string | null,
-      prefs?: PlaybackPrefs,
-    ) => {
+  const recordResume = useCallback<AppStore["recordResume"]>(
+    (createQueue, item, progressSeconds, durationSeconds, episodeId, prefs) => {
       if (resumeWritesBlockedRef.current) return;
-      const store = getStore();
-      const generation = profileReadGenerationRef.current;
-      const completed =
-        durationSeconds != null &&
-        durationSeconds > 0 &&
-        progressSeconds / durationSeconds >= 0.95;
-      // `recordHistory()` is intentionally convenient for interactive history
-      // mutations because it reads the refreshed list back. Playback progress
-      // is different: doing that every five seconds deserializes all history
-      // rows and changes the provider context for the entire app. The storage
-      // upsert already preserves omitted player prefs, so persist directly and
-      // refresh once at the playback-session boundary or when History opens.
-      const entry = {
-        mediaId: item.id,
-        episodeId: episodeId ?? null,
-        progressSeconds,
-        durationSeconds,
-        completed,
-        preview: item,
-        preferredAudioId: prefs?.preferredAudioId,
-        preferredAudioLang: prefs?.preferredAudioLang,
-        preferredSubId: prefs?.preferredSubId,
-        playbackSpeed: prefs?.playbackSpeed,
-        subtitleDelay: prefs?.subtitleDelay,
-        subtitlePosition: prefs?.subtitlePosition,
-      };
-      const mergePendingEntries = (previous: unknown, next: unknown) => {
-        const older = previous as typeof entry;
-        const newer = next as typeof entry;
-        return {
-          ...older,
-          ...newer,
-          preferredAudioId: newer.preferredAudioId === undefined
-            ? older.preferredAudioId : newer.preferredAudioId,
-          preferredAudioLang: newer.preferredAudioLang === undefined
-            ? older.preferredAudioLang : newer.preferredAudioLang,
-          preferredSubId: newer.preferredSubId === undefined
-            ? older.preferredSubId : newer.preferredSubId,
-          playbackSpeed: newer.playbackSpeed === undefined
-            ? older.playbackSpeed : newer.playbackSpeed,
-          subtitleDelay: newer.subtitleDelay === undefined
-            ? older.subtitleDelay : newer.subtitleDelay,
-          subtitlePosition: newer.subtitlePosition === undefined
-            ? older.subtitlePosition : newer.subtitlePosition,
-        };
-      };
-      enqueueResumeWrite({
-        store,
-        generation,
-        mediaId: item.id,
-        episodeId: episodeId ?? null,
-        snapshot: entry,
-        mergeSnapshot: mergePendingEntries,
-        write: (signal, snapshot) => {
-          const pendingEntry = snapshot as typeof entry;
-          return store instanceof RemoteStore
-            ? store.recordHistoryProgress(pendingEntry, signal)
-            : store.recordHistory(pendingEntry);
-        },
-      });
+      // Detail already has the queue code loaded. Admit the first report
+      // synchronously, with one queue owned by this provider across sessions.
+      const queue = resumeWriteQueueRef.current ??= createQueue();
+      queue.recordResume(
+        getStore(), profileReadGenerationRef.current, item,
+        progressSeconds, durationSeconds, episodeId, prefs,
+      );
     },
-    [enqueueResumeWrite],
+    [],
   );
 
   // Effective experience tier. Server Mode is authoritative from the profile

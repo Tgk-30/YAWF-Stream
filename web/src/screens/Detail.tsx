@@ -14,6 +14,7 @@
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useAppStore, useCachedResolutions } from "../store/AppStore";
+import { createProgressWriteQueue } from "../store/progressWriteQueue";
 import { useDetail } from "../data/detail";
 import { useStreams } from "../data/streams";
 import {
@@ -2481,10 +2482,14 @@ export function Detail() {
               // SNAPSHOTTED episode (series) so Continue Watching resumes the
               // right thing even if the picker changed mid-playback. `prefs`
               // carries the in-window player's audio/sub/speed for next time.
-              recordResume(detailItem, current, duration, player.episodeId, prefs);
+              recordResume(
+                createProgressWriteQueue, detailItem, current, duration, player.episodeId, prefs,
+              );
             }}
             onEnded={(current, duration, prefs) => {
-              recordResume(detailItem, current, duration, player.episodeId, prefs);
+              recordResume(
+                createProgressWriteQueue, detailItem, current, duration, player.episodeId, prefs,
+              );
               void queueVerifiedNextEpisode();
             }}
             // Subtitle search/translate context. The client/config are null when

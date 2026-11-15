@@ -1,3 +1,8 @@
+import type { MediaPreview } from "../models/media";
+import type { PlaybackPrefs } from "../storage/models";
+import type { Store } from "../storage/types";
+import { RemoteStore } from "../storage/RemoteStore";
+
 /** Serial, coalescing, best-effort persistence for frequently sampled progress. */
 export interface ProgressWriteJob {
   store: object;
@@ -53,6 +58,75 @@ export class ProgressWriteQueue {
   private readonly pending = new Map<string, ProgressWriteJob>();
   private active: { job: ProgressWriteJob; controller: AbortController } | null = null;
   private draining: Promise<void> | null = null;
+
+  recordResume(
+    store: Store,
+    generation: number,
+    item: MediaPreview,
+    progressSeconds: number,
+    durationSeconds: number | null,
+    episodeId?: string | null,
+    prefs?: PlaybackPrefs,
+  ): void {
+    const completed =
+      durationSeconds != null &&
+      durationSeconds > 0 &&
+      progressSeconds / durationSeconds >= 0.95;
+    // `recordHistory()` is intentionally convenient for interactive history
+    // mutations because it reads the refreshed list back. Playback progress
+    // is different: doing that every five seconds deserializes all history
+    // rows and changes the provider context for the entire app. The storage
+    // upsert already preserves omitted player prefs, so persist directly and
+    // refresh once at the playback-session boundary or when History opens.
+    const entry = {
+      mediaId: item.id,
+      episodeId: episodeId ?? null,
+      progressSeconds,
+      durationSeconds,
+      completed,
+      preview: item,
+      preferredAudioId: prefs?.preferredAudioId,
+      preferredAudioLang: prefs?.preferredAudioLang,
+      preferredSubId: prefs?.preferredSubId,
+      playbackSpeed: prefs?.playbackSpeed,
+      subtitleDelay: prefs?.subtitleDelay,
+      subtitlePosition: prefs?.subtitlePosition,
+    };
+    const mergePendingEntries = (previous: unknown, next: unknown) => {
+      const older = previous as typeof entry;
+      const newer = next as typeof entry;
+      return {
+        ...older,
+        ...newer,
+        preferredAudioId: newer.preferredAudioId === undefined
+          ? older.preferredAudioId : newer.preferredAudioId,
+        preferredAudioLang: newer.preferredAudioLang === undefined
+          ? older.preferredAudioLang : newer.preferredAudioLang,
+        preferredSubId: newer.preferredSubId === undefined
+          ? older.preferredSubId : newer.preferredSubId,
+        playbackSpeed: newer.playbackSpeed === undefined
+          ? older.playbackSpeed : newer.playbackSpeed,
+        subtitleDelay: newer.subtitleDelay === undefined
+          ? older.subtitleDelay : newer.subtitleDelay,
+        subtitlePosition: newer.subtitlePosition === undefined
+          ? older.subtitlePosition : newer.subtitlePosition,
+      };
+    };
+    this.enqueue({
+      store,
+      generation,
+      mediaId: item.id,
+      episodeId: episodeId ?? null,
+      snapshot: entry,
+      mergeSnapshot: mergePendingEntries,
+      write: (signal, snapshot) => {
+        const pendingEntry = snapshot as typeof entry;
+        return store instanceof RemoteStore
+          ? store.recordHistoryProgress(pendingEntry, signal)
+          : store.recordHistory(pendingEntry);
+      },
+    });
+  }
 
   enqueue(job: ProgressWriteJob): void {
     const storeId = this.storeId(job.store);
@@ -127,4 +201,9 @@ export class ProgressWriteQueue {
       }
     }
   }
+}
+
+/** Passed by the lazy player screen; each provider creates its own queue. */
+export function createProgressWriteQueue(): ProgressWriteQueue {
+  return new ProgressWriteQueue();
 }
