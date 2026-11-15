@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const generatedAndroidRelativePath = "web/src-tauri/gen/android";
 const cleartextPlaceholder = 'manifestPlaceholders["usesCleartextTraffic"]';
-const webkitDependency = 'implementation("androidx.webkit:webkit:1.14.0")';
+const webkitDependency = 'implementation("androidx.webkit:webkit:1.16.0")';
+const legacyWebkitDependency = 'implementation("androidx.webkit:webkit:1.14.0")';
 const minimumWebViewMajorVersion = 90;
 const leanbackFeatureTemplate = `    <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -1080,7 +1081,7 @@ class YawfSafeAreaBridge(
 
 // Register below Wry/Tauri's later navigation and custom-fullscreen callbacks.
 // This fallback has no JS entry point and can load only the fixed bundled UI.
-function patchedMainActivity(packageName) {
+function preAsyncStartupMainActivity(packageName) {
   let activity = preColdRecoveryMainActivity(packageName);
   const state = `
   private var remoteRecoveryDialog: AlertDialog? = null
@@ -1171,6 +1172,58 @@ function patchedMainActivity(packageName) {
     activity = activity.replace(before, after);
   }
   return activity;
+}
+
+// Native startup keeps Main/Tauri lifecycle synchronous, but defers the configured
+// Android window until the process coordinator observes real asynchronous readiness.
+function patchedMainActivity(packageName) {
+  let activity = preAsyncStartupMainActivity(packageName);
+  const replacements = [
+    ['  override fun onCreate(savedInstanceState: Bundle?) {\n    webViewCompatibility = inspectWebViewCompatibility()',
+     '  override fun onCreate(savedInstanceState: Bundle?) {\n    YawfWebViewStartup.bind(this)'],
+    ['    super.onCreate(savedInstanceState)\n    if (webViewCompatibility.supported) {\n      androidUpdater = YawfAndroidUpdater.attach(this)\n    }',
+     '    super.onCreate(savedInstanceState)\n    YawfWebViewStartup.showLoadingIfNeeded(this)'],
+    ['  override fun onWebViewCreate(webView: WebView) {\n',
+     `  override fun onWebViewCreate(webView: WebView) {
+    if (!YawfWebViewStartup.onWebViewCreate(this, webView)) {
+      webView.visibility = View.INVISIBLE
+      return
+    }
+    webViewCompatibility = inspectWebViewCompatibility()
+    if (webViewCompatibility.supported && !::androidUpdater.isInitialized) androidUpdater = YawfAndroidUpdater.attach(this)
+    if (YawfWebViewStartup.isResumed(this)) {
+      showWebViewCompatibilityDialog()
+      if (::androidUpdater.isInitialized) androidUpdater.onResume()
+    }
+`],
+    [`    super.onResume()
+    showWebViewCompatibilityDialog()
+    if (::androidUpdater.isInitialized) androidUpdater.onResume()`,
+     `    super.onResume()
+    YawfWebViewStartup.onResume(this)
+    if (YawfWebViewStartup.isAttachedTo(this)) {
+      showWebViewCompatibilityDialog()
+      if (::androidUpdater.isInitialized) androidUpdater.onResume()
+    }`],
+    ['  override fun onPause() {\n', '  override fun onPause() {\n    YawfWebViewStartup.onPause(this)\n'],
+    ['  override fun onDestroy() {\n', '  override fun onDestroy() {\n    YawfWebViewStartup.onDestroy(this)\n'],
+  ];
+  for (const [before, after] of replacements) {
+    if (activity.split(before).length !== 2) throw new Error("Unsupported asynchronous Android startup Activity template.");
+    activity = activity.replace(before, after);
+  }
+  return activity;
+}
+
+export function previousStartupActivitiesForTest(packageName) {
+  return [expectedMainActivity, legacyPatchedMainActivity, darkSystemBarPatchedMainActivity,
+    safeAreaPatchedMainActivity, serverPlayerPatchedMainActivity, previousPatchedMainActivity,
+    preFullscreenMainActivity, preImeMainActivity, preGestureMainActivity,
+    preColdRecoveryMainActivity, preAsyncStartupMainActivity].map((build) => build(packageName));
+}
+
+export function previousAsyncStartupMainActivityForTest(packageName) {
+  return preAsyncStartupMainActivity(packageName);
 }
 
 export function previousColdRecoveryMainActivityForTest(packageName) {
@@ -1362,8 +1415,9 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
   const dependenciesWithWebkit = `dependencies {
     ${webkitDependency}
     implementation("androidx.appcompat:appcompat:1.7.1")`;
+  const dependenciesWithLegacyWebkit = dependenciesWithWebkit.replace(webkitDependency, legacyWebkitDependency);
   const webkitState = replacementState(
-    patchedGradle,
+    patchedGradle.replace(dependenciesWithLegacyWebkit, dependenciesWithWebkit),
     dependenciesWithoutWebkit,
     dependenciesWithWebkit,
     "app/build.gradle.kts AndroidX WebKit dependency",
@@ -1371,7 +1425,8 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
   const patchedGradleWithWebkit = webkitState.output;
   if (
     !patchedGradleWithWebkit.includes(dependenciesWithWebkit) ||
-    /androidx\.webkit:webkit:(?!1\.14\.0)/.test(patchedGradleWithWebkit)
+    /androidx\.webkit:webkit:(?!1\.16\.0)/.test(patchedGradleWithWebkit) ||
+    (patchedGradleWithWebkit.match(/androidx\.webkit:webkit:/g) || []).length !== 1
   ) {
     throw new Error(
       "Generated Android WebKit dependency does not match the supported version. Refusing to patch generated sources.",
@@ -1406,7 +1461,8 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
     activity === preFullscreenMainActivity(packageName) ||
     activity === preImeMainActivity(packageName) ||
     activity === preGestureMainActivity(packageName) ||
-    activity === preColdRecoveryMainActivity(packageName);
+    activity === preColdRecoveryMainActivity(packageName) ||
+    activity === preAsyncStartupMainActivity(packageName);
   if (!activityChanged && activity !== replacementActivity) {
     throw new Error(
       "Generated Android MainActivity.kt does not match the supported Tauri Android template. Refusing to patch generated sources.",
@@ -1483,12 +1539,24 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
   }
   const finalGradle = hasFullscreenHook ? patchedGradleWithWebkit : patchedGradleWithWebkit + hook;
 
+  const startupSources = ["YawfWebViewStartup.kt", "YawfWebViewStartupGate.kt"].map((name) => {
+    const path = join(dirname(mainActivityPath), name);
+    const source = readFileSync(new URL("./android/" + name, import.meta.url), "utf8")
+      .replace(/^package com\.tgk30\.debridstreamer$/m, `package ${packageName}`);
+    if (existsSync(path) && readFileSync(path, "utf8") !== source) {
+      throw new Error("Generated Android startup helper has unrecognized changes. Refusing to overwrite.");
+    }
+    return { path, source, changed: !existsSync(path) };
+  });
+  const startupChanged = startupSources.some((entry) => entry.changed);
+
   // Validate every generated template before the first write. A drifted
   // MainActivity or manifest must not leave a half-patched Gradle file behind.
   const gradleChanged = gradle !== finalGradle;
   if (gradleChanged) writeFileSync(gradlePath, finalGradle);
   if (fullscreenChanged) writeFileSync(fullscreenPath, fullscreenSource);
   if (imeChanged) writeFileSync(imePath, imeSource);
+  for (const entry of startupSources) if (entry.changed) writeFileSync(entry.path, entry.source);
   if (activityChanged) writeFileSync(mainActivityPath, replacementActivity);
   if (manifestChanged) writeFileSync(manifestPath, patchedManifest);
   if (updaterChanged) {
@@ -1499,7 +1567,7 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
 
   return {
     androidRoot,
-    changed: gradleChanged || activityChanged || manifestChanged || updaterChanged || fullscreenChanged || imeChanged,
+    changed: gradleChanged || activityChanged || manifestChanged || updaterChanged || fullscreenChanged || imeChanged || startupChanged,
     gradleChanged,
     activityChanged,
     manifestChanged,

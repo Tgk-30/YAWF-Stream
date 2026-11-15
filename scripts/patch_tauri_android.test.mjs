@@ -209,7 +209,7 @@ test("patches the origin-attested Server Mode player bridge idempotently", () =>
     );
     assert.doesNotMatch(gradle, /usesCleartextTraffic"\] = "false"/);
     assert.equal(
-      gradle.match(/implementation\("androidx\.webkit:webkit:1\.14\.0"\)/g)?.length,
+      gradle.match(/implementation\("androidx\.webkit:webkit:1\.16\.0"\)/g)?.length,
       1,
     );
     assert.match(manifest, /android.permission.REQUEST_INSTALL_PACKAGES/);

@@ -467,6 +467,19 @@ jobs:
         working-directory: web/src-tauri/gen/android
         run: ./gradlew --no-daemon :app:compileArmDebugKotlin -x :app:rustBuildArmDebug
 
+      - name: Require Android startup construction and bootstrap behavior
+        env:
+          YAWF_REQUIRE_ANDROID_STARTUP_BEHAVIOR: "1"
+          RUSTC: rustc
+        run: |
+          node --test --test-concurrency=1 \
+            scripts/android_async_startup.test.mjs \
+            scripts/android_startup_runtime_vendor.test.mjs \
+            scripts/android_webview_startup_policy.test.mjs \
+            scripts/android_creation_completion.test.mjs \
+            scripts/android_startup_bootstrap.test.mjs \
+            scripts/android_startup_workflow.test.mjs
+
       - name: Require actual Android fullscreen controller behavior
         env:
           YAWF_REQUIRE_ANDROID_FULLSCREEN_BEHAVIOR: "1"

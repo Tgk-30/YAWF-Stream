@@ -119,10 +119,14 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [target.'cfg(target_os = "android")'.dependencies]
+# Required only with the mandatory application async-success constructor gate.
+tauri-runtime-wry = { version = "=2.12.2", default-features = false, features = ["android-app-verifies-webview-runtime"] }
 libc = "0.2"
 # Read WindowInsets from the native WebView. Android WebView does not expose
 # these as CSS env(safe-area-inset-*) values, even with viewport-fit=cover.
 jni = "0.21"
+# Application-context classloader for the private pre-WebView startup coordinator.
+ndk-context = "0.1"
 
 # Linux: Secret Service over D-Bus (sync), pure-Rust crypto (no OpenSSL system
 # dep), vendored libdbus (no system build dep) - headless-CI-friendly.
@@ -136,3 +140,8 @@ keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "ve
 libmpv2 = "5"
 libmpv2-sys = "4"
 libc = "0.2"
+
+# One exact upstream crate, with a checked Android-only opt-in advisory bypass.
+[patch.crates-io]
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }
+wry = { path = "vendor/wry" }
