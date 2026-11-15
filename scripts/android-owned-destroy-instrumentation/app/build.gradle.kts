@@ -59,7 +59,11 @@ android {
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.yawf.ownedstartupinstrumentation"
+        // Compile-only empty target model. Never build/install its main APK.
+        // AGP derives the binary instrumentation target from this ID, not
+        // from the source test-manifest override.
+        applicationId = "com.tgk30.debridstreamer"
+        testApplicationId = "com.yawf.ownedstartupinstrumentation.test"
         minSdk = 24
         targetSdk = 36
         versionCode = 1

@@ -53,10 +53,13 @@ test('API linkage is checksum-bound compile-only JAR, never packaged AAR or impl
 });
 
 test('instrumentation manifest is isolated and names the exact installed target', async () => {
+  const gradle = await read('app/build.gradle.kts');
   const appManifest = await read('app/src/main/AndroidManifest.xml');
   const testManifest = await read('app/src/androidTest/AndroidManifest.xml');
   const runner = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyInstrumentationRunner.java');
   assert.match(appManifest, /<package android:name="com\.tgk30\.debridstreamer"\s*\/>/);
+  assert.match(gradle, /applicationId = "com\.tgk30\.debridstreamer"/);
+  assert.match(gradle, /testApplicationId = "com\.yawf\.ownedstartupinstrumentation\.test"/);
   assert.match(testManifest, /android:targetPackage="com\.tgk30\.debridstreamer"/);
   assert.match(runner, /TARGET_ACTIVITY\s*=\s*"com\.tgk30\.debridstreamer\.MainActivity"/);
   assert.match(runner, /super\.callActivityOnCreate\(activity, state\);[\s\S]*?getMethod\("getPluginManager"\)/);
