@@ -37,6 +37,7 @@ export function validateReceipts(mode, summary, cases, totalBytes) {
   if (!['admission', 'full'].includes(mode) || !Number.isSafeInteger(totalBytes) || totalBytes < 0 || totalBytes > EVIDENCE_LIMIT || !summary || !cases) return false;
   const expected = mode === 'admission' ? ['admission'] : ['direct', 'hls', 'stall'];
   if (summary.mode !== mode || summary.status !== (mode === 'admission' ? 'admission-only' : 'passed') || summary.fullQualification !== (mode === 'full')) return false;
+  if (sanitizePublicBrowserBootstrap(summary.publicBrowserBootstrap)?.outcome !== 'passed') return false;
   if (Object.keys(cases).sort().join(',') !== expected.slice().sort().join(',')) return false;
   return expected.every((name) => cases[name] && cases[name].case === name && cases[name].fullQualification === false && cases[name].outcome === (mode === 'admission' ? 'admission-only' : 'passed'));
 }
@@ -68,7 +69,55 @@ export function classifyResponse(path) {
   return /^\/api\/stream\/[^/]+$/.test(path) ? 'direct-proxy' : null;
 }
 
-// Browser diagnostics are categorical only. Never retain the exception or browser logs.
+const PUBLIC_BOOTSTRAP_MESSAGE_LIMIT = 16 * 1024;
+const PUBLIC_BROWSER_ENV = Object.freeze({
+  PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', HOME: '/tmp', TMPDIR: '/qa/tmp',
+  PLAYWRIGHT_BROWSERS_PATH: '/ms-playwright', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8',
+});
+
+export function sanitizePublicBrowserBootstrap(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).sort().join(',') !== 'errorMessage,fullQualification,messageTruncated,outcome,phase,schemaVersion,scope' ||
+      value.schemaVersion !== 1 || value.scope !== 'public-browser-bootstrap-before-fixture' || value.fullQualification !== false ||
+      typeof value.messageTruncated !== 'boolean') return null;
+  if (value.outcome === 'passed' ? (value.phase !== 'complete' || value.errorMessage !== null || value.messageTruncated !== false) :
+      value.outcome !== 'failed' || !['launch', 'close'].includes(value.phase) || typeof value.errorMessage !== 'string' ||
+        Buffer.byteLength(value.errorMessage, 'utf8') > PUBLIC_BOOTSTRAP_MESSAGE_LIMIT) return null;
+  return { schemaVersion: 1, scope: 'public-browser-bootstrap-before-fixture', fullQualification: false, outcome: value.outcome,
+    phase: value.phase, errorMessage: value.errorMessage, messageTruncated: value.messageTruncated };
+}
+
+export async function runPublicBrowserBootstrap(chromium) {
+  const report = { schemaVersion: 1, scope: 'public-browser-bootstrap-before-fixture', fullQualification: false,
+    outcome: 'failed', phase: 'launch', errorMessage: null, messageTruncated: false };
+  try {
+    const browser = await chromium.launch({ headless: true, chromiumSandbox: true, env: { ...PUBLIC_BROWSER_ENV } });
+    report.phase = 'close';
+    await browser.close();
+    report.phase = 'complete'; report.outcome = 'passed';
+  } catch (error) {
+    // Raw message permission is confined to this closed-environment, no-context,
+    // pre-fixture control. Never read a stack or serialize an environment.
+    let message = 'Public bootstrap error message unavailable';
+    try { if (error instanceof Error && typeof error.message === 'string') message = error.message; } catch { }
+    const bytes = Buffer.from(message.slice(0, PUBLIC_BOOTSTRAP_MESSAGE_LIMIT), 'utf8');
+    let end = Math.min(bytes.length, PUBLIC_BOOTSTRAP_MESSAGE_LIMIT);
+    while (end > 0 && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--;
+    report.errorMessage = bytes.subarray(0, end).toString('utf8');
+    report.messageTruncated = report.errorMessage !== message;
+  }
+  const safe = sanitizePublicBrowserBootstrap(report);
+  if (!safe) throw new Error('Invalid public bootstrap report');
+  return safe;
+}
+
+export async function runCasesAfterPublicBootstrap(chromium, mode, output, summary, executeCase = runCase) {
+  summary.publicBrowserBootstrap = await runPublicBrowserBootstrap(chromium);
+  if (summary.publicBrowserBootstrap.outcome !== 'passed') throw new Error('Public browser bootstrap failed before fixture');
+  for (const name of mode === 'admission' ? ['admission'] : ['direct', 'hls', 'stall']) await executeCase(chromium, name, output);
+}
+
+// Actual-app browser diagnostics are categorical only. Never retain its exception or logs.
 const BROWSER_LAUNCH_MESSAGE_LIMIT = 64 * 1024;
 const BROWSER_LAUNCH_FACTS = [
   'namespace-denied', 'sandbox-unavailable', 'executable-missing', 'launch-enoent', 'dependency-missing',
@@ -531,7 +580,7 @@ async function main() {
   const summary = { mode, fullQualification: false, status: 'failed' };
   try {
     const { chromium } = await import('./foreground-playback/node_modules/playwright/index.mjs');
-    for (const name of mode === 'admission' ? ['admission'] : ['direct', 'hls', 'stall']) await runCase(chromium, name, output);
+    await runCasesAfterPublicBootstrap(chromium, mode, output, summary);
     summary.fullQualification = mode === 'full';
     summary.status = mode === 'full' ? 'passed' : 'admission-only';
   } finally {

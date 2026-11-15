@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { classifyBrowserLaunchFailure, classifyFixtureBootstrapLog, classifyResponse, collectBrowserPrerequisites, collectFixtureDiagnostic, evaluateProgress, parseKernelUsernsFlag, sanitizeBrowserLaunchDiagnostic, sanitizeBrowserPrerequisiteDiagnostic, sanitizeFixtureDiagnostic, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
+import { classifyBrowserLaunchFailure, classifyFixtureBootstrapLog, classifyResponse, collectBrowserPrerequisites, collectFixtureDiagnostic, evaluateProgress, parseKernelUsernsFlag, runCasesAfterPublicBootstrap, runPublicBrowserBootstrap, sanitizeBrowserLaunchDiagnostic, sanitizeBrowserPrerequisiteDiagnostic, sanitizeFixtureDiagnostic, sanitizePublicBrowserBootstrap, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
 import { buildFixtureMediaPlan } from './foreground_fixture_media_plan.mjs';
 const baseline = { time: 10, frames: 300, paused: false, seeking: false, rate: 1, hidden: false, error: null, source: 'one', wall: 1000, presented: { frames: 300 } };
 test('verified Node xz archive has its extraction prerequisite in the image bootstrap', () => {
@@ -305,9 +305,11 @@ test('positive validator rejects duration, frame, state, lifecycle, source and n
     assert.equal(validatePositiveWindow(validFirst, [good], [{ type, at: 1 }], 480_000), false);
   }
 });
-const admissionSummary = { mode: 'admission', status: 'admission-only', fullQualification: false };
+const publicBootstrapPassed = { schemaVersion: 1, scope: 'public-browser-bootstrap-before-fixture', fullQualification: false,
+  outcome: 'passed', phase: 'complete', errorMessage: null, messageTruncated: false };
+const admissionSummary = { mode: 'admission', status: 'admission-only', fullQualification: false, publicBrowserBootstrap: publicBootstrapPassed };
 const admissionCases = { admission: { case: 'admission', outcome: 'admission-only', fullQualification: false } };
-const fullSummary = { mode: 'full', status: 'passed', fullQualification: true };
+const fullSummary = { mode: 'full', status: 'passed', fullQualification: true, publicBrowserBootstrap: publicBootstrapPassed };
 const fullCases = Object.fromEntries(['direct', 'hls', 'stall'].map((name) => [name, { case: name, outcome: 'passed', fullQualification: false }]));
 test('receipt qualification rejects oversize, missing, tampered mode and false outcomes', () => {
   assert.equal(validateReceipts('admission', admissionSummary, admissionCases, 100), true);
@@ -545,5 +547,100 @@ test('cause, signal and prerequisite guards reject individual semantic mutants a
     let rejected = false;
     try { probe(mutant); } catch (error) { assert.equal(error.code, 'ERR_ASSERTION'); rejected = true; }
     assert.equal(rejected, true, 'each guard mutant must fail an actual diagnostic assertion');
+  }
+});
+
+const publicBrowserEnvironment = { PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', HOME: '/tmp', TMPDIR: '/qa/tmp',
+  PLAYWRIGHT_BROWSERS_PATH: '/ms-playwright', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' };
+function publicLauncher(events, launchError, closeError) {
+  return { launch: async (options) => {
+    assert.deepEqual(options, { headless: true, chromiumSandbox: true, env: publicBrowserEnvironment });
+    events.push('launch');
+    if (launchError) throw launchError;
+    return { close: async () => { events.push('close'); if (closeError) throw closeError; } };
+  } };
+}
+
+async function requirePublicBootstrapOrder(api) {
+  for (const [mode, cases] of [['admission', ['admission']], ['full', ['direct', 'hls', 'stall']]]) {
+    const events = [], summary = { fullQualification: false };
+    await api.runCasesAfterPublicBootstrap(publicLauncher(events), mode, 'unused', summary,
+      async (_browser, name) => events.push(name));
+    assert.deepEqual(events, ['launch', 'close', ...cases]);
+    assert.deepEqual(summary.publicBrowserBootstrap, publicBootstrapPassed);
+    assert.equal(summary.fullQualification, false);
+  }
+}
+
+async function requirePublicBootstrapBarrier(api) {
+  const events = [], summary = {};
+  await assert.rejects(api.runCasesAfterPublicBootstrap(publicLauncher(events, new Error('PUBLIC_BOOTSTRAP_TEST_DETAIL')),
+    'admission', 'unused', summary, async () => events.push('fixture')), { message: 'Public browser bootstrap failed before fixture' });
+  assert.deepEqual(events, ['launch']);
+  assert.deepEqual(summary.publicBrowserBootstrap, { ...publicBootstrapPassed, outcome: 'failed', phase: 'launch', errorMessage: 'PUBLIC_BOOTSTRAP_TEST_DETAIL' });
+}
+
+test('public sandboxed no-context bootstrap closes before every unchanged fixture case and stops on failure', async () => {
+  await requirePublicBootstrapOrder({ runCasesAfterPublicBootstrap });
+  await requirePublicBootstrapBarrier({ runCasesAfterPublicBootstrap });
+  const source = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  const main = source.slice(source.indexOf('async function main()'));
+  assert.match(main, /await runCasesAfterPublicBootstrap\(chromium, mode, output, summary\)/);
+  assert.doesNotMatch(main, /await runCase\(/);
+  assert.equal(validateReceipts('full', fullSummary, {}, 100), false, 'bootstrap alone cannot replace any playback case');
+  assert.equal(validateReceipts('full', { ...fullSummary, publicBrowserBootstrap: null }, fullCases, 100), false);
+});
+
+test('only pre-fixture public errors retain capped UTF-8 messages, never stacks or actual-app text', async () => {
+  const error = new Error('PUBLIC_BOOTSTRAP_TEST_DETAIL'); let stackReads = 0;
+  Object.defineProperty(error, 'stack', { get() { stackReads++; throw new Error('stack must not be read'); } });
+  const report = await runPublicBrowserBootstrap(publicLauncher([], error));
+  assert.equal(report.errorMessage, error.message); assert.equal(stackReads, 0);
+  assert.ok(!JSON.stringify(classifyBrowserLaunchFailure(error)).includes(error.message));
+  const closed = await runPublicBrowserBootstrap(publicLauncher([], null, new Error('PUBLIC_CLOSE_TEST_DETAIL')));
+  assert.deepEqual(closed, { ...publicBootstrapPassed, outcome: 'failed', phase: 'close', errorMessage: 'PUBLIC_CLOSE_TEST_DETAIL' });
+  for (const message of ['x'.repeat(16 * 1024 + 1), '€'.repeat(9000)]) {
+    const capped = await runPublicBrowserBootstrap(publicLauncher([], new Error(message)));
+    assert.equal(capped.messageTruncated, true);
+    assert.ok(Buffer.byteLength(capped.errorMessage, 'utf8') <= 16 * 1024);
+    assert.ok(!capped.errorMessage.includes('\ufffd'));
+  }
+});
+
+test('public bootstrap report requires exact scope, keys, byte cap and non-qualification', () => {
+  assert.deepEqual(sanitizePublicBrowserBootstrap(publicBootstrapPassed), publicBootstrapPassed);
+  const failed = { ...publicBootstrapPassed, outcome: 'failed', phase: 'launch', errorMessage: 'public detail' };
+  assert.deepEqual(sanitizePublicBrowserBootstrap(failed), failed);
+  for (const key of Object.keys(failed)) { const value = { ...failed }; delete value[key]; assert.equal(sanitizePublicBrowserBootstrap(value), null); }
+  for (const value of [{ ...failed, env: 'must-not-retain' }, { ...failed, scope: 'actual-app' }, { ...failed, fullQualification: true },
+    { ...failed, outcome: 'unknown' }, { ...failed, phase: 'complete' }, { ...failed, errorMessage: null },
+    { ...failed, errorMessage: 'x'.repeat(16 * 1024 + 1) }, { ...failed, messageTruncated: 'false' },
+    { ...publicBootstrapPassed, errorMessage: 'not a failure' },
+  ]) assert.equal(sanitizePublicBrowserBootstrap(value), null);
+});
+
+test('public bootstrap environment, schema, failure barrier and ordering mutants fail actual semantic probes', async () => {
+  const original = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  const control = '  summary.publicBrowserBootstrap = await runPublicBrowserBootstrap(chromium);';
+  const barrier = "  if (summary.publicBrowserBootstrap.outcome !== 'passed') throw new Error('Public browser bootstrap failed before fixture');";
+  const cases = "  for (const name of mode === 'admission' ? ['admission'] : ['direct', 'hls', 'stall']) await executeCase(chromium, name, output);";
+  const failed = { ...publicBootstrapPassed, outcome: 'failed', phase: 'launch', errorMessage: 'x'.repeat(16 * 1024 + 1) };
+  const mutations = [
+    ['env: { ...PUBLIC_BROWSER_ENV }', "env: { ...PUBLIC_BROWSER_ENV, EXTRA_PUBLIC_VALUE: 'public' }",
+      async (api) => assert.deepEqual(await api.runPublicBrowserBootstrap(publicLauncher([])), publicBootstrapPassed)],
+    ["Buffer.byteLength(value.errorMessage, 'utf8') > PUBLIC_BOOTSTRAP_MESSAGE_LIMIT", 'false',
+      async (api) => assert.equal(api.sanitizePublicBrowserBootstrap(failed), null)],
+    ["value.scope !== 'public-browser-bootstrap-before-fixture'", 'false',
+      async (api) => assert.equal(api.sanitizePublicBrowserBootstrap({ ...publicBootstrapPassed, scope: 'actual-app' }), null)],
+    [barrier, '', requirePublicBootstrapBarrier],
+    [[control, barrier, cases].join('\n'), [cases, control, barrier].join('\n'), requirePublicBootstrapOrder],
+  ];
+  for (const [from, to, probe] of mutations) {
+    await probe({ runPublicBrowserBootstrap, runCasesAfterPublicBootstrap, sanitizePublicBrowserBootstrap });
+    assert.equal(original.split(from).length, 2);
+    const mutant = await import(`data:text/javascript;base64,${Buffer.from(original.replace(from, to)).toString('base64')}`);
+    let rejected = false;
+    try { await probe(mutant); } catch (error) { assert.equal(error.code, 'ERR_ASSERTION'); rejected = true; }
+    assert.equal(rejected, true, 'each public bootstrap mutation must fail an actual semantic assertion');
   }
 });
