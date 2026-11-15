@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { join, isAbsolute } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 const root = new URL('./android-owned-destroy-instrumentation/', import.meta.url);
@@ -240,6 +244,219 @@ test('input diagnostics distinguish pending and negative observations without ch
   ]) {
     assert.ok(source.includes(from));
     assert.equal(diagnosticContract(source.replace(from, to)), false);
+  }
+});
+
+test('admission keeps the original identity and bounded read-only samples before one gesture', async () => {
+  const source = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java');
+  const section = (code, from, to) => code.slice(code.indexOf(from), code.indexOf(to));
+  const admissionContract = (code) => {
+    const wait = section(code, '    private TapPlan awaitStableTapPlan(', '    private static TapAdmissionSample admissionSample(');
+    const readSample = section(code, '    private static TapAdmissionSample readAdmissionSample(', '    private static TapAdmissionSample inspectAdmissionOnMain(');
+    const inspect = section(code, '    private static TapAdmissionSample inspectAdmissionOnMain(', '    private static boolean ownedFocusedActivityOnMain(');
+    return code.includes('evidence.put("retryAdmissionAdmitted", retryAdmissionState != null && retryAdmissionState.admitted && !retryAdmissionState.refused);') &&
+      code.includes('awaitStableTapPlan(activity, before.onlyRetryButton, fault, oldView)') && [
+      'new TapAdmissionState(activity, originalButton, now,',
+      'Math.min(startedAt + TOTAL_DEADLINE_MS, now + TapAdmissionState.MAX_ELAPSED_MS)',
+      'state.observe(SystemClock.elapsedRealtime(), sample) && state.readyAt(SystemClock.elapsedRealtime())',
+      'int[] bounds = state.copiedBounds();',
+      'return new TapPlan(activity, originalButton, new Rect(bounds[0], bounds[1], bounds[2], bounds[3]), state.admittedAt);',
+      'SystemClock.sleep(Math.min(TapAdmissionState.MIN_INTERVAL_MS, remaining));',
+    ].every((part) => wait.includes(part)) && [
+      'activity.runOnUiThread(() -> {',
+      'if (SystemClock.elapsedRealtime() < deadline)',
+      'result.compareAndSet(null, value)',
+      'observed.await(remaining, TimeUnit.MILLISECONDS)',
+      'SystemClock.elapsedRealtime() >= deadline',
+      'result.getAndSet(closed)',
+      'result.set(closed);',
+      'TapAdmissionReason.OBSERVATION_TIMEOUT',
+      'TapAdmissionReason.OBSERVATION_ERROR',
+    ].every((part) => readSample.includes(part)) && [
+      'owner != activity || runner.targetActivityCreateCount() != 1',
+      'runner.targetPid() != android.os.Process.myPid()',
+      'activity.isFinishing() || activity.isDestroyed()',
+      'runner.refusalCode() != null || runner.faultPlugin() != fault || fault.firstView() != oldView',
+      'fault.loadCount() != 1 || !fault.firstPluginVerified() || !fault.faultInjected()',
+      'matches.size() > 1 || (matches.size() == 1 && matches.get(0) != button)',
+      'oldView.getParent() != null || oldView.isAttachedToWindow() || webViews.size() != 0',
+      'readUniqueWryWebViewFieldOnMain(activity) != null || readUniqueHelperAcceptedWebViewOnMain(activity) != null',
+      'activity.getSystemService(Context.POWER_SERVICE)',
+      'activity.getSystemService(Context.KEYGUARD_SERVICE)',
+      'power == null || keyguard == null',
+      '!power.isInteractive()',
+      'keyguard.isKeyguardLocked()',
+      'TapAdmissionReason.SCREEN_ASLEEP',
+      'TapAdmissionReason.KEYGUARD_LOCKED',
+      'verifiedRetryScreenBoundsOnMain(activity, button)',
+    ].every((part) => inspect.includes(part)) &&
+      !/runOnMainSync|sendPointerSync|MotionEvent|performClick|dispatchTouchEvent|wakeUp\(|requestDismissKeyguard\(|newWakeLock\(/.test(wait + readSample + inspect);
+  };
+  assert.equal(admissionContract(source), true);
+  for (const [from, to] of [
+    ['evidence.put("retryAdmissionAdmitted", retryAdmissionState != null && retryAdmissionState.admitted && !retryAdmissionState.refused);', 'evidence.put("retryAdmissionAdmitted", true);'],
+    ['awaitStableTapPlan(activity, before.onlyRetryButton, fault, oldView)', 'awaitStableTapPlan(activity, null, fault, oldView)'],
+    ['Math.min(startedAt + TOTAL_DEADLINE_MS, now + TapAdmissionState.MAX_ELAPSED_MS)', 'now + TOTAL_DEADLINE_MS'],
+    ['state.observe(SystemClock.elapsedRealtime(), sample) && state.readyAt(SystemClock.elapsedRealtime())', 'true'],
+    ['result.compareAndSet(null, value)', 'result.set(value)'],
+    ['result.getAndSet(closed)', 'result.get()'],
+    ['observed.await(remaining, TimeUnit.MILLISECONDS) ||\n                    SystemClock.elapsedRealtime() >= deadline', 'observed.await(60_000, TimeUnit.MILLISECONDS) ||\n                    SystemClock.elapsedRealtime() >= deadline'],
+    ['fault.loadCount() != 1 || !fault.firstPluginVerified() || !fault.faultInjected()', 'false'],
+    ['readUniqueWryWebViewFieldOnMain(activity) != null || readUniqueHelperAcceptedWebViewOnMain(activity) != null', 'false'],
+    ['power == null || keyguard == null', 'false'],
+    ['!power.isInteractive()', 'false'],
+    ['keyguard.isKeyguardLocked()', 'false'],
+  ]) {
+    assert.equal(source.split(from).length, 2);
+    assert.equal(admissionContract(source.replace(from, to)), false);
+  }
+});
+
+test('actual extracted admission policy rejects behavioral mutants without Android SDK doubles', async () => {
+  const source = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java');
+  const begin = '    // BEGIN PURE TAP ADMISSION POLICY\n';
+  const end = '    // END PURE TAP ADMISSION POLICY\n';
+  assert.equal(source.split(begin).length, 2);
+  assert.equal(source.split(end).length, 2);
+  const policy = source.slice(source.indexOf(begin) + begin.length, source.indexOf(end));
+  assert.ok(policy.startsWith('    private enum TapAdmissionReason {'));
+  assert.equal((policy.match(/class TapAdmissionState\b/g) ?? []).length, 1);
+  assert.equal((policy.match(/class TapAdmissionSample\b/g) ?? []).length, 1);
+  assert.doesNotMatch(policy, /android\.|SystemClock|\b(?:Activity|Button|Rect|Instrumentation)\b/);
+  assert.match(source, /TapAdmissionState state = new TapAdmissionState\(activity, originalButton,/);
+  assert.match(source, /state\.observe\(SystemClock\.elapsedRealtime\(\), sample\) && state\.readyAt\(/);
+  assert.match(source, /awaitStableTapPlan\(activity, before\.onlyRetryButton, fault, oldView\)/);
+  assert.doesNotMatch(source, /buildTapPlanOnMain/);
+  const pins = await readFile(new URL('./prepare_android_owned_fault_alias.py', import.meta.url), 'utf8');
+  const sourceSha256 = createHash('sha256').update(source).digest('hex');
+  assert.ok(pins.includes(`"app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java": "${sourceSha256}"`));
+  const checks = String.raw`
+        static void check(boolean value, String code) { if (!value) throw new AssertionError(code); }
+        static TapAdmissionSample sample(Object owner, Object button, TapAdmissionReason reason, int x, long at) {
+            return new TapAdmissionSample(owner, button, reason, new int[] { x, 0, x + 10, 10 }, at);
+        }
+        static void exercise(String name) {
+            Object owner = new Object(), button = new Object();
+            TapAdmissionState state = new TapAdmissionState(owner, button, 0, 10000);
+            if (name.equals("transient")) {
+                check(!state.observe(0, sample(owner, button, TapAdmissionReason.FOCUS, 0, 0)), "focus is not admission");
+                check(!state.observe(17, sample(owner, button, TapAdmissionReason.NONE, 0, 17)), "first eligible sample is not admission");
+                check(state.observe(34, sample(owner, button, TapAdmissionReason.NONE, 0, 34)), "two stable samples admit");
+                check(state.sampleCount == 3 && state.firstBlocking == TapAdmissionReason.FOCUS && state.lastBlocking == TapAdmissionReason.FOCUS, "fixed blocking history");
+                int[] copy = state.copiedBounds(); copy[0] = 99;
+                check(state.copiedBounds()[0] == 0 && state.admittedAt == 34, "copied plan bounds and actual sample time");
+                for (TapAdmissionReason reason : new TapAdmissionReason[] { TapAdmissionReason.SCREEN_ASLEEP, TapAdmissionReason.KEYGUARD_LOCKED }) {
+                    TapAdmissionState waiting = new TapAdmissionState(owner, button, 0, 10000);
+                    check(!waiting.observe(0, sample(owner, button, reason, 0, 0)), "screen state is not admission");
+                    check(!waiting.observe(17, sample(owner, button, TapAdmissionReason.NONE, 0, 17)), "screen recovery still requires a fresh pair");
+                    check(waiting.observe(34, sample(owner, button, TapAdmissionReason.NONE, 0, 34)), "screen recovery can admit only after two eligible samples");
+                }
+            } else if (name.equals("reset")) {
+                check(!state.observe(0, sample(owner, button, TapAdmissionReason.NONE, 0, 0)), "first sample");
+                check(!state.observe(17, sample(owner, button, TapAdmissionReason.FOCUS, 0, 17)), "focus interrupts pair");
+                check(!state.observe(34, sample(owner, button, TapAdmissionReason.NONE, 0, 34)), "old eligible sample cannot survive interruption");
+                check(state.observe(51, sample(owner, button, TapAdmissionReason.NONE, 0, 51)), "fresh consecutive pair");
+            } else if (name.equals("identity")) {
+                state.observe(0, sample(owner, button, TapAdmissionReason.NONE, 0, 0));
+                check(!state.observe(17, sample(owner, new Object(), TapAdmissionReason.NONE, 0, 17)) && state.refused, "replacement button refuses immediately");
+                check(!state.observe(34, sample(owner, button, TapAdmissionReason.NONE, 0, 34)), "cannot retarget back");
+                TapAdmissionState other = new TapAdmissionState(owner, button, 0, 10000);
+                check(!other.observe(0, sample(new Object(), button, TapAdmissionReason.NONE, 0, 0)) && other.refused, "owner loss refuses");
+            } else if (name.equals("geometry")) {
+                check(!state.observe(0, sample(owner, button, TapAdmissionReason.NONE, 0, 0)), "first bounds");
+                check(!state.observe(17, sample(owner, button, TapAdmissionReason.NONE, 1, 17)), "changed bounds cannot admit");
+                check(!state.admitted && !state.refused && state.sampleCount == 2 && state.elapsedMs == 17, "two different bounds remain pending despite count and elapsed");
+                check(state.firstBlocking == TapAdmissionReason.UNSTABLE_GEOMETRY, "unstable reason");
+                check(state.observe(34, sample(owner, button, TapAdmissionReason.NONE, 1, 34)), "new identical consecutive bounds admit");
+            } else if (name.equals("deadline")) {
+                state.observe(0, sample(owner, button, TapAdmissionReason.NONE, 0, 0));
+                check(!state.observe(2001, sample(owner, button, TapAdmissionReason.NONE, 0, 17)) && state.refused, "late caller cannot admit an earlier callback");
+                TapAdmissionState clamped = new TapAdmissionState(owner, button, 100, 120);
+                clamped.observe(100, sample(owner, button, TapAdmissionReason.NONE, 0, 100));
+                check(!clamped.observe(120, sample(owner, button, TapAdmissionReason.NONE, 0, 117)), "existing total deadline clamps admission");
+                TapAdmissionState accepted = new TapAdmissionState(owner, button, 0, 10000);
+                accepted.observe(0, sample(owner, button, TapAdmissionReason.NONE, 0, 0));
+                check(accepted.observe(17, sample(owner, button, TapAdmissionReason.NONE, 0, 17)), "setup accepted plan");
+                check(!accepted.readyAt(2000), "expired final plan cannot publish");
+            } else if (name.equals("interval")) {
+                state.observe(0, sample(owner, button, TapAdmissionReason.NONE, 0, 0));
+                check(!state.observe(1, sample(owner, button, TapAdmissionReason.NONE, 0, 1)) && state.refused, "no consecutive pair without poll interval");
+            } else if (name.equals("terminal")) {
+                for (TapAdmissionReason reason : new TapAdmissionReason[] { TapAdmissionReason.OWNER, TapAdmissionReason.LIVENESS, TapAdmissionReason.IDENTITY, TapAdmissionReason.FAULT, TapAdmissionReason.CLEANUP, TapAdmissionReason.OBSERVATION_TIMEOUT, TapAdmissionReason.OBSERVATION_ERROR }) {
+                    TapAdmissionState refused = new TapAdmissionState(owner, button, 0, 10000);
+                    check(!refused.observe(0, sample(owner, button, reason, 0, 0)) && refused.refused, "terminal observation refuses immediately");
+                    check(!refused.observe(17, sample(owner, button, TapAdmissionReason.NONE, 0, 17)), "terminal refusal cannot recover into input");
+                }
+            } else if (name.equals("persistent")) {
+                for (TapAdmissionReason reason : new TapAdmissionReason[] { TapAdmissionReason.FOCUS, TapAdmissionReason.SCREEN_ASLEEP, TapAdmissionReason.KEYGUARD_LOCKED }) {
+                    TapAdmissionState waiting = new TapAdmissionState(owner, button, 0, 10000);
+                    for (long at = 0; at < 2000; at += 17) {
+                        check(!waiting.observe(at, sample(owner, button, reason, 0, at)), "persistent focus or screen loss has zero admissions");
+                    }
+                    check(!waiting.readyAt(2000) && waiting.refused && waiting.sampleCount <= TapAdmissionState.MAX_SAMPLES && waiting.elapsedMs == 2000, "bounded persistent refusal");
+                }
+                TapAdmissionState moving = new TapAdmissionState(owner, button, 0, 10000);
+                for (int index = 0; index * 17 < 2000; index++) {
+                    check(!moving.observe(index * 17, sample(owner, button, TapAdmissionReason.NONE, index % 2, index * 17)), "unstable geometry has zero admissions");
+                }
+                check(!moving.readyAt(2000), "unstable deadline");
+            } else throw new AssertionError("unknown fixture case");
+        }
+  `;
+  const mutations = [
+    ['first-sample', 'transient', 'previousBounds != null && java.util.Arrays.equals(previousBounds, sample.bounds)', 'previousBounds == null || java.util.Arrays.equals(previousBounds, sample.bounds)'],
+    ['pair-reset', 'reset', 'previousBounds = null;', '/* retained prior eligible sample */'],
+    ['identity', 'identity', 'sample.button != button', 'false'],
+    ['geometry', 'geometry', 'java.util.Arrays.equals(previousBounds, sample.bounds)', 'true'],
+    ['late-caller', 'deadline', 'now < deadline', 'true'],
+    ['poll-interval', 'interval', 'sample.observedAt - previousAt < MIN_INTERVAL_MS', 'false'],
+    ['observation-error', 'terminal', 'OBSERVATION_ERROR("observation-error", true)', 'OBSERVATION_ERROR("observation-error", false)'],
+    ['copied-bounds', 'transient', 'admittedBounds == null ? null : admittedBounds.clone()', 'admittedBounds'],
+  ];
+  const wrappers = [policy, ...mutations.map(([, , from, to]) => {
+    assert.equal(policy.split(from).length, 2, `exact mutation needle: ${from}`);
+    return policy.replace(from, to);
+  })];
+  const generated = `public final class AdmissionPolicyFixture {\n${wrappers.map((code, index) =>
+    `private static final class Policy${index} {\n${code}\n${checks}\n}`).join('\n')}\n` +
+    `public static void main(String[] args) { switch (Integer.parseInt(args[0])) {\n${wrappers.map((_, index) =>
+      `case ${index}: Policy${index}.exercise(args[1]); break;`).join('\n')}\ndefault: throw new AssertionError("unknown policy"); } System.out.print("PASS"); }\n}`;
+  assert.equal(generated.split(policy).length, 2, 'the unmodified policy bytes occur exactly once');
+  const temporaryRoot = process.env.RUNNER_TEMP || process.env.TMPDIR;
+  assert.ok(temporaryRoot && isAbsolute(temporaryRoot), 'an owned absolute test temporary directory is required');
+  const directory = mkdtempSync(join(temporaryRoot, 'owned-admission-policy-'));
+  const javac = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin/javac') : 'javac';
+  const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin/java') : 'java';
+  const invoke = (command, args) => spawnSync(command, args, {
+    encoding: 'utf8', timeout: 20_000, maxBuffer: 1024 * 1024, killSignal: 'SIGKILL',
+    cwd: directory, env: { ...process.env, TMPDIR: directory },
+  });
+  const requireProcess = (result, status) => {
+    assert.equal(result.error, undefined, 'fixture process must not time out or fail to spawn');
+    assert.equal(result.signal, null, 'fixture process must not crash');
+    assert.equal(result.status, status, result.stdout + result.stderr);
+  };
+  try {
+    const file = join(directory, 'AdmissionPolicyFixture.java');
+    writeFileSync(file, generated);
+    requireProcess(invoke(javac, ['--release', '17', '-d', directory, file]), 0);
+    for (const name of ['transient', 'reset', 'identity', 'geometry', 'deadline', 'interval', 'terminal', 'persistent']) {
+      const positive = invoke(java, ['-Xmx64m', '-cp', directory, 'AdmissionPolicyFixture', '0', name]);
+      requireProcess(positive, 0);
+      assert.equal(positive.stdout, 'PASS');
+    }
+    for (const [index, [label, name]] of mutations.entries()) {
+      const positive = invoke(java, ['-Xmx64m', '-cp', directory, 'AdmissionPolicyFixture', '0', name]);
+      requireProcess(positive, 0);
+      assert.equal(positive.stdout, 'PASS');
+      const negative = invoke(java, ['-Xmx64m', '-cp', directory, 'AdmissionPolicyFixture', String(index + 1), name]);
+      requireProcess(negative, 1);
+      assert.match(negative.stderr, /java\.lang\.AssertionError:/, label);
+      assert.doesNotMatch(negative.stderr, /ExceptionInInitializerError|NoClassDefFoundError|OutOfMemoryError/);
+    }
+    console.log(`Admission policy source SHA-256 ${sourceSha256}; extracted SHA-256 ${createHash('sha256').update(policy).digest('hex')}`);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 

@@ -2,10 +2,12 @@ package com.yawf.ownedstartup;
 
 import android.app.Activity;
 import android.app.Instrumentation;
+import android.app.KeyguardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Rect;
 import android.os.Bundle;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.view.InputDevice;
 import android.view.MotionEvent;
@@ -64,6 +66,7 @@ public final class OwnedDestroyRetryTest {
     private boolean retryOriginalButtonDetachedAfterUp;
     private Long retryDownCallElapsedMs;
     private PressedObservationOutcome retryPressedObservationOutcome = PressedObservationOutcome.NOT_ATTEMPTED;
+    private TapAdmissionState retryAdmissionState;
     private boolean sameActivityAfterRetry;
     private boolean wryOwnsNewWebView;
     private boolean activityReferencesNewWebView;
@@ -116,7 +119,8 @@ public final class OwnedDestroyRetryTest {
         require(readUniqueWryWebViewField(activity) == null, "WRY_WEBVIEW_FIELD_NOT_CLEARED_BEFORE_RETRY");
         require(readUniqueHelperAcceptedWebView(activity) == null, "HELPER_ACCEPTED_WEBVIEW_NOT_CLEARED_BEFORE_RETRY");
         require(before.decorWebViewCount == 0, "DECOR_STILL_OWNS_WEBVIEW_BEFORE_RETRY");
-        require(before.retryButtonCount == 1 && before.retryButtonShownAndEnabled, "RETRY_BUTTON_NOT_UNIQUE_SHOWN_ENABLED");
+        require(before.retryButtonCount == 1 && before.retryButtonShownAndEnabled && before.onlyRetryButton != null,
+                "RETRY_BUTTON_NOT_UNIQUE_SHOWN_ENABLED");
         oldDetachedBeforeTap = true;
         wryClearedBeforeTap = true;
         helperClearedBeforeTap = true;
@@ -124,7 +128,7 @@ public final class OwnedDestroyRetryTest {
         uniqueRetryButtonBeforeTap = true;
 
         phase = "ONE_VERIFIED_NATIVE_TAP";
-        TapPlan tap = buildTapPlanOnMain(activity);
+        TapPlan tap = awaitStableTapPlan(activity, before.onlyRetryButton, fault, oldView);
         require(SystemClock.elapsedRealtime() - tap.capturedAt <= TAP_PLAN_MAX_AGE_MS, "RETRY_TAP_PLAN_EXPIRED");
         require(tapCount == 0, "RETRY_TAP_ALREADY_USED");
         sendExactlyOneTap(instrumentation, tap);
@@ -347,7 +351,7 @@ public final class OwnedDestroyRetryTest {
                     retryButtons.get(0).isEnabled() && retryButtons.get(0).isClickable() &&
                     retryButtons.get(0).isAttachedToWindow();
             result.set(new UiSnapshot(webViews.size(), webViews.size() == 1 ? webViews.get(0) : null,
-                    retryButtons.size(), retryReady));
+                    retryButtons.size(), retryReady, retryButtons.size() == 1 ? retryButtons.get(0) : null));
         });
         UiSnapshot snapshot = result.get();
         if (snapshot == null) throw new IllegalStateException("MAIN_THREAD_INSPECTION_MISSING");
@@ -365,27 +369,120 @@ public final class OwnedDestroyRetryTest {
         }
     }
 
-    private static TapPlan buildTapPlanOnMain(Activity activity) {
-        AtomicReference<TapPlan> result = new AtomicReference<>();
-        OwnedDestroyInstrumentationRunner.currentRunner().runOnMainSync(() -> {
-            try {
-                View decor = activity.getWindow().getDecorView();
-                List<WebView> webViews = new ArrayList<>();
-                List<Button> matches = new ArrayList<>();
-                collect(decor, webViews, matches);
-                if (webViews.size() != 0 || matches.size() != 1) return;
-                Button button = matches.get(0);
-                Rect screenBounds = verifiedRetryScreenBoundsOnMain(activity, button);
-                if (screenBounds != null) {
-                    result.set(new TapPlan(activity, button, screenBounds, SystemClock.elapsedRealtime()));
-                }
-            } catch (Throwable ignored) {
-                // A failed observation must not throw on the target UI thread.
+    private TapPlan awaitStableTapPlan(Activity activity, Button originalButton, FaultOncePlugin fault, WebView oldView) {
+        long now = SystemClock.elapsedRealtime();
+        TapAdmissionState state = new TapAdmissionState(activity, originalButton, now,
+                Math.min(startedAt + TOTAL_DEADLINE_MS, now + TapAdmissionState.MAX_ELAPSED_MS));
+        retryAdmissionState = state;
+        while (!state.refused) {
+            TapAdmissionSample sample = readAdmissionSample(activity, originalButton, fault, oldView, state.deadline);
+            if (state.observe(SystemClock.elapsedRealtime(), sample) && state.readyAt(SystemClock.elapsedRealtime())) {
+                int[] bounds = state.copiedBounds();
+                return new TapPlan(activity, originalButton, new Rect(bounds[0], bounds[1], bounds[2], bounds[3]), state.admittedAt);
             }
-        });
-        TapPlan plan = result.get();
-        if (plan == null) throw new IllegalStateException("RETRY_TAP_PLAN_MISSING");
-        return plan;
+            if (state.refused) break;
+            long remaining = state.deadline - SystemClock.elapsedRealtime();
+            if (remaining <= 0) {
+                state.expire(SystemClock.elapsedRealtime());
+                break;
+            }
+            SystemClock.sleep(Math.min(TapAdmissionState.MIN_INTERVAL_MS, remaining));
+        }
+        throw new IllegalStateException("RETRY_TAP_ADMISSION_REFUSED");
+    }
+
+    private static TapAdmissionSample admissionSample(Object owner, Object button, TapAdmissionReason reason, Rect bounds) {
+        return new TapAdmissionSample(owner, button, reason,
+                bounds == null ? null : new int[] { bounds.left, bounds.top, bounds.right, bounds.bottom },
+                SystemClock.elapsedRealtime());
+    }
+
+    private static TapAdmissionSample readAdmissionSample(Activity activity, Button button, FaultOncePlugin fault,
+            WebView oldView, long deadline) {
+        TapAdmissionSample closed = admissionSample(activity, button, TapAdmissionReason.OBSERVATION_TIMEOUT, null);
+        AtomicReference<TapAdmissionSample> result = new AtomicReference<>();
+        CountDownLatch observed = new CountDownLatch(1);
+        try {
+            activity.runOnUiThread(() -> {
+                try {
+                    if (SystemClock.elapsedRealtime() < deadline) {
+                        TapAdmissionSample value = inspectAdmissionOnMain(activity, button, fault, oldView);
+                        if (SystemClock.elapsedRealtime() < deadline) result.compareAndSet(null, value);
+                    }
+                } catch (Throwable ignored) {
+                    if (SystemClock.elapsedRealtime() < deadline) {
+                        result.compareAndSet(null, admissionSample(activity, button, TapAdmissionReason.OBSERVATION_ERROR, null));
+                    }
+                } finally {
+                    observed.countDown();
+                }
+            });
+            long remaining = deadline - SystemClock.elapsedRealtime();
+            if (remaining <= 0 || !observed.await(remaining, TimeUnit.MILLISECONDS) ||
+                    SystemClock.elapsedRealtime() >= deadline) return closed;
+            TapAdmissionSample value = result.getAndSet(closed);
+            return value == null ? closed : value;
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (RuntimeException | LinkageError ignored) {
+            // Return only a fixed diagnostic reason, never exception text.
+        } finally {
+            result.set(closed);
+        }
+        return admissionSample(activity, button, TapAdmissionReason.OBSERVATION_ERROR, null);
+    }
+
+    private static TapAdmissionSample inspectAdmissionOnMain(Activity activity, Button button, FaultOncePlugin fault, WebView oldView) {
+        OwnedDestroyInstrumentationRunner runner = OwnedDestroyInstrumentationRunner.currentRunner();
+        Activity owner = runner.targetActivity();
+        if (owner != activity || runner.targetActivityCreateCount() != 1 || runner.targetPid() != android.os.Process.myPid() ||
+                !OwnedDestroyInstrumentationRunner.TARGET_PACKAGE.equals(activity.getPackageName()) ||
+                !OwnedDestroyInstrumentationRunner.TARGET_ACTIVITY.equals(activity.getClass().getName())) {
+            return admissionSample(owner, button, TapAdmissionReason.OWNER, null);
+        }
+        if (activity.isFinishing() || activity.isDestroyed()) return admissionSample(owner, button, TapAdmissionReason.LIVENESS, null);
+        if (runner.refusalCode() != null || runner.faultPlugin() != fault || fault.firstView() != oldView ||
+                fault.loadCount() != 1 || !fault.firstPluginVerified() || !fault.faultInjected()) {
+            return admissionSample(owner, button, TapAdmissionReason.FAULT, null);
+        }
+        View decor = activity.getWindow().getDecorView();
+        List<WebView> webViews = new ArrayList<>();
+        List<Button> matches = new ArrayList<>();
+        collect(decor, webViews, matches);
+        if (matches.size() > 1 || (matches.size() == 1 && matches.get(0) != button) ||
+                (matches.isEmpty() && button.isAttachedToWindow())) {
+            return admissionSample(owner, matches.size() == 1 ? matches.get(0) : null, TapAdmissionReason.IDENTITY, null);
+        }
+        if (oldView.getParent() != null || oldView.isAttachedToWindow() || webViews.size() != 0 ||
+                readUniqueWryWebViewFieldOnMain(activity) != null || readUniqueHelperAcceptedWebViewOnMain(activity) != null) {
+            return admissionSample(owner, button, TapAdmissionReason.CLEANUP, null);
+        }
+        if (!activity.hasWindowFocus() || !decor.hasWindowFocus()) {
+            PowerManager power = (PowerManager) activity.getSystemService(Context.POWER_SERVICE);
+            KeyguardManager keyguard = (KeyguardManager) activity.getSystemService(Context.KEYGUARD_SERVICE);
+            if (power == null || keyguard == null) return admissionSample(owner, button, TapAdmissionReason.OBSERVATION_ERROR, null);
+            if (!power.isInteractive()) return admissionSample(owner, button, TapAdmissionReason.SCREEN_ASLEEP, null);
+            if (keyguard.isKeyguardLocked()) return admissionSample(owner, button, TapAdmissionReason.KEYGUARD_LOCKED, null);
+            return admissionSample(owner, button, TapAdmissionReason.FOCUS, null);
+        }
+        if (!decor.isAttachedToWindow() || !button.isAttachedToWindow()) return admissionSample(owner, button, TapAdmissionReason.ATTACHMENT, null);
+        if (!button.isShown() || !button.isEnabled() || !button.isClickable()) return admissionSample(owner, button, TapAdmissionReason.INTERACTION, null);
+        if (!button.hasOnClickListeners()) return admissionSample(owner, button, TapAdmissionReason.LISTENER, null);
+        if (button.getWidth() <= 0 || button.getHeight() <= 0) return admissionSample(owner, button, TapAdmissionReason.DIMENSIONS, null);
+        if (button.getRootView() != decor.getRootView()) return admissionSample(owner, button, TapAdmissionReason.ROOT, null);
+        Rect bounds = verifiedRetryScreenBoundsOnMain(activity, button);
+        if (bounds != null) return admissionSample(owner, button, TapAdmissionReason.NONE, bounds);
+        Rect visible = new Rect();
+        if (!button.getGlobalVisibleRect(visible) || visible.isEmpty()) return admissionSample(owner, button, TapAdmissionReason.VISIBLE_BOUNDS, null);
+        int[] rootOffset = new int[2];
+        button.getRootView().getLocationOnScreen(rootOffset);
+        visible.offset(rootOffset[0], rootOffset[1]);
+        int[] location = new int[2];
+        button.getLocationOnScreen(location);
+        if (!visible.intersect(new Rect(location[0], location[1], location[0] + button.getWidth(), location[1] + button.getHeight()))) {
+            return admissionSample(owner, button, TapAdmissionReason.INTERSECTION, null);
+        }
+        return admissionSample(owner, button, TapAdmissionReason.OBSERVATION_ERROR, null);
     }
 
     private static boolean ownedFocusedActivityOnMain(Activity activity) {
@@ -606,6 +703,11 @@ public final class OwnedDestroyRetryTest {
         evidence.put("retryOriginalButtonDetachedAfterUp", retryOriginalButtonDetachedAfterUp);
         evidence.put("retryDownCallElapsedMs", retryDownCallElapsedMs == null ? JSONObject.NULL : retryDownCallElapsedMs);
         evidence.put("retryPressedObservationOutcome", retryPressedObservationOutcome.wireValue);
+        evidence.put("retryAdmissionAdmitted", retryAdmissionState != null && retryAdmissionState.admitted && !retryAdmissionState.refused);
+        evidence.put("retryAdmissionFirstBlockingReason", retryAdmissionState == null ? "not-started" : retryAdmissionState.firstBlocking.wireValue);
+        evidence.put("retryAdmissionLastBlockingReason", retryAdmissionState == null ? "not-started" : retryAdmissionState.lastBlocking.wireValue);
+        evidence.put("retryAdmissionElapsedMs", retryAdmissionState == null ? 0L : retryAdmissionState.elapsedMs);
+        evidence.put("retryAdmissionSampleCount", retryAdmissionState == null ? 0 : retryAdmissionState.sampleCount);
         evidence.put("oldWebViewDetached", first != null && viewDetachedOnMain(first));
         evidence.put("newWebViewDistinctAttached", first != null && second != null && first != second &&
                 viewAttachedOnMain(second));
@@ -631,11 +733,115 @@ public final class OwnedDestroyRetryTest {
         final WebView onlyDecorWebView;
         final int retryButtonCount;
         final boolean retryButtonShownAndEnabled;
-        UiSnapshot(int webViews, WebView onlyWebView, int retryButtons, boolean retryReady) {
+        final Button onlyRetryButton;
+        UiSnapshot(int webViews, WebView onlyWebView, int retryButtons, boolean retryReady, Button onlyRetryButton) {
             decorWebViewCount = webViews; onlyDecorWebView = onlyWebView;
             retryButtonCount = retryButtons; retryButtonShownAndEnabled = retryReady;
+            this.onlyRetryButton = onlyRetryButton;
         }
     }
+
+    // BEGIN PURE TAP ADMISSION POLICY
+    private enum TapAdmissionReason {
+        NOT_STARTED("not-started", true), NONE("none", false), OWNER("owner", true), LIVENESS("liveness", true),
+        IDENTITY("identity", true), FAULT("fault", true), CLEANUP("cleanup", true), FOCUS("focus", false),
+        SCREEN_ASLEEP("screen-asleep", false), KEYGUARD_LOCKED("keyguard-locked", false),
+        ATTACHMENT("attachment", false), INTERACTION("interaction", false), LISTENER("listener", false),
+        DIMENSIONS("dimensions", false), ROOT("root", false), VISIBLE_BOUNDS("visible-bounds", false),
+        INTERSECTION("intersection", false), UNSTABLE_GEOMETRY("unstable-geometry", false),
+        OBSERVATION_TIMEOUT("observation-timeout", true), OBSERVATION_ERROR("observation-error", true),
+        DEADLINE("deadline", true), SAMPLE_LIMIT("sample-limit", true), SAMPLE_INTERVAL("sample-interval", true);
+
+        final String wireValue;
+        final boolean terminal;
+        TapAdmissionReason(String wireValue, boolean terminal) { this.wireValue = wireValue; this.terminal = terminal; }
+    }
+
+    private static final class TapAdmissionSample {
+        final Object owner;
+        final Object button;
+        final TapAdmissionReason reason;
+        final int[] bounds;
+        final long observedAt;
+        TapAdmissionSample(Object owner, Object button, TapAdmissionReason reason, int[] bounds, long observedAt) {
+            this.owner = owner; this.button = button; this.reason = reason;
+            this.bounds = bounds == null ? null : bounds.clone(); this.observedAt = observedAt;
+        }
+    }
+
+    private static final class TapAdmissionState {
+        static final long MAX_ELAPSED_MS = 2_000L;
+        static final long MIN_INTERVAL_MS = 17L;
+        static final int MAX_SAMPLES = 128;
+        final Object owner;
+        final Object button;
+        final long startedAt;
+        final long deadline;
+        TapAdmissionReason firstBlocking = TapAdmissionReason.NONE;
+        TapAdmissionReason lastBlocking = TapAdmissionReason.NONE;
+        long elapsedMs;
+        int sampleCount;
+        boolean refused;
+        boolean admitted;
+        long admittedAt;
+        private long previousAt;
+        private int[] previousBounds;
+        private int[] admittedBounds;
+
+        TapAdmissionState(Object owner, Object button, long startedAt, long totalDeadline) {
+            this.owner = owner; this.button = button; this.startedAt = startedAt;
+            this.deadline = Math.min(totalDeadline, startedAt + MAX_ELAPSED_MS);
+            if (owner == null) block(TapAdmissionReason.OWNER);
+            else if (button == null) block(TapAdmissionReason.IDENTITY);
+            else if (deadline <= startedAt) expire(startedAt);
+        }
+
+        private boolean withinDeadline(long now) { return now >= startedAt && now < deadline; }
+        private void clock(long now) { elapsedMs = Math.min(MAX_ELAPSED_MS, Math.max(0L, now - startedAt)); }
+        private void block(TapAdmissionReason reason) {
+            if (firstBlocking == TapAdmissionReason.NONE) firstBlocking = reason;
+            lastBlocking = reason;
+            previousBounds = null;
+            if (reason.terminal) { refused = true; admitted = false; admittedBounds = null; }
+        }
+
+        void expire(long now) { clock(now); block(TapAdmissionReason.DEADLINE); }
+        boolean readyAt(long now) {
+            clock(now);
+            if (!withinDeadline(now)) expire(now);
+            return admitted && !refused;
+        }
+
+        boolean observe(long now, TapAdmissionSample sample) {
+            if (refused || admitted) return readyAt(now);
+            clock(now);
+            if (sampleCount >= MAX_SAMPLES) { block(TapAdmissionReason.SAMPLE_LIMIT); return false; }
+            sampleCount++;
+            if (sample == null || sample.reason == null) { block(TapAdmissionReason.OBSERVATION_ERROR); return false; }
+            if (sample.owner != owner) { block(TapAdmissionReason.OWNER); return false; }
+            if (sample.button != button) { block(TapAdmissionReason.IDENTITY); return false; }
+            if (sample.reason.terminal) { block(sample.reason); return false; }
+            if (!withinDeadline(now) || sample.observedAt >= deadline) { expire(now); return false; }
+            if (sample.observedAt < startedAt || sample.observedAt > now) { block(TapAdmissionReason.OBSERVATION_ERROR); return false; }
+            if (sample.reason != TapAdmissionReason.NONE) { block(sample.reason); return false; }
+            if (sample.bounds == null || sample.bounds.length != 4 || sample.bounds[0] >= sample.bounds[2] || sample.bounds[1] >= sample.bounds[3]) {
+                block(TapAdmissionReason.VISIBLE_BOUNDS); return false;
+            }
+            if (previousBounds != null && sample.observedAt - previousAt < MIN_INTERVAL_MS) {
+                block(TapAdmissionReason.SAMPLE_INTERVAL); return false;
+            }
+            if (previousBounds != null && java.util.Arrays.equals(previousBounds, sample.bounds)) {
+                admittedBounds = sample.bounds.clone(); admittedAt = sample.observedAt; admitted = true;
+                return true;
+            }
+            if (previousBounds != null) block(TapAdmissionReason.UNSTABLE_GEOMETRY);
+            previousBounds = sample.bounds.clone(); previousAt = sample.observedAt;
+            return false;
+        }
+
+        int[] copiedBounds() { return admittedBounds == null ? null : admittedBounds.clone(); }
+    }
+    // END PURE TAP ADMISSION POLICY
 
     private enum PressedObservationOutcome {
         NOT_ATTEMPTED("not-attempted"),

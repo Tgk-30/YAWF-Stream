@@ -38,7 +38,7 @@ BOOL_FIELDS = (
     "targetPackageMatched", "targetPidMatched", "firstPluginVerified", "faultInjectedOnce",
     "oldDetachedBeforeTap", "wryClearedBeforeTap", "helperAcceptedClearedBeforeTap",
     "noDecorWebViewBeforeTap", "uniqueShownEnabledRetryBeforeTap", "oldWebViewDetached",
-    "retryDownPressed", "retryOriginalButtonDetachedAfterUp",
+    "retryDownPressed", "retryOriginalButtonDetachedAfterUp", "retryAdmissionAdmitted",
     "newWebViewDistinctAttached", "sameActivityAfterRetry", "wryOwnsNewWebView",
     "activityReferencesNewWebView", "soleDecorWebViewAfterRetry", "retryUiGoneAfterRetry",
     "retryUiGone", "pluginHandleLoaded",
@@ -49,10 +49,16 @@ PHASES = {"NOT_STARTED", "PREFLIGHT", "LAUNCH_ONCE", "PRE_RETRY_ASSERTIONS",
 FAILURE_CODES = {""} | {phase + "_FAILED" for phase in PHASES}
 PRESSED_OBSERVATION_OUTCOMES = {"not-attempted", "budget-skipped", "observation-timeout",
                                 "state-mismatch", "unpressed", "pressed", "observation-error"}
+ADMISSION_REASONS = {"not-started", "none", "owner", "liveness", "identity", "fault", "cleanup", "focus", "screen-asleep", "keyguard-locked",
+                     "attachment", "interaction", "listener", "dimensions", "root", "visible-bounds", "intersection",
+                     "unstable-geometry", "observation-timeout", "observation-error", "deadline", "sample-limit", "sample-interval"}
+ADMISSION_REFUSALS = {"not-started", "owner", "liveness", "identity", "fault", "cleanup",
+                      "observation-timeout", "observation-error", "deadline", "sample-limit", "sample-interval"}
 EVIDENCE_KEYS = set(BOOL_FIELDS) | {
     "schemaVersion", "scope", "phase", "qualification", "failureCode", "elapsedMs",
     "tapCount", "targetActivityCreates", "pluginLoadCount", "retryDownCallElapsedMs",
     "retryPressedObservationOutcome",
+    "retryAdmissionFirstBlockingReason", "retryAdmissionLastBlockingReason", "retryAdmissionElapsedMs", "retryAdmissionSampleCount",
 }
 
 
@@ -122,6 +128,11 @@ def evidence(output):
             (type(value["retryDownCallElapsedMs"]) is int and 0 <= value["retryDownCallElapsedMs"] <= 150000), "EVIDENCE_TYPE")
     require(type(value["retryPressedObservationOutcome"]) is str, "EVIDENCE_TYPE")
     require(value["retryPressedObservationOutcome"] in PRESSED_OBSERVATION_OUTCOMES, "EVIDENCE_INPUT_OUTCOME")
+    for name in ("retryAdmissionFirstBlockingReason", "retryAdmissionLastBlockingReason"):
+        require(type(value[name]) is str, "EVIDENCE_TYPE")
+        require(value[name] in ADMISSION_REASONS, "EVIDENCE_ADMISSION_REASON")
+    for name, cap in (("retryAdmissionElapsedMs", 2000), ("retryAdmissionSampleCount", 128)):
+        require(type(value[name]) is int and 0 <= value[name] <= cap, "EVIDENCE_TYPE")
     safe = dict(value)
     safe["phase"] = value["phase"] if value["phase"] in PHASES else "UNRECOGNIZED_MODULE_PHASE"
     safe["failureCode"] = value["failureCode"] if value["failureCode"] in FAILURE_CODES else "UNRECOGNIZED_MODULE_FAILURE"
@@ -137,6 +148,9 @@ def evidence(output):
             all(value[name] for name in BOOL_FIELDS), "MODULE_FACTS")
     qualify(value["retryPressedObservationOutcome"] == "pressed" and value["retryDownPressed"] is True and
             type(value["retryDownCallElapsedMs"]) is int, "MODULE_INPUT_FACTS")
+    qualify(value["retryAdmissionSampleCount"] >= 2 and 17 <= value["retryAdmissionElapsedMs"] < 2000 and
+            not any(value[name] in ADMISSION_REFUSALS for name in
+                    ("retryAdmissionFirstBlockingReason", "retryAdmissionLastBlockingReason")), "MODULE_ADMISSION_FACTS")
     qualify(len(re.findall(r"(?m)^OK \(1 test\)\s*$", output)) == 1, "JUNIT_ONE_TEST")
     qualify(re.findall(r"(?m)^INSTRUMENTATION_CODE: (-?\d+)\s*$", output) == ["-1"], "INSTRUMENTATION_COMPLETION")
     qualify(not any(mark in output for mark in ("FAILURES!!!", "INSTRUMENTATION_FAILED", "INSTRUMENTATION_ABORTED", "Process crashed.")), "INSTRUMENTATION_FAILED")

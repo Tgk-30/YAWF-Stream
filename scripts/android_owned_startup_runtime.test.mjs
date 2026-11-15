@@ -23,7 +23,7 @@ def dex(name, definition):
  b[offset:]=data;b[12:32]=hashlib.sha1(b[32:]).digest();struct.pack_into('<I',b,8,zlib.adler32(b[12:])&0xffffffff);return bytes(b)
 
 def proof():
- value={key:True for key in m.BOOL_FIELDS};value.update(schemaVersion=1,scope='selected_first_plugin_load_failure_then_one_native_retry',phase='QUALIFIED_SELECTED_STARTUP_RETRY_ONLY',qualification=True,failureCode='',elapsedMs=10000,tapCount=1,targetActivityCreates=1,pluginLoadCount=2,retryDownCallElapsedMs=10,retryPressedObservationOutcome='pressed');return value
+ value={key:True for key in m.BOOL_FIELDS};value.update(schemaVersion=1,scope='selected_first_plugin_load_failure_then_one_native_retry',phase='QUALIFIED_SELECTED_STARTUP_RETRY_ONLY',qualification=True,failureCode='',elapsedMs=10000,tapCount=1,targetActivityCreates=1,pluginLoadCount=2,retryDownCallElapsedMs=10,retryPressedObservationOutcome='pressed',retryAdmissionFirstBlockingReason='none',retryAdmissionLastBlockingReason='none',retryAdmissionElapsedMs=17,retryAdmissionSampleCount=2);return value
 
 def output(value=None):
  return '\n'.join(['INSTRUMENTATION_STATUS: class='+m.TEST_CLASS,'INSTRUMENTATION_STATUS: test='+m.METHOD,'INSTRUMENTATION_STATUS: numtests=1','INSTRUMENTATION_STATUS: owned_destroy_evidence='+json.dumps(value or proof()),'INSTRUMENTATION_STATUS_CODE: 0','INSTRUMENTATION_RESULT: stream=','OK (1 test)','INSTRUMENTATION_CODE: -1',''])
@@ -51,7 +51,7 @@ class Fake(m.System):
     if self.timeout:raise m.Refusal('HARD_SUBPROCESS_TIMEOUT')
     if self.instrument_output is not None:return self.instrument_exit,self.instrument_output,self.instrument_stderr
     if self.unqualified:
-     value=proof();value.update(qualification=False,phase='LAUNCH_ONCE',failureCode='LAUNCH_ONCE_FAILED',retryDownPressed=False,retryOriginalButtonDetachedAfterUp=False,retryDownCallElapsedMs=None,retryPressedObservationOutcome='not-attempted');text=output(value)
+     value=proof();value.update(qualification=False,phase='LAUNCH_ONCE',failureCode='LAUNCH_ONCE_FAILED',retryDownPressed=False,retryOriginalButtonDetachedAfterUp=False,retryDownCallElapsedMs=None,retryPressedObservationOutcome='not-attempted',retryAdmissionAdmitted=False,retryAdmissionFirstBlockingReason='not-started',retryAdmissionLastBlockingReason='not-started',retryAdmissionElapsedMs=0,retryAdmissionSampleCount=0);text=output(value)
     else:text=output()
    else:raise AssertionError('unexpected command')
   elif tool=='aapt':
@@ -221,6 +221,101 @@ rejects(lambda:m.evidence(output(value)),'MODULE_INPUT_FACTS')
 for elapsed in [0,10]:
  value=proof();value['retryDownCallElapsedMs']=elapsed
  assert m.evidence(output(value))==value
+`));
+
+test('admission history and bounds are mandatory, private unknown facts are refused before retention',()=>run(String.raw`
+reasons={'not-started','none','owner','liveness','identity','fault','cleanup','focus','screen-asleep','keyguard-locked','attachment','interaction','listener','dimensions','root','visible-bounds','intersection','unstable-geometry','observation-timeout','observation-error','deadline','sample-limit','sample-interval'}
+assert m.ADMISSION_REASONS==reasons
+for reason in reasons:
+ value=proof();value.update(qualification=False,phase='ONE_VERIFIED_NATIVE_TAP',failureCode='ONE_VERIFIED_NATIVE_TAP_FAILED',pluginLoadCount=1,tapCount=0,retryDownPressed=False,retryOriginalButtonDetachedAfterUp=False,retryDownCallElapsedMs=None,retryPressedObservationOutcome='not-attempted',retryAdmissionAdmitted=False,retryAdmissionFirstBlockingReason=reason,retryAdmissionLastBlockingReason=reason,retryAdmissionElapsedMs=0 if reason=='not-started'else 34,retryAdmissionSampleCount=0 if reason=='not-started'else 2)
+ try:m.evidence(output(value))
+ except m.Refusal as error:
+  assert str(error)=='MODULE_UNQUALIFIED'
+  assert error.module_evidence['retryAdmissionFirstBlockingReason']==reason
+  assert error.module_evidence['retryAdmissionLastBlockingReason']==reason
+  assert error.module_evidence['retryAdmissionAdmitted']is False
+  assert error.module_evidence['tapCount']==0 and error.module_evidence['retryDownCallElapsedMs']is None
+ else:raise AssertionError('negative admission qualified')
+fields=('retryAdmissionFirstBlockingReason','retryAdmissionLastBlockingReason','retryAdmissionElapsedMs','retryAdmissionSampleCount')
+for field in fields:
+ value=proof();value.pop(field);rejects(lambda:m.evidence(output(value)),'EVIDENCE_SCHEMA')
+for field in fields[:2]:
+ for bad in [None,True,1,[],{},'READY','https://private.invalid/?token=PRIVATE_ADMISSION']:
+  value=proof();value.update(qualification=False);value[field]=bad
+  try:m.evidence(output(value))
+  except m.Refusal as error:
+   assert str(error)==('EVIDENCE_ADMISSION_REASON'if type(bad)is str else'EVIDENCE_TYPE')
+   assert error.module_evidence is None and 'PRIVATE_ADMISSION'not in str(error)
+  else:raise AssertionError('unknown admission reason retained')
+for field,cap in [('retryAdmissionElapsedMs',2000),('retryAdmissionSampleCount',128)]:
+ for bad in [None,True,-1,cap+1,1.5,'PRIVATE_ADMISSION',[],{}]:
+  value=proof();value.update(qualification=False);value[field]=bad
+  try:m.evidence(output(value))
+  except m.Refusal as error:assert str(error)=='EVIDENCE_TYPE'and error.module_evidence is None
+  else:raise AssertionError('malformed admission count retained')
+for change in [{'retryAdmissionSampleCount':1},{'retryAdmissionElapsedMs':0},{'retryAdmissionElapsedMs':2000}]+[{'retryAdmissionLastBlockingReason':reason}for reason in m.ADMISSION_REFUSALS]:
+ value=proof();value.update(change);rejects(lambda:m.evidence(output(value)),'MODULE_ADMISSION_FACTS')
+`));
+
+test('pending admission cannot qualify and its actual boolean is mandatory and strictly typed',()=>run(String.raw`
+pending=proof();pending.update(retryAdmissionAdmitted=False,retryAdmissionFirstBlockingReason='unstable-geometry',retryAdmissionLastBlockingReason='unstable-geometry',retryAdmissionElapsedMs=17,retryAdmissionSampleCount=2)
+try:m.evidence(output(pending))
+except m.Refusal as error:
+ assert str(error)=='MODULE_FACTS'and error.module_evidence['retryAdmissionAdmitted']is False
+else:raise AssertionError('two different valid bounds qualified while pending')
+pending.update(qualification=False,phase='ONE_VERIFIED_NATIVE_TAP',failureCode='ONE_VERIFIED_NATIVE_TAP_FAILED',tapCount=0,pluginLoadCount=1,retryDownPressed=False,retryOriginalButtonDetachedAfterUp=False,retryDownCallElapsedMs=None,retryPressedObservationOutcome='not-attempted')
+try:m.evidence(output(pending))
+except m.Refusal as error:
+ assert str(error)=='MODULE_UNQUALIFIED'and error.module_evidence==pending
+else:raise AssertionError('pending negative qualified')
+value=proof();value.pop('retryAdmissionAdmitted')
+try:m.evidence(output(value))
+except m.Refusal as error:assert str(error)=='EVIDENCE_SCHEMA'and error.module_evidence is None
+else:raise AssertionError('missing admission boolean accepted')
+for bad in [None,0,1,0.0,1.0,'false','PRIVATE_ADMISSION',[],{}]:
+ value=proof();value.update(qualification=False,retryAdmissionAdmitted=bad)
+ try:m.evidence(output(value))
+ except m.Refusal as error:assert str(error)=='EVIDENCE_TYPE'and error.module_evidence is None
+ else:raise AssertionError('nonboolean admission retained')
+`));
+
+test('actual admission schema rejects independent privacy, sample-count, time and identity mutants',()=>run(String.raw`
+original=pathlib.Path(m.__file__).read_text()
+def expect(api,value,code,private=False):
+ try:api['evidence'](output(value))
+ except api['Refusal']as error:
+  assert str(error)==code
+  if private:assert error.module_evidence is None
+ else:raise AssertionError('admission guard lost')
+def private_reason(api):
+ value=proof();value.update(qualification=False,retryAdmissionFirstBlockingReason='PRIVATE_ADMISSION')
+ expect(api,value,'EVIDENCE_ADMISSION_REASON',True)
+def private_count(api):
+ value=proof();value.update(qualification=False,retryAdmissionElapsedMs='PRIVATE_ADMISSION')
+ expect(api,value,'EVIDENCE_TYPE',True)
+def one_sample(api):
+ value=proof();value['retryAdmissionSampleCount']=1;expect(api,value,'MODULE_ADMISSION_FACTS')
+def expired(api):
+ value=proof();value['retryAdmissionElapsedMs']=2000;expect(api,value,'MODULE_ADMISSION_FACTS')
+def identity(api):
+ value=proof();value['retryAdmissionLastBlockingReason']='identity';expect(api,value,'MODULE_ADMISSION_FACTS')
+def pending(api):
+ value=proof();value.update(retryAdmissionAdmitted=False,retryAdmissionFirstBlockingReason='unstable-geometry',retryAdmissionLastBlockingReason='unstable-geometry',retryAdmissionElapsedMs=17,retryAdmissionSampleCount=2)
+ expect(api,value,'MODULE_FACTS')
+for before,after,probe in [
+ ('require(value[name] in ADMISSION_REASONS, "EVIDENCE_ADMISSION_REASON")','require(True, "EVIDENCE_ADMISSION_REASON")',private_reason),
+ ('require(type(value[name]) is int and 0 <= value[name] <= cap, "EVIDENCE_TYPE")','require(True, "EVIDENCE_TYPE")',private_count),
+ ('value["retryAdmissionSampleCount"] >= 2','True',one_sample),
+ ('17 <= value["retryAdmissionElapsedMs"] < 2000','True',expired),
+ ('value[name] in ADMISSION_REFUSALS','False',identity),
+ ('all(value[name] for name in BOOL_FIELDS)','all(value[name] for name in BOOL_FIELDS if name != "retryAdmissionAdmitted")',pending),
+]:
+ probe(vars(m));assert original.count(before)==1
+ api={'__name__':'owned_admission_schema_mutant','__file__':m.__file__}
+ exec(compile(original.replace(before,after,1),'<owned-admission-schema-mutant>','exec'),api)
+ try:probe(api)
+ except AssertionError:pass
+ else:raise AssertionError('admission schema mutant survived')
 `));
 
 test('actual controller diagnostic guards reject individual semantic and privacy mutants',()=>run(String.raw`
