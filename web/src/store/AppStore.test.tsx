@@ -1349,36 +1349,36 @@ describe("recordResume", () => {
     const { result } = await renderStore();
 
     act(() => result.current.recordResume(media("r2"), 40, 100));
-    expect(storeRecordHistory).toHaveBeenCalledWith({
+    await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledWith({
       mediaId: "r2",
       preview: media("r2"),
       progressSeconds: 40,
       durationSeconds: 100,
       completed: false,
       episodeId: null,
-    });
+    }));
 
     storeRecordHistory.mockClear();
     act(() => result.current.recordResume(media("r3"), 10, null));
-    expect(storeRecordHistory).toHaveBeenCalledWith({
+    await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledWith({
       mediaId: "r3",
       preview: media("r3"),
       progressSeconds: 10,
       durationSeconds: null,
       completed: false,
       episodeId: null,
-    });
+    }));
 
     storeRecordHistory.mockClear();
     act(() => result.current.recordResume(media("r4"), 10, 0));
-    expect(storeRecordHistory).toHaveBeenCalledWith({
+    await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledWith({
       mediaId: "r4",
       preview: media("r4"),
       progressSeconds: 10,
       durationSeconds: 0,
       completed: false,
       episodeId: null,
-    });
+    }));
   });
 
   it("persists progress without refreshing the history slices or provider state", async () => {
@@ -1450,6 +1450,139 @@ describe("recordResume", () => {
 
     expect(loadContinueWatching).toHaveBeenCalledTimes(1);
     expect(result.current.continueWatching).toEqual([updated]);
+  });
+
+  it("flushes the newest coalesced resume snapshot before the close refresh", async () => {
+    let finishFirst!: () => void;
+    storeRecordHistory
+      .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = () => resolve({}); }))
+      .mockResolvedValue({});
+    const { result } = await renderStore();
+    loadContinueWatching.mockClear();
+
+    act(() => {
+      result.current.recordResume(media("blocking"), 5, 100);
+      result.current.recordResume(media("coalesced"), 20, 100, null, {
+        preferredAudioId: "audio-a",
+        preferredAudioLang: "eng",
+        preferredSubId: "sub-a",
+        playbackSpeed: 1.25,
+        subtitleDelay: 0.2,
+        subtitlePosition: 70,
+      });
+      result.current.recordResume(media("coalesced"), 30, 100, null, {
+        preferredSubId: null,
+      });
+    });
+    const closeRefresh = result.current.refreshContinueWatching();
+    expect(storeRecordHistory).toHaveBeenCalledTimes(1);
+    expect(loadContinueWatching).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishFirst();
+      await closeRefresh;
+    });
+    expect(storeRecordHistory).toHaveBeenCalledTimes(2);
+    expect(storeRecordHistory.mock.calls[1]?.[0]).toMatchObject({
+      mediaId: "coalesced",
+      progressSeconds: 30,
+      preferredAudioId: "audio-a",
+      preferredAudioLang: "eng",
+      preferredSubId: null,
+      playbackSpeed: 1.25,
+      subtitleDelay: 0.2,
+      subtitlePosition: 70,
+    });
+    expect(loadContinueWatching).toHaveBeenCalledTimes(1);
+  });
+
+  it("drains active and pending old-profile writes before a cookie-changing transition", async () => {
+    let finishActive!: () => void;
+    let cookie = "old-profile";
+    const writes: Array<{ mediaId: string; cookie: string }> = [];
+    storeRecordHistory.mockImplementation((unknownEntry: unknown) => {
+      const entry = unknownEntry as { mediaId: string };
+      writes.push({ mediaId: entry.mediaId, cookie });
+      if (entry.mediaId === "active-old") {
+        return new Promise((resolve) => { finishActive = () => resolve({}); });
+      }
+      return Promise.resolve({});
+    });
+    const { result } = await renderStore();
+
+    act(() => {
+      result.current.recordResume(media("active-old"), 10, 100);
+      result.current.recordResume(media("pending-old"), 20, 100);
+    });
+    let cookieSwitched = false;
+    const transition = result.current.runProfileTransition(async (markProfileChanged) => {
+      cookie = "new-profile";
+      cookieSwitched = true;
+      markProfileChanged();
+    });
+    expect(cookieSwitched).toBe(false);
+
+    await act(async () => {
+      finishActive();
+      await transition;
+    });
+    expect(writes).toEqual([
+      { mediaId: "active-old", cookie: "old-profile" },
+      { mediaId: "pending-old", cookie: "old-profile" },
+    ]);
+    expect(cookie).toBe("new-profile");
+  });
+
+  it("resumes old-profile progress after a switch request fails before changing cookies", async () => {
+    const { result } = await renderStore();
+    await expect(result.current.runProfileTransition(async () => {
+      throw new Error("switch rejected");
+    })).rejects.toThrow("switch rejected");
+
+    act(() => result.current.recordResume(media("still-old-profile"), 12, 100));
+    await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ mediaId: "still-old-profile", progressSeconds: 12 }),
+    ));
+  });
+
+  it("keeps progress fenced after active deletion succeeds but fallback convergence fails", async () => {
+    let finishActive!: () => void;
+    let cookie = "deleted-profile";
+    const writes: Array<{ mediaId: string; cookie: string }> = [];
+    storeRecordHistory.mockImplementation((unknownEntry: unknown) => {
+      const entry = unknownEntry as { mediaId: string };
+      writes.push({ mediaId: entry.mediaId, cookie });
+      if (entry.mediaId === "active-before-delete") {
+        return new Promise((resolve) => { finishActive = () => resolve({}); });
+      }
+      return Promise.resolve({});
+    });
+    const { result } = await renderStore();
+    act(() => {
+      result.current.recordResume(media("active-before-delete"), 10, 100);
+      result.current.recordResume(media("pending-before-delete"), 20, 100);
+    });
+
+    let deleteStarted = false;
+    const transition = result.current.runProfileTransition(async (markProfileChanged) => {
+      deleteStarted = true;
+      cookie = "server-default-after-delete";
+      markProfileChanged();
+      throw new Error("fallback switch failed");
+    });
+    expect(deleteStarted).toBe(false);
+    await act(async () => {
+      finishActive();
+      await expect(transition).rejects.toThrow("fallback switch failed");
+    });
+    expect(writes).toEqual([
+      { mediaId: "active-before-delete", cookie: "deleted-profile" },
+      { mediaId: "pending-before-delete", cookie: "deleted-profile" },
+    ]);
+
+    act(() => result.current.recordResume(media("must-stay-fenced"), 30, 100));
+    expect(storeRecordHistory).toHaveBeenCalledTimes(2);
+    expect(cookie).toBe("server-default-after-delete");
   });
 
   it("keeps successful bootstrap continue-watching rows after a foreground refresh fails", async () => {
@@ -2030,6 +2163,70 @@ describe("reloadProfileData", () => {
       await result.current.reloadProfileData();
     });
     expect(remote.resetProfileCache).toHaveBeenCalled();
+  });
+
+  it("aborts an active RemoteStore progress request on a direct profile-generation change", async () => {
+    const Ctor = MockRemoteStore as unknown as new () => Record<string, unknown>;
+    const remote = new Ctor() as unknown as {
+      resetProfileCache: ReturnType<typeof vi.fn>;
+      getCachedResolutions: (ids: string[]) => Promise<unknown[]>;
+      deleteCachedResolution: (id: string) => Promise<void>;
+      recordHistoryProgress: (entry: unknown, signal: AbortSignal) => Promise<unknown>;
+    };
+    remote.getCachedResolutions = () => Promise.resolve([]);
+    remote.deleteCachedResolution = () => Promise.resolve();
+    let requestSignal: AbortSignal | undefined;
+    remote.recordHistoryProgress = vi.fn((_entry: unknown, signal: AbortSignal) => {
+      requestSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError")), { once: true });
+      });
+    });
+    getStore.mockReturnValue(remote as never);
+    const { result } = await renderStore();
+
+    act(() => result.current.recordResume(media("remote-active"), 18, 100));
+    expect(requestSignal?.aborted).toBe(false);
+    await act(async () => {
+      await result.current.reloadProfileData();
+    });
+    expect(requestSignal?.aborted).toBe(true);
+    expect(remote.recordHistoryProgress).toHaveBeenCalledTimes(1);
+  });
+
+  it("times out the bounded profile-transition drain and aborts the old request", async () => {
+    const Ctor = MockRemoteStore as unknown as new () => Record<string, unknown>;
+    const remote = new Ctor() as unknown as {
+      resetProfileCache: ReturnType<typeof vi.fn>;
+      getCachedResolutions: (ids: string[]) => Promise<unknown[]>;
+      deleteCachedResolution: (id: string) => Promise<void>;
+      recordHistoryProgress: (entry: unknown, signal: AbortSignal) => Promise<unknown>;
+    };
+    remote.getCachedResolutions = () => Promise.resolve([]);
+    remote.deleteCachedResolution = () => Promise.resolve();
+    let requestSignal: AbortSignal | undefined;
+    remote.recordHistoryProgress = vi.fn((_entry: unknown, signal: AbortSignal) => {
+      requestSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError")), { once: true });
+      });
+    });
+    getStore.mockReturnValue(remote as never);
+    const { result } = await renderStore();
+    act(() => result.current.recordResume(media("slow-profile-progress"), 19, 100));
+    vi.useFakeTimers();
+    let switched = false;
+    const transition = result.current.runProfileTransition(async (markProfileChanged) => {
+      switched = true;
+      markProfileChanged();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(12_001);
+      await transition;
+    });
+    vi.useRealTimers();
+    expect(requestSignal?.aborted).toBe(true);
+    expect(switched).toBe(true);
   });
 
   it("does NOT call resetProfileCache for a plain (non-Remote) store", async () => {

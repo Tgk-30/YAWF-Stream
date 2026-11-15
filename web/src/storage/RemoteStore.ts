@@ -22,8 +22,9 @@ import type {
   Store,
   WatchHistoryUpsert,
 } from "./types";
-
 import { notifyUnauthorized, readCsrfToken } from "../lib/serverSession";
+
+const PROGRESS_HISTORY_TIMEOUT_MS = 10_000;
 
 type JsonObject = Record<string, unknown>;
 
@@ -58,6 +59,14 @@ class ServerAPI {
     return this.request<T>("PUT", path, body);
   }
 
+  async putProgress<T>(
+    path: string,
+    body: unknown,
+    signal: AbortSignal,
+  ): Promise<T> {
+    return this.request<T>("PUT", path, body, signal);
+  }
+
   async post<T>(path: string, body: unknown): Promise<T> {
     return this.request<T>("POST", path, body);
   }
@@ -70,6 +79,7 @@ class ServerAPI {
     method: string,
     path: string,
     body?: unknown,
+    signal?: AbortSignal,
   ): Promise<T> {
     const headers: Record<string, string> = {};
     const unsafe = method !== "GET" && method !== "HEAD";
@@ -84,6 +94,7 @@ class ServerAPI {
       credentials: "include",
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
+      ...(signal == null ? {} : { signal }),
     });
 
     const text = await response.text();
@@ -362,6 +373,48 @@ export class RemoteStore implements Store, SecretStore {
   }
 
   async recordHistory(entry: WatchHistoryUpsert): Promise<WatchHistoryRecord> {
+    return this.writeHistory(entry);
+  }
+
+  /** Playback-only bounded write path. Other ServerAPI requests retain their existing semantics. */
+  async recordHistoryProgress(
+    entry: WatchHistoryUpsert,
+    signal: AbortSignal,
+  ): Promise<WatchHistoryRecord> {
+    if (signal.aborted) {
+      throw new DOMException("Progress write cancelled", "AbortError");
+    }
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal.addEventListener("abort", abort, { once: true });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let rejectCancelled: ((reason: Error) => void) | undefined;
+    const cancelled = new Promise<never>((_, reject) => {
+      rejectCancelled = reject;
+    });
+    const onAbort = () => rejectCancelled?.(
+      new DOMException("Progress write cancelled", "AbortError"),
+    );
+    signal.addEventListener("abort", onAbort, { once: true });
+    const expired = new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => {
+        controller.abort();
+        reject(new Error("Progress write timed out."));
+      }, PROGRESS_HISTORY_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([this.writeHistory(entry, controller.signal), expired, cancelled]);
+    } finally {
+      if (timeout != null) clearTimeout(timeout);
+      signal.removeEventListener("abort", abort);
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  private async writeHistory(
+    entry: WatchHistoryUpsert,
+    signal?: AbortSignal,
+  ): Promise<WatchHistoryRecord> {
     const episodeId = entry.episodeId ?? null;
     const progressSeconds = entry.progressSeconds ?? 0;
     const durationSeconds = entry.durationSeconds ?? null;
@@ -369,10 +422,7 @@ export class RemoteStore implements Store, SecretStore {
     const queuedNext = entry.queuedNext ?? false;
     const streamQuality = entry.streamQuality ?? null;
     const lastWatched = entry.lastWatched ?? nowISO();
-    const response = await this.api.put<{
-      ok?: boolean;
-      item?: ServerHistoryResponse["items"][number];
-    }>(`/api/history/${encodeURIComponent(entry.mediaId)}`, {
+    const body = {
       episodeId,
       progressSeconds,
       durationSeconds,
@@ -393,7 +443,15 @@ export class RemoteStore implements Store, SecretStore {
         ? {} : { subtitleDelay: entry.subtitleDelay }),
       ...(entry.subtitlePosition === undefined
         ? {} : { subtitlePosition: entry.subtitlePosition }),
-    });
+    };
+    const path = `/api/history/${encodeURIComponent(entry.mediaId)}`;
+    type Response = {
+      ok?: boolean;
+      item?: ServerHistoryResponse["items"][number];
+    };
+    const response = signal == null
+      ? await this.api.put<Response>(path, body)
+      : await this.api.putProgress<Response>(path, body, signal);
     if (response.item != null) return mapHistory(response.item);
     // Older servers return only { ok: true }. Keep that response compatible by
     // building the submitted record locally rather than re-fetching up to 500

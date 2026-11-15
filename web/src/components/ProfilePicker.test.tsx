@@ -49,8 +49,11 @@ vi.mock("../lib/ServerSessionContext", () => ({
 
 // ---- AppStore mock ----------------------------------------------------------
 const reloadProfileData = vi.fn();
+const runProfileTransition = vi.fn(async (operation: (mark: () => void) => Promise<unknown>) =>
+  operation(vi.fn()),
+);
 vi.mock("../store/AppStore", () => ({
-  useAppActions: () => ({ reloadProfileData }),
+  useAppActions: () => ({ reloadProfileData, runProfileTransition }),
 }));
 
 import { ProfilePicker } from "./ProfilePicker";
@@ -85,6 +88,7 @@ beforeEach(() => {
     activeProfileId: "p1",
   });
   reloadProfileData.mockResolvedValue(undefined);
+  runProfileTransition.mockImplementation(async (operation) => operation(vi.fn()));
   setProfilePin.mockResolvedValue({
     profiles: { profiles: mockProfiles, activeProfileId: "p1" },
   });
@@ -198,6 +202,7 @@ describe("ProfilePicker switch", () => {
 
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(switchAccountProfile).toHaveBeenCalledWith("p2", undefined);
+    expect(runProfileTransition).toHaveBeenCalledTimes(1);
     expect(reloadProfileData).toHaveBeenCalled();
     expect(setSession).toHaveBeenCalledWith({
       profileId: "p2",
@@ -527,11 +532,21 @@ describe("ProfilePicker delete (two-step)", () => {
     // Make Bob the active profile so deleting him triggers the fallback switch.
     mockSession = { profileId: "p2" };
     const user = userEvent.setup();
-    deleteAccountProfile.mockResolvedValue({
+    const order: string[] = [];
+    runProfileTransition.mockImplementation(async (operation) => {
+      order.push("fence-start");
+      return operation(() => order.push("ownership-changed"));
+    });
+    deleteAccountProfile.mockImplementation(async () => {
+      order.push("delete-request");
+      return {
       ok: true,
       profiles: [ALICE, KID], // ALICE is isDefault
+      };
     });
-    switchAccountProfile.mockResolvedValue({
+    switchAccountProfile.mockImplementation(async () => {
+      order.push("fallback-switch");
+      return {
       session: {
         profileId: "p1",
         username: "alice",
@@ -541,6 +556,10 @@ describe("ProfilePicker delete (two-step)", () => {
         simpleMode: false,
       },
       profiles: { profiles: [ALICE, KID], activeProfileId: "p1" },
+      };
+    });
+    reloadProfileData.mockImplementation(async () => {
+      order.push("fallback-reload");
     });
 
     render(<ProfilePicker onClose={vi.fn()} />);
@@ -555,6 +574,14 @@ describe("ProfilePicker delete (two-step)", () => {
       expect(switchAccountProfile).toHaveBeenCalledWith("p1"),
     );
     expect(reloadProfileData).toHaveBeenCalled();
+    expect(runProfileTransition).toHaveBeenCalledTimes(1);
+    expect(order).toEqual([
+      "fence-start",
+      "delete-request",
+      "ownership-changed",
+      "fallback-switch",
+      "fallback-reload",
+    ]);
     await waitFor(() =>
       expect(setSession).toHaveBeenCalledWith(
         expect.objectContaining({ profileId: "p1", displayName: "Alice" }),

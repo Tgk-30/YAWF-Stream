@@ -33,7 +33,10 @@ describe("RemoteStore", () => {
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("document", { cookie: "" });
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
   const store = () => new RemoteStore("http://srv");
 
   describe("getResume - exact-key lookup", () => {
@@ -66,6 +69,54 @@ describe("RemoteStore", () => {
         "http://srv/api/history/tt1",
         expect.anything(),
       );
+    });
+  });
+
+  describe("progress-only history timeout", () => {
+    it("aborts a stalled progress PUT without changing ordinary history PUTs", async () => {
+      vi.useFakeTimers();
+      let progressSignal: AbortSignal | undefined;
+      fetchMock.mockImplementation((_url: string, init: RequestInit) => {
+        progressSignal = init.signal ?? undefined;
+        return new Promise(() => {});
+      });
+      const pending = store().recordHistoryProgress({
+        mediaId: "tt-timeout",
+        progressSeconds: 10,
+        preview: { id: "tt-timeout", type: "movie", title: "T" },
+      }, new AbortController().signal);
+      const assertion = expect(pending).rejects.toThrow("Progress write timed out.");
+      await vi.advanceTimersByTimeAsync(10_001);
+      await assertion;
+      expect(progressSignal?.aborted).toBe(true);
+
+      fetchMock.mockReset().mockResolvedValue(jsonResponse({ ok: true }));
+      await store().recordHistory({
+        mediaId: "tt-normal",
+        progressSeconds: 11,
+        preview: { id: "tt-normal", type: "movie", title: "N" },
+      });
+      const normalInit = fetchMock.mock.calls[0]![1] as RequestInit;
+      expect(normalInit.signal).toBeUndefined();
+      vi.useRealTimers();
+    });
+
+    it("aborts promptly when its owning profile generation is cancelled", async () => {
+      let observedSignal: AbortSignal | undefined;
+      fetchMock.mockImplementation((_url: string, init: RequestInit) => {
+        observedSignal = init.signal ?? undefined;
+        return new Promise(() => {});
+      });
+      const owner = new AbortController();
+      const pending = store().recordHistoryProgress({
+        mediaId: "tt-cancel",
+        progressSeconds: 12,
+        preview: { id: "tt-cancel", type: "movie", title: "C" },
+      }, owner.signal);
+      const assertion = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      owner.abort();
+      await assertion;
+      expect(observedSignal?.aborted).toBe(true);
     });
   });
 
