@@ -7,9 +7,9 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 export const REPOSITORY = "ghcr.io/tgk-30/yawf-stream";
-export const RELEASES_PER_PAGE = 20;
+export const RELEASES_PER_PAGE = 100;
 export const RELEASE_PAGE_LIMIT = 10;
-export const RELEASE_PAGE_MAX_BYTES = 1_000_000;
+export const RELEASE_PAGE_MAX_BYTES = 4_000_000;
 export const RELEASE_DISCOVERY_MAX_BYTES = 8_000_000;
 export const RELEASES_API = `https://api.github.com/repos/Tgk-30/YAWF-Stream/releases?per_page=${RELEASES_PER_PAGE}&page=1`;
 export const RELEASE_REQUEST_TIMEOUT_MS = 10_000;

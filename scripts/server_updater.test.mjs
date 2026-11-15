@@ -96,23 +96,23 @@ test("release discovery budgets remain fixed independently of pagination fixture
   assert.deepEqual({ perPage: RELEASES_PER_PAGE, pages: RELEASE_PAGE_LIMIT, pageBytes: RELEASE_PAGE_MAX_BYTES,
     aggregateBytes: RELEASE_DISCOVERY_MAX_BYTES, requestTimeoutMs: RELEASE_REQUEST_TIMEOUT_MS,
     discoveryTimeoutMs: RELEASE_DISCOVERY_TIMEOUT_MS },
-  { perPage: 20, pages: 10, pageBytes: 1_000_000, aggregateBytes: 8_000_000, requestTimeoutMs: 10_000,
+  { perPage: 100, pages: 10, pageBytes: 4_000_000, aggregateBytes: 8_000_000, requestTimeoutMs: 10_000,
     discoveryTimeoutMs: 15_000 });
 });
 
 test("release discovery scans bounded pages and selects the greatest eligible numeric version", async () => {
   const fixture = candidateFixture();
   const filler = (page, index) => ({ tag_name: `not-a-release-${page}-${index}`, draft: false, prerelease: false,
-    published_at: "2026-10-12T00:00:00Z", assets: [], padding: "x".repeat(40_000) });
+    published_at: "2026-10-12T00:00:00Z", assets: [], padding: "x".repeat(Math.floor(800_000 / RELEASES_PER_PAGE)) });
   const olderTag = `v${previousVersion}`;
   const older = { tag_name: olderTag, draft: false, prerelease: false, published_at: "2026-10-11T00:00:00Z",
     assets: ["server-update.json", `debridstreamer-server_${previousVersion}_all.deb`, "SHA256SUMS"].map((name) => ({
       name, digest, size: 10, browser_download_url: `https://github.com/Tgk-30/YAWF-Stream/releases/download/${olderTag}/${name}`,
     })) };
   const pages = [
-    [older, ...Array.from({ length: 19 }, (_, index) => filler(1, index))],
-    Array.from({ length: 20 }, (_, index) => filler(2, index)),
-    Array.from({ length: 20 }, (_, index) => filler(3, index)),
+    [older, ...Array.from({ length: RELEASES_PER_PAGE - 1 }, (_, index) => filler(1, index))],
+    Array.from({ length: RELEASES_PER_PAGE }, (_, index) => filler(2, index)),
+    Array.from({ length: RELEASES_PER_PAGE }, (_, index) => filler(3, index)),
     [fixture.release],
   ].map((page) => Buffer.from(JSON.stringify(page)));
   assert.ok(pages.slice(0, 3).every((page) => page.length < RELEASE_PAGE_MAX_BYTES));
@@ -132,8 +132,53 @@ test("release discovery scans bounded pages and selects the greatest eligible nu
   assert.ok(discoverySignals.every((signal) => signal === discoverySignals[0]), "release pages reset the whole-discovery deadline");
 });
 
+// Synthetic catalog matches the observed 242-record response geometry and byte sizes.
+// Keep literal100/100/42 here: using the production constant would hide a20-record regression.
+function history242Fixture(includeLaterNewer) {
+  const current = candidateFixture("2.3.110");
+  const newer = [candidateFixture("2.3.111"), candidateFixture("2.3.112")];
+  const rows = Array.from({ length: 242 }, (_, index) => ({ tag_name: `not-server-${index}` }));
+  rows[0] = current.release;
+  if (includeLaterNewer) { rows[100] = newer[0].release; rows[200] = newer[1].release; }
+  const sizes = [1_568_586, 2_263_873, 1_270_317];
+  const bodies = [rows.slice(0, 100), rows.slice(100, 200), rows.slice(200)].map((page, index) => {
+    page[0] = { ...page[0], padding: "" };
+    page[0].padding = "x".repeat(sizes[index] - Buffer.byteLength(JSON.stringify(page)));
+    const bytes = Buffer.from(JSON.stringify(page)); assert.equal(bytes.length, sizes[index]); return bytes;
+  });
+  assert.equal(bodies.reduce((sum, bytes) => sum + bytes.length, 0), 5_102_776);
+  const pages = [], assets = [], signals = [];
+  const fetchImpl = async (url, init) => {
+    const parsed = new URL(url);
+    if (parsed.hostname !== "api.github.com") {
+      assets.push(parsed.href); const owner = [current, ...newer].find(item => parsed.pathname.includes(`/${item.release.tag_name}/`));
+      assert.ok(owner, "only a fixture's exact trusted release asset may be requested"); return owner.assetResponse(url);
+    }
+    assert.equal(parsed.searchParams.get("per_page"), "100");
+    const page = Number(parsed.searchParams.get("page")); pages.push(page); signals.push(init.signal);
+    assert.ok(page >= 1 && page <= 3, "exhaust the42-record final page without requesting more history");
+    const body = bodies[page - 1];
+    return new Response(body, { headers: { "content-length": String(body.length) } });
+  };
+  return { fetchImpl, pages, assets, signals };
+}
+
+test("242-entry history exhausts100/100/42 pages with current110 on page1 and reports no update", async () => {
+  const fixture = history242Fixture(false);
+  assert.equal(await resolveUpdateCandidate("2.3.110", fixture.fetchImpl), null);
+  assert.deepEqual(fixture.pages, [1, 2, 3]); assert.deepEqual(fixture.assets, []);
+  assert.ok(fixture.signals.every(signal => signal === fixture.signals[0]));
+});
+
+test("242-entry history with current110 on page1 selects verified112 over111 on later pages", async () => {
+  const fixture = history242Fixture(true);
+  assert.equal((await resolveUpdateCandidate("2.3.110", fixture.fetchImpl)).version, "2.3.112");
+  assert.deepEqual(fixture.pages, [1, 2, 3]); assert.equal(fixture.assets.length, 2);
+  assert.ok(fixture.assets.every(url => url.includes("/v2.3.112/")), "never stop at the current anchor or validate a lower fallback");
+});
+
 test("release discovery stops on short or empty pages and fails closed at its page limit", async () => {
-  const fullPage = Buffer.from(JSON.stringify(Array.from({ length: 20 }, (_, index) => ({ tag_name: `invalid-${index}` }))));
+  const fullPage = Buffer.from(JSON.stringify(Array.from({ length: RELEASES_PER_PAGE }, (_, index) => ({ tag_name: `invalid-${index}` }))));
   for (const ending of [[Buffer.from("[]")], [Buffer.from("[]"), Buffer.from("[]")]]) {
     let calls = 0;
     const fetchImpl = async () => {
@@ -153,8 +198,8 @@ test("release discovery stops on short or empty pages and fails closed at its pa
   await assert.rejects(resolveUpdateCandidate("0.0.0", loopingFetch), /page limit/);
   assert.deepEqual(pages, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
-  const largeFullPage = Buffer.from(JSON.stringify(Array.from({ length: 20 }, (_, index) => ({
-    tag_name: `large-invalid-${index}`, padding: "x".repeat(45_000),
+  const largeFullPage = Buffer.from(JSON.stringify(Array.from({ length: RELEASES_PER_PAGE }, (_, index) => ({
+    tag_name: `large-invalid-${index}`, padding: "x".repeat(Math.floor(900_000 / RELEASES_PER_PAGE)),
   }))));
   assert.ok(largeFullPage.length < RELEASE_PAGE_MAX_BYTES);
   let largeCalls = 0;
@@ -166,7 +211,7 @@ test("release discovery stops on short or empty pages and fails closed at its pa
 test("release discovery cancels an oversized individual response", async () => {
   let cancelled = false; let sent = false;
   const response = { status: 200, ok: true, headers: { get: () => null }, body: { getReader: () => ({
-    read: async () => { if (sent) return { done: true }; sent = true; return { done: false, value: new Uint8Array(1_000_001) }; },
+    read: async () => { if (sent) return { done: true }; sent = true; return { done: false, value: new Uint8Array(RELEASE_PAGE_MAX_BYTES + 1) }; },
     cancel: async () => { cancelled = true; },
     releaseLock: () => {},
   }) } };
@@ -175,7 +220,7 @@ test("release discovery cancels an oversized individual response", async () => {
 });
 
 test("release discovery ignores external pagination links", async () => {
-  const fullPage = Buffer.from(JSON.stringify(Array.from({ length: 20 }, (_, index) => ({ tag_name: `invalid-link-${index}` }))));
+  const fullPage = Buffer.from(JSON.stringify(Array.from({ length: RELEASES_PER_PAGE }, (_, index) => ({ tag_name: `invalid-link-${index}` }))));
   const requested = [];
   const fetchImpl = async (url) => {
     const parsed = new URL(url); requested.push(parsed.href);
@@ -191,9 +236,9 @@ test("release discovery ignores external pagination links", async () => {
 function boundedWindowFixture(first = candidateFixture(), later = null, failure = null) {
   const outside = candidateFixture("99.0.0");
   const filler = index => ({ tag_name: `not-a-release-${index}` });
-  const catalog = Array.from({ length: 11 }, (_, page) => Array.from({ length: 20 }, (_, index) => filler(page * 20 + index)));
+  const catalog = Array.from({ length: 11 }, (_, page) => Array.from({ length: RELEASES_PER_PAGE }, (_, index) => filler(page * RELEASES_PER_PAGE + index)));
   catalog[0][0] = first.release;
-  if (later != null) catalog[9][19] = later.release;
+  if (later != null) catalog[9][RELEASES_PER_PAGE - 1] = later.release;
   catalog[10][0] = outside.release;
   const pages = [], assets = [];
   const fetchImpl = async (url) => {
@@ -206,7 +251,7 @@ function boundedWindowFixture(first = candidateFixture(), later = null, failure 
       if (page === 2 && failure === "timeout-page") throw new DOMException("fixture deadline", "TimeoutError");
       if (page === 2 && failure === "oversized-page") return new Response("x".repeat(RELEASE_PAGE_MAX_BYTES + 1));
       const value = catalog[page - 1];
-      if (failure === "aggregate-pages") for (const entry of value) entry.padding = "x".repeat(45_000);
+      if (failure === "aggregate-pages") for (const entry of value) entry.padding = "x".repeat(Math.floor(900_000 / RELEASES_PER_PAGE));
       return new Response(JSON.stringify(value));
     }
     assets.push(parsed.href);
@@ -217,7 +262,7 @@ function boundedWindowFixture(first = candidateFixture(), later = null, failure 
   return { fetchImpl, pages, assets };
 }
 
-test("a full bounded window admits a validated first-page newer candidate from a catalog over 200 releases", async () => {
+test("a full bounded window admits a validated first-page newer candidate from a catalog over 1,000 releases", async () => {
   const fixture = boundedWindowFixture();
   assert.equal((await resolveUpdateCandidate(previousVersion, fixture.fetchImpl)).version, releaseVersion);
   assert.deepEqual(fixture.pages, [1,2,3,4,5,6,7,8,9,10]);
@@ -235,7 +280,7 @@ test("a full bounded window scans every page before choosing a higher last-page 
 for (const failure of ["manifest-digest", "malformed-page", "http-page", "timeout-page", "oversized-page", "aggregate-pages"]) {
   test(`an earlier newer candidate cannot bypass a later ${failure} failure`, async () => {
     const fixture = boundedWindowFixture(candidateFixture(), null, failure);
-    await assert.rejects(resolveUpdateCandidate(previousVersion, fixture.fetchImpl), /digest|JSON|property|request failed|deadline|size limit/);
+    await assert.rejects(resolveUpdateCandidate(previousVersion, fixture.fetchImpl), failure === "aggregate-pages" ? /aggregate size limit/ : /digest|JSON|property|request failed|deadline|size limit/);
   });
 }
 
