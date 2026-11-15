@@ -9,6 +9,7 @@ on:
       - scripts/foreground_playback_gate.mjs
       - scripts/foreground_playback_gate.test.mjs
       - scripts/foreground_fixture_media_plan.mjs
+      - scripts/check_manual_hls_readiness_regressions.mjs
       - scripts/prepare_foreground_seccomp.mjs
       - scripts/prepare_foreground_seccomp.test.mjs
       - scripts/foreground-playback/**
@@ -28,18 +29,34 @@ jobs:
   validate:
     name: Validate foreground playback contracts
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
+          lfs: false
       - uses: actions/setup-node@v4
         with:
           node-version: 24
       - run: node --test scripts/foreground_playback_gate.test.mjs
       - run: node --test scripts/prepare_foreground_seccomp.test.mjs
       - run: node --test --test-name-pattern='fixture emits bounded token-free media and HTTP diagnostics' scripts/android_external_player_workflow.test.mjs
+      - name: Install locked web test dependencies
+        run: npm ci
+        working-directory: web
+      - name: Revert-check each manual HLS readiness regression
+        run: node scripts/check_manual_hls_readiness_regressions.mjs
+      - name: Retain bounded manual HLS unit revert receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-hls-readiness-unit-revert-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/manual-hls-readiness-regressions.json
+          if-no-files-found: warn
+          retention-days: 3
   foreground-chromium:
     needs: validate
     if: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.repository == 'Tgk-30/YAWF-Stream' && github.actor == github.repository_owner }}
