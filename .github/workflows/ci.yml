@@ -280,6 +280,9 @@ jobs:
       - name: Android Gradle bootstrap contracts
         run: node --test scripts/prepare_android_gradle.test.mjs scripts/fetch_android_gradle.test.mjs scripts/fetch_android_kotlin_compiler.test.mjs scripts/prepare_android_kotlin_gradle.test.mjs
 
+      - name: Android owned runtime preparation contracts
+        run: node --test scripts/android_owned_startup_runtime.test.mjs scripts/run_android_owned_startup_hosted.test.mjs scripts/prepare_android_owned_fault_alias.test.mjs
+
       - name: Android external-player runtime harness contracts
         run: node --test scripts/android_external_player_workflow.test.mjs scripts/runtime_external_settings_transaction.test.mjs
 

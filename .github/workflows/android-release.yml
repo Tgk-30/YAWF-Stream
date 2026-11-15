@@ -7,6 +7,15 @@ on:
     tags:
       - "android-v*"
   workflow_dispatch:
+    inputs:
+      verify_candidate_run:
+        description: "Existing successful branch verification build run, blank to build a candidate"
+        type: string
+        default: ""
+      verify_candidate_sha:
+        description: "Exact candidate source SHA required with verify_candidate_run"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -14,6 +23,7 @@ permissions:
 jobs:
   android-app:
     name: Signed Android phone APK
+    if: inputs.verify_candidate_run == ''
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -320,4 +330,196 @@ jobs:
           name: android-phone-release-candidate
           path: ${{ runner.temp }}/phone-candidate/*
           if-no-files-found: error
+          retention-days: 3
+
+
+  owned-startup-runtime:
+    name: Owned startup fault/retry on fresh API36
+    if: github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && inputs.verify_candidate_run != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bind the existing verification run
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN: ${{ inputs.verify_candidate_run }}
+          CANDIDATE_SHA: ${{ inputs.verify_candidate_sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from pathlib import Path
+          run, source = os.environ['CANDIDATE_RUN'], os.environ['CANDIDATE_SHA']
+          assert re.fullmatch(r'[1-9][0-9]{0,19}', run), 'RUN_ID_REQUIRED'
+          assert re.fullmatch(r'[a-f0-9]{40}', source), 'SOURCE_SHA_REQUIRED'
+          assert os.environ['GITHUB_REPOSITORY'] == 'Tgk-30/YAWF-Stream'
+          subprocess.run(['git', 'merge-base', '--is-ancestor', source, os.environ['GITHUB_SHA']], check=True)
+          prefix = 'repos/Tgk-30/YAWF-Stream/actions/runs/' + run
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', path], timeout=30))
+          metadata = api(prefix)
+          assert metadata['head_sha'] == source and metadata['event'] == 'workflow_dispatch'
+          assert metadata['path'] == '.github/workflows/android-release.yml'
+          assert metadata['status'] == 'completed' and metadata['conclusion'] == 'success'
+          artifacts = api(prefix + '/artifacts')['artifacts']
+          selected = {}
+          for name, cap in [('android-phone-verification-candidate', 160*1024**2), ('android-phone-api-fixture', 8*1024**2)]:
+              rows = [a for a in artifacts if a['name'] == name]
+              assert len(rows) == 1 and not rows[0]['expired'] and 0 < rows[0]['size_in_bytes'] <= cap
+              selected[name] = {key: rows[0][key] for key in ['id', 'name', 'size_in_bytes', 'digest']}
+          output = Path(os.environ['RUNNER_TEMP']) / 'owned-startup-input'
+          output.mkdir(mode=0o700)
+          (output / 'candidate-run.json').write_text(json.dumps({'source': source, 'runId': run, 'artifacts': selected}, sort_keys=True)+'\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('phone_id='+str(selected['android-phone-verification-candidate']['id'])+'\n')
+              f.write('api_id='+str(selected['android-phone-api-fixture']['id'])+'\n')
+          PY
+
+      - name: Download the exact ordinary candidate
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.candidate.outputs.phone_id }}
+          merge-multiple: true
+          run-id: ${{ inputs.verify_candidate_run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/owned-startup-input/phone
+
+      - name: Download its compile-only API fixture
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.candidate.outputs.api_id }}
+          merge-multiple: true
+          run-id: ${{ inputs.verify_candidate_run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/owned-startup-input/api
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Prepare isolated test build tools
+        env:
+          YAWF_GRADLE_API_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'emulator' 'system-images;android-36;google_apis;x86_64'
+          archive="$(node scripts/fetch_android_gradle.mjs)"
+          unset YAWF_GRADLE_API_TOKEN
+          unzip -q "$archive" -d "$RUNNER_TEMP/owned-gradle"
+          echo "$RUNNER_TEMP/owned-gradle/gradle-9.6.1/bin" >> "$GITHUB_PATH"
+          echo 'GRADLE_USER_HOME='"$RUNNER_TEMP/owned-gradle-home" >> "$GITHUB_ENV"
+          sudo chown "$(id -u):$(id -g)" /dev/kvm
+
+      - name: Verify artifact content and prepare the test-only build
+        env:
+          CANDIDATE_RUN: ${{ inputs.verify_candidate_run }}
+          CANDIDATE_SHA: ${{ inputs.verify_candidate_sha }}
+        run: |
+          set -euo pipefail
+          (cd "$RUNNER_TEMP/owned-startup-input/phone" && sha256sum --strict -c SHA256SUMS)
+          (cd "$RUNNER_TEMP/owned-startup-input/api" && sha256sum --strict -c SHA256SUMS)
+          python3 scripts/prepare_android_owned_fault_alias.py \
+            --inputs "$RUNNER_TEMP/owned-startup-input" \
+            --source "$CANDIDATE_SHA" --run "$CANDIDATE_RUN" \
+            --module scripts/android-owned-destroy-instrumentation \
+            --output "$RUNNER_TEMP/owned-startup-build" --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+
+      - name: Compile only the instrumentation APK
+        run: |
+          set -euo pipefail
+          export TAURI_ANDROID_API_CLASSES_JAR="$RUNNER_TEMP/owned-startup-input/api/tauri-android-api-classes.jar"
+          export TAURI_ANDROID_API_CLASSES_JAR_SHA256
+          TAURI_ANDROID_API_CLASSES_JAR_SHA256="$(sha256sum "$TAURI_ANDROID_API_CLASSES_JAR" | cut -d' ' -f1)"
+          export TAURI_ANDROID_API_SOURCE_RECEIPT="$RUNNER_TEMP/owned-startup-input/api/api-source-receipt.json"
+          gradle --no-daemon -p "$RUNNER_TEMP/owned-startup-build/module" :app:assembleDebugAndroidTest
+
+      - name: Sign only the test APK with the matching phone identity
+        env:
+          ANDROID_APP_KEYSTORE_BASE64: ${{ secrets.ANDROID_APP_KEYSTORE_BASE64 }}
+          ANDROID_APP_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_APP_KEYSTORE_PASSWORD }}
+          ANDROID_APP_KEY_ALIAS: ${{ secrets.ANDROID_APP_KEY_ALIAS }}
+          ANDROID_APP_KEY_PASSWORD: ${{ secrets.ANDROID_APP_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          sdk="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          ks="$RUNNER_TEMP/owned-test-only.jks"
+          trap 'rm -f "$ks"' EXIT
+          printf '%s' "$ANDROID_APP_KEYSTORE_BASE64" | base64 --decode > "$ks"
+          test -s "$ks"
+          source="$RUNNER_TEMP/owned-startup-build/module/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+          test -s "$source"
+          "$sdk/build-tools/36.0.0/zipalign" -P 16 -f 4 "$source" "$RUNNER_TEMP/owned-startup-build/aligned-test.apk"
+          "$sdk/build-tools/36.0.0/apksigner" sign --ks "$ks" \
+            --ks-pass env:ANDROID_APP_KEYSTORE_PASSWORD --ks-key-alias "$ANDROID_APP_KEY_ALIAS" \
+            --key-pass env:ANDROID_APP_KEY_PASSWORD \
+            --out "$RUNNER_TEMP/owned-startup-build/test-signed.apk" "$RUNNER_TEMP/owned-startup-build/aligned-test.apk"
+          "$sdk/build-tools/36.0.0/apksigner" verify "$RUNNER_TEMP/owned-startup-build/test-signed.apk"
+          python3 - <<'PY'
+          import hashlib, json, os, re, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'owned-startup-build'
+          receipt = root / 'TEST-BUILD-BINDING.json'
+          binding = json.loads(receipt.read_text())
+          apk = root / 'test-signed.apk'
+          code = subprocess.check_output(['apkanalyzer', 'dex', 'code', '--class',
+              'com.yawf.ownedstartup.FaultOncePlugin', str(apk)], timeout=90)
+          assert len(code) <= 131072, 'TEST_CLASS_CODE_BOUND'
+          text = code.decode('utf8')
+          assert re.search(r'^\.class .* Lcom/yawf/ownedstartup/FaultOncePlugin;$', text, re.M), 'TEST_FAULT_CLASS_REQUIRED'
+          for method in {'load', binding['faultAlias']}:
+              assert re.findall(r'^\.method public ' + re.escape(method) + r'\(Landroid/webkit/WebView;\)V$', text, re.M) == [
+                  '.method public '+method+'(Landroid/webkit/WebView;)V'], 'TEST_ALIAS_DEFINITION_REQUIRED'
+          binding['finalTestApk'] = {'sha256': hashlib.sha256(apk.read_bytes()).hexdigest(), 'bytes': apk.stat().st_size}
+          binding['finalTestFaultCodeSha256'] = hashlib.sha256(code).hexdigest()
+          binding['finalTestAliasAndLoadDefined'] = True
+          receipt.write_text(json.dumps(binding, sort_keys=True)+'\n')
+          (root / 'test-fault-runtime-code.txt').write_bytes(code)
+          PY
+
+      - name: Run one selected fault and one native Retry
+        env:
+          CANDIDATE_SHA: ${{ inputs.verify_candidate_sha }}
+        run: |
+          set -euo pipefail
+          certificate="$(tr -d '[:space:]:' < web/src-tauri/SIGNING_CERT_SHA256 | tr '[:upper:]' '[:lower:]')"
+          python3 -B scripts/run_android_owned_startup_hosted.py \
+            --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}" \
+            --target-apk "$RUNNER_TEMP/owned-startup-input/phone/YAWF.Stream_Android_2.3.112.apk" \
+            --test-apk "$RUNNER_TEMP/owned-startup-build/test-signed.apk" \
+            --source "$CANDIDATE_SHA" --certificate "$certificate" \
+            --job-root "$RUNNER_TEMP/owned-startup-runtime" \
+            --build-binding "$RUNNER_TEMP/owned-startup-build/TEST-BUILD-BINDING.json"
+
+      - name: Retain scoped hosted verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-owned-startup-runtime-evidence
+          path: |
+            ${{ runner.temp }}/owned-startup-input/candidate-run.json
+            ${{ runner.temp }}/owned-startup-build/TEST-BUILD-BINDING.json
+            ${{ runner.temp }}/owned-startup-build/*runtime-code.txt
+            ${{ runner.temp }}/owned-startup-runtime/ROOT-LIFECYCLE.json
+            ${{ runner.temp }}/owned-startup-runtime/owned-admission.json
+            ${{ runner.temp }}/owned-startup-runtime/evidence/*.json
+            ${{ runner.temp }}/owned-startup-runtime/logs/*.log
+          if-no-files-found: warn
           retention-days: 3
