@@ -9,6 +9,8 @@ on:
       - scripts/foreground_playback_gate.mjs
       - scripts/foreground_playback_gate.test.mjs
       - scripts/foreground_fixture_media_plan.mjs
+      - scripts/prepare_foreground_seccomp.mjs
+      - scripts/prepare_foreground_seccomp.test.mjs
       - scripts/foreground-playback/**
   workflow_dispatch:
     inputs:
@@ -36,11 +38,12 @@ jobs:
         with:
           node-version: 24
       - run: node --test scripts/foreground_playback_gate.test.mjs
+      - run: node --test scripts/prepare_foreground_seccomp.test.mjs
       - run: node --test --test-name-pattern='fixture emits bounded token-free media and HTTP diagnostics' scripts/android_external_player_workflow.test.mjs
   foreground-chromium:
     needs: validate
     if: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.repository == 'Tgk-30/YAWF-Stream' && github.actor == github.repository_owner }}
-    # Controlled host variation; all container/browser security guards stay identical.
+    # Retain host22; the audited chroot-only profile derivation is versioned separately.
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -66,8 +69,8 @@ jobs:
           cp scripts/foreground-playback/Dockerfile "$RUNNER_TEMP/foreground-build/Dockerfile"
           curl --fail --silent --show-error --location --max-time 120 https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-x64.tar.xz -o "$RUNNER_TEMP/foreground-build/node-v24.22.3-linux-x64.tar.xz"
           echo '4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb  '"$RUNNER_TEMP/foreground-build/node-v24.22.3-linux-x64.tar.xz" | sha256sum -c -
-          curl --fail --silent --show-error --location --max-time 60 https://raw.githubusercontent.com/microsoft/playwright/v1.65.1/utils/docker/seccomp_profile.json -o "$RUNNER_TEMP/foreground-seccomp.json"
-          echo 'cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849  '"$RUNNER_TEMP/foreground-seccomp.json" | sha256sum -c -
+          node scripts/prepare_foreground_seccomp.mjs >> "$RUNNER_TEMP/foreground-evidence/binding.txt"
+          echo 'e53c15d248f57bceec0a3a16fad1b4ab0d05a7bddb455f86a60e2dba5612cdf7  '"$RUNNER_TEMP/foreground-seccomp-playwright-1.65.1-chroot-v1.json" | sha256sum -c -
           docker build --pull -t "foreground-qa:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "$RUNNER_TEMP/foreground-build"
       - name: Install locked dependencies and build frontend before isolation
         shell: bash
@@ -100,8 +103,11 @@ jobs:
           }
           trap cleanup EXIT
           uid=$(id -u); gid=$(id -g)
+          test -f "$RUNNER_TEMP/foreground-seccomp-playwright-1.65.1-chroot-v1.json"
+          test ! -L "$RUNNER_TEMP/foreground-seccomp-playwright-1.65.1-chroot-v1.json"
+          echo 'e53c15d248f57bceec0a3a16fad1b4ab0d05a7bddb455f86a60e2dba5612cdf7  '"$RUNNER_TEMP/foreground-seccomp-playwright-1.65.1-chroot-v1.json" | sha256sum -c -
           docker create --name "$name" --network none --user "$uid:$gid" --cap-drop ALL \
-            --security-opt no-new-privileges --security-opt "seccomp=$RUNNER_TEMP/foreground-seccomp.json" \
+            --security-opt no-new-privileges --security-opt "seccomp=$RUNNER_TEMP/foreground-seccomp-playwright-1.65.1-chroot-v1.json" \
             --read-only --cpus 4 --memory 6g --pids-limit 512 --shm-size 512m \
             --tmpfs "/qa:rw,nosuid,nodev,size=2g,uid=$uid,gid=$gid,mode=700" \
             --tmpfs "/tmp:rw,nosuid,nodev,size=256m,uid=$uid,gid=$gid,mode=700" \
@@ -143,6 +149,12 @@ jobs:
               }
               trap finish EXIT
               # No server, media tool, or browser runs until this admission passes.
+              test "$(id -u)" -ne 0
+              for mask in CapInh CapPrm CapEff CapBnd CapAmb; do
+                test "$(grep -c "^$mask:[[:space:]]*0000000000000000$" "/proc/$$/status")" = 1
+              done
+              test "$(grep -c "^NoNewPrivs:[[:space:]]*1$" "/proc/$$/status")" = 1
+              printf "runtimeParentNonroot=true\nruntimeParentCapabilityMasksZero=true\nruntimeParentNoNewPrivs=1\n" >> /evidence/binding.txt
               test "$(ls /sys/class/net)" = lo
               ip -o link show lo | grep -q "<.*UP"
               test -z "$(ip -4 route show)"
