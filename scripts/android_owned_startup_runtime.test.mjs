@@ -31,7 +31,7 @@ def output(value=None):
 class Fake(m.System):
  platform='linux'
  def __init__(self,root,admission):
-  self.environ={'RUNNER_TEMP':str(root),'GITHUB_ACTIONS':'true','PATH':'/public/tools'};self.admission=admission;self.calls=[];self.bad_cert=False;self.bad_package=False;self.debug=False;self.wrong_runner=False;self.extra=False;self.changed=False;self.changed_command=False;self.timeout=False;self.unqualified=False
+  self.environ={'RUNNER_TEMP':str(root),'GITHUB_ACTIONS':'true','PATH':'/public/tools'};self.admission=admission;self.calls=[];self.bad_cert=False;self.bad_package=False;self.debug=False;self.wrong_runner=False;self.extra=False;self.changed=False;self.changed_command=False;self.timeout=False;self.empty_target_version=False;self.unqualified=False
  def process(self,pid):
   item=next(x for x in [self.admission['emulator'],self.admission['adbServer']]if x['pid']==pid);return item['startTicks']+int(self.changed),[x.encode()for x in item['cmdline']]+([b'foreign']if self.changed_command else [])
  def port_owned(self,pid,port):return pid==2345 and port==5142
@@ -46,7 +46,7 @@ class Fake(m.System):
    elif command==['shell','getprop','ro.build.version.sdk']:text='36\n'
    elif command==['emu','avd','name']:text='owned36\nOK\n'
    elif command[:4]==['shell','pm','list','packages']:text=''
-   elif command[0]=='install':text='Success\n'
+   elif command[0]=='install':text='Performing Push Install\nSuccess\n'
    elif command[:3]==['shell','am','instrument']:
     if self.timeout:raise m.Refusal('HARD_SUBPROCESS_TIMEOUT')
     if self.unqualified:
@@ -54,7 +54,8 @@ class Fake(m.System):
     else:text=output()
    else:raise AssertionError('unexpected command')
   elif tool=='aapt':
-   target=pathlib.Path(argv[-1]).name=='target.apk';package=(m.TARGET if target else m.TEST_PACKAGE);version='2.3.112' if target else '1.0-test-only';code='2003112'if target else '1'
+   target=pathlib.Path(argv[-1]).name=='target.apk';package=(m.TARGET if target else m.TEST_PACKAGE);version='2.3.112' if target else '';code='2003112'if target else ''
+   if self.empty_target_version and target:version='';code=''
    if self.bad_package and target:package='foreign.package'
    text="package: name='%s' versionCode='%s' versionName='%s'\n"%(package,code,version)
    if target and self.debug:text+='application-debuggable\n'
@@ -89,10 +90,11 @@ function run(body){
 }
 
 test('runtime controller refuses wrong host, target, signer and live process/device bindings before install',()=>run(String.raw`
-for mode,code in [('platform','HOST_NOT_ADMITTED'),('package','TARGET_APK_METADATA'),('debug','TARGET_APK_METADATA'),('certificate','APK_CERTIFICATE'),('runner','TEST_INSTRUMENTATION'),('birth','OWNED_PROCESS_CHANGED'),('inventory','DEVICE_INVENTORY'),('hash','APK_BINDING'),('cmdline','OWNED_PROCESS_CHANGED'),('reserve','STORAGE_BOUND'),('allocation','STORAGE_BOUND'),('port','CLI_IDENTITY'),('symlink','NONCANONICAL_PATH')]:
+for mode,code in [('platform','HOST_NOT_ADMITTED'),('empty-target-version','TARGET_APK_METADATA'),('package','TARGET_APK_METADATA'),('debug','TARGET_APK_METADATA'),('certificate','APK_CERTIFICATE'),('runner','TEST_INSTRUMENTATION'),('birth','OWNED_PROCESS_CHANGED'),('inventory','DEVICE_INVENTORY'),('hash','APK_BINDING'),('cmdline','OWNED_PROCESS_CHANGED'),('reserve','STORAGE_BOUND'),('allocation','STORAGE_BOUND'),('port','CLI_IDENTITY'),('symlink','NONCANONICAL_PATH')]:
  f=Fixture()
  try:
   if mode=='platform':f.fake.platform='darwin'
+  if mode=='empty-target-version':f.fake.empty_target_version=True
   if mode=='package':f.fake.bad_package=True
   if mode=='debug':f.fake.debug=True
   if mode=='certificate':f.fake.bad_cert=True
@@ -130,6 +132,9 @@ finally:f.close()
 
 test('only one complete exact-schema final evidence plus genuine JUnit completion qualifies',()=>run(String.raw`
 assert m.evidence(output())==proof()
+assert m.install_succeeded('Success\n') and m.install_succeeded('Performing Push Install\nSuccess\n')
+for text in ['Success\nFailure [x]','Failure [x]\nSuccess','Success\nSuccess','unrecognized\nSuccess','Performing Push Install\n']:
+ assert not m.install_succeeded(text)
 for field in m.BOOL_FIELDS:
  value=proof();value[field]=False;rejects(lambda:m.evidence(output(value)),'MODULE_FACTS')
 for phase,code,wanted in [('LAUNCH_ONCE','LAUNCH_ONCE_FAILED','LAUNCH_ONCE_FAILED'),('LAUNCH_ONCE','https://private.invalid/secret','UNRECOGNIZED_MODULE_FAILURE'),('https://private.invalid/phase','arbitrary secret','UNRECOGNIZED_MODULE_FAILURE')]:

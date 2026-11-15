@@ -66,6 +66,12 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def install_succeeded(output):
+    # ADB's non-streaming installer prints its mode before package-manager
+    # success. Never accept a success substring or an unrecognized extra line.
+    return output.strip().splitlines() in (["Success"], ["Performing Push Install", "Success"])
+
+
 def strict_json(text):
     def pairs(rows):
         result = {}
@@ -344,7 +350,7 @@ class Controller:
         require(type(expected) is dict and set(expected) == {"sha256", "bytes"} and type(expected["bytes"]) is int and SHA.fullmatch(expected["sha256"]) and
                 hasher.hexdigest() == expected["sha256"] and path.stat().st_size == expected["bytes"], "APK_BINDING")
         badging = self.text([str(self.aapt), "dump", "badging", str(path)])
-        packages = re.findall(r"(?m)^package: name='([^']+)' versionCode='([^']+)' versionName='([^']*)'", badging)
+        packages = re.findall(r"(?m)^package: name='([^']+)' versionCode='([^']*)' versionName='([^']*)'", badging)
         require(len(packages) == 1, "APK_PACKAGE_METADATA")
         if target:
             require(packages[0] == (TARGET, str(self.a.expected_code), self.a.expected_version) and
@@ -414,7 +420,7 @@ class Controller:
         for package in (TARGET, TEST_PACKAGE):
             require(self.text(self.adb + ["shell", "pm", "list", "packages", package]).strip() == "", "PACKAGE_NOT_FRESH")
         for path, extra in ((self.target, []), (self.test, ["-t"])):
-            require(self.text(self.adb + ["install", *extra, "--no-streaming", "--no-incremental", str(path)], 45).strip() == "Success", "INSTALL_FAILED")
+            require(install_succeeded(self.text(self.adb + ["install", *extra, "--no-streaming", "--no-incremental", str(path)], 45)), "INSTALL_FAILED")
         output = self.text(self.adb + ["shell", "am", "instrument", "-w", "-r", "-e", "class", TEST_CLASS + "#" + METHOD, TEST_PACKAGE + "/" + RUNNER], self.a.timeout)
         proof = evidence(output); self.check()
         require(self.sys.free(self.temp) >= RESERVE, "FINAL_RESERVE")
