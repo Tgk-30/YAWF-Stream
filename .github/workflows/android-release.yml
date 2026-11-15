@@ -492,14 +492,30 @@ jobs:
           binding['finalTestApk'] = {'sha256': hashlib.sha256(apk.read_bytes()).hexdigest(), 'bytes': apk.stat().st_size}
           binding['finalTestFaultCodeSha256'] = hashlib.sha256(code).hexdigest()
           binding['finalTestAliasAndLoadDefined'] = True
-          kotlin_code = subprocess.check_output(['apkanalyzer', 'dex', 'code', '--class',
-              'kotlin.jvm.internal.Intrinsics', str(apk)], timeout=90)
-          assert len(kotlin_code) <= 131072, 'TEST_KOTLIN_RUNTIME_CODE_BOUND'
-          assert re.search(rb'^\.class .* Lkotlin/jvm/internal/Intrinsics;$', kotlin_code, re.M), 'TEST_KOTLIN_RUNTIME_DEFINITION_REQUIRED'
-          assert re.search(rb'^\.method public static (?:final )?checkNotNullParameter\(Ljava/lang/Object;Ljava/lang/String;\)V$', kotlin_code, re.M), 'TEST_KOTLIN_RUNTIME_METHOD_REQUIRED'
-          binding['testKotlinRuntimeDefined'] = True
-          binding['testKotlinRuntimeCodeSha256'] = hashlib.sha256(kotlin_code).hexdigest()
-          (root / 'test-kotlin-runtime-code.txt').write_bytes(kotlin_code)
+          for cls, descriptor, method in [
+              ('org.junit.runner.JUnitCore', 'Lorg/junit/runner/JUnitCore;', 'run(Lorg/junit/runner/Request;)Lorg/junit/runner/Result;'),
+              ('org.junit.internal.TextListener', 'Lorg/junit/internal/TextListener;', 'testRunFinished(Lorg/junit/runner/Result;)V'),
+          ]:
+              junit_code = subprocess.check_output(['apkanalyzer', 'dex', 'code', '--class', cls, str(apk)], timeout=90)
+              assert len(junit_code) <= 131072, 'TEST_JUNIT_CODE_BOUND'
+              junit_text = junit_code.decode('utf8')
+              assert re.search(r'^\.class .* ' + re.escape(descriptor) + r'$', junit_text, re.M), 'TEST_JUNIT_DEFINITION_REQUIRED'
+              assert re.search(r'^\.method public (?:final )?' + re.escape(method) + r'$', junit_text, re.M), 'TEST_JUNIT_METHOD_REQUIRED'
+              binding[cls + 'CodeSha256'] = hashlib.sha256(junit_code).hexdigest()
+              (root / (cls.rsplit('.', 1)[1] + '-runtime-code.txt')).write_bytes(junit_code)
+          import importlib.util
+          spec = importlib.util.spec_from_file_location('owned_controller', 'scripts/android_owned_startup_runtime.py')
+          controller = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(controller)
+          binding['isolatedTestDex'] = controller.no_tauri_definitions(apk)
+          binding['testRuntimeNoAndroidxOrTauriDefinitions'] = True
+          signatures = root / 'module/app/build/owned-public-api-signatures/public-api-signatures.json'
+          signature_bytes = signatures.read_bytes()
+          assert 0 < len(signature_bytes) <= 1048576, 'PUBLIC_SIGNATURE_RECEIPT_BOUND'
+          signature_data = json.loads(signature_bytes)
+          assert signature_data['scope'] == 'PUBLIC_COMPILE_ONLY_SIGNATURES_NO_RUNTIME_COPIES', 'PUBLIC_SIGNATURE_RECEIPT_SCOPE'
+          binding['publicApiSignaturesSha256'] = hashlib.sha256(signature_bytes).hexdigest()
+          (root / 'public-api-signatures.json').write_bytes(signature_bytes)
           sdk = Path(os.environ.get('ANDROID_SDK_ROOT', os.environ['ANDROID_HOME']))
           badging = subprocess.check_output([str(sdk/'build-tools/36.0.0/aapt'), 'dump', 'badging', str(apk)], timeout=30)
           assert len(badging) <= 131072, 'TEST_APK_BADGING_BOUND'
@@ -538,6 +554,7 @@ jobs:
             ${{ runner.temp }}/owned-startup-build/*runtime-code.txt
             ${{ runner.temp }}/owned-startup-build/test-apk-badging.txt
             ${{ runner.temp }}/owned-startup-build/test-apk-manifest.xml
+            ${{ runner.temp }}/owned-startup-build/public-api-signatures.json
             ${{ runner.temp }}/owned-startup-runtime/ROOT-LIFECYCLE.json
             ${{ runner.temp }}/owned-startup-runtime/owned-admission.json
             ${{ runner.temp }}/owned-startup-runtime/evidence/*.json

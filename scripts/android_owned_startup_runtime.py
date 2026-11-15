@@ -279,6 +279,8 @@ def dex_class_counts(data, _definition=None):
 
 def no_tauri_definitions(apk):
     total, count, entries = 0, 0, 0
+    def definition(raw):
+        require(not raw.startswith(b"Landroidx/"), "BUNDLED_ANDROIDX_CLASS_DEFINITION")
     with zipfile.ZipFile(apk) as archive:
         names = archive.namelist()
         require(len(names) <= 20000 and len(set(names)) == len(names), "APK_ZIP_ENTRIES")
@@ -289,7 +291,7 @@ def no_tauri_definitions(apk):
             require(not info.flag_bits & 1 and info.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED), "APK_DEX_COMPRESSION")
             total += info.file_size
             require(total <= 256 * 1024**2 and info.file_size <= 128 * 1024**2, "APK_DEX_BYTES")
-            classes, forbidden = dex_class_counts(archive.read(info))
+            classes, forbidden = dex_class_counts(archive.read(info), definition)
             require(forbidden == 0, "BUNDLED_TAURI_CLASS_DEFINITION")
             count += classes; entries += 1
     require(entries > 0, "APK_DEX_MISSING")

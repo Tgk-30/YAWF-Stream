@@ -1,4 +1,8 @@
+import java.io.File
 import java.security.MessageDigest
+import java.util.zip.ZipFile
+import org.gradle.api.attributes.Category
+import org.gradle.api.attributes.Usage
 
 plugins {
     id("com.android.application")
@@ -54,8 +58,99 @@ val verifyTauriApiInput = tasks.register("verifyTauriAndroidApiInput") {
     }
 }
 
+// Resolve public signatures separately from every app/test runtime classpath.
+val publicApiSignatures = configurations.create("ownedPublicApiSignatures") {
+    isCanBeResolved = true
+    isCanBeConsumed = false
+    isTransitive = true
+    attributes {
+        attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category.LIBRARY))
+        attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage.JAVA_RUNTIME))
+    }
+    resolutionStrategy {
+        failOnDynamicVersions()
+        failOnChangingVersions()
+    }
+}
+val signatureDirectory = layout.buildDirectory.dir("owned-public-api-signatures")
+val signatureReceipt = signatureDirectory.map { it.file("public-api-signatures.json") }
+val signatureArtifacts = providers.provider {
+    publicApiSignatures.resolvedConfiguration.resolvedArtifacts.sortedBy {
+        "${it.moduleVersion.id}:${it.name}:${it.classifier.orEmpty()}"
+    }
+}
+
+fun signatureSha256(input: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    input.inputStream().use { stream ->
+        val buffer = ByteArray(65_536)
+        while (true) {
+            val count = stream.read(buffer)
+            if (count < 0) break
+            digest.update(buffer, 0, count)
+        }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+}
+
+fun signatureEntries(input: File): List<String> = when (input.extension.lowercase()) {
+    "jar" -> listOf("")
+    "aar" -> ZipFile(input).use { archive ->
+        val entries = archive.entries().asSequence().filter { entry ->
+            !entry.isDirectory && (entry.name == "classes.jar" || Regex("libs/[A-Za-z0-9_.-]+\\.jar").matches(entry.name))
+        }.map { it.name }.toList()
+        require(entries.size == entries.distinct().size) { "PUBLIC_SIGNATURE_DUPLICATE_JAR_ENTRY" }
+        entries.sorted()
+    }
+    else -> throw GradleException("PUBLIC_SIGNATURE_ARTIFACT_NOT_JAR_OR_AAR")
+}
+
+fun signatureJar(input: File, entry: String): File = signatureDirectory.get().asFile.resolve(
+    "${signatureSha256(input)}-${if (entry.isEmpty()) "artifact.jar" else entry.replace('/', '_')}"
+)
+
+val signatureJarFiles = signatureArtifacts.map { artifacts ->
+    artifacts.flatMap { artifact -> signatureEntries(artifact.file).map { signatureJar(artifact.file, it) } }
+}
+val extractPublicApiSignatureJars = tasks.register("extractPublicApiSignatureJars") {
+    dependsOn(verifyTauriApiInput)
+    inputs.files(publicApiSignatures)
+    outputs.files(signatureJarFiles)
+    outputs.file(signatureReceipt)
+    doLast {
+        val directory = signatureDirectory.get().asFile
+        require(directory.isDirectory || directory.mkdirs()) { "PUBLIC_SIGNATURE_OUTPUT_DIRECTORY" }
+        val artifacts = signatureArtifacts.get().map { artifact ->
+            val input = artifact.file
+            val jars = signatureEntries(input).map { entry ->
+                val output = signatureJar(input, entry)
+                if (entry.isEmpty()) {
+                    input.copyTo(output, overwrite = true)
+                } else {
+                    ZipFile(input).use { archive ->
+                        val jar = archive.getEntry(entry)
+                        require(jar.size in 1..(64L * 1024 * 1024)) { "PUBLIC_SIGNATURE_JAR_SIZE" }
+                        archive.getInputStream(jar).use { stream ->
+                            output.outputStream().use { stream.copyTo(it) }
+                        }
+                    }
+                }
+                mapOf("entry" to entry, "file" to output.name, "sha256" to signatureSha256(output))
+            }
+            mapOf("component" to artifact.moduleVersion.id.toString(), "artifact" to input.name,
+                "artifactSha256" to signatureSha256(input), "jars" to jars)
+        }
+        require(signatureJarFiles.get().isNotEmpty()) { "PUBLIC_SIGNATURE_JARS_MISSING" }
+        signatureReceipt.get().asFile.writeText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(
+            mapOf("schemaVersion" to 1, "scope" to "PUBLIC_COMPILE_ONLY_SIGNATURES_NO_RUNTIME_COPIES",
+                "rootDependency" to "androidx.appcompat:appcompat:1.6.0", "artifacts" to artifacts)
+        )) + "\n")
+    }
+}
+val publicApiSignatureClasspath = files(signatureJarFiles).builtBy(extractPublicApiSignatureJars)
+
 android {
-    // Java-only empty main model must not absorb the test APK's Kotlin runtime.
+    // Java-only platform/JUnit harness must not add a Kotlin runtime.
     enableKotlin = false
     namespace = "com.yawf.ownedstartupinstrumentation"
     compileSdk = 36
@@ -90,15 +185,11 @@ dependencies {
     // packaged AAR. Runtime classes must come from the installed production APK.
     compileOnly(files(apiClassesJar))
     androidTestCompileOnly(files(apiClassesJar))
-    // Plugin's public API signatures mention AppCompatActivity. Keep this
-    // ordinary AndroidX dependency in the instrumentation APK, never compileOnly.
-    androidTestImplementation("androidx.appcompat:appcompat:1.6.0")
-    // Installed target is minified; tests need their own ordinary Kotlin classes.
-    androidTestImplementation("org.jetbrains.kotlin:kotlin-stdlib:2.3.21")
-    androidTestImplementation("androidx.test:runner:1.7.0")
-    androidTestImplementation("androidx.test:core:1.7.0")
-    androidTestImplementation("androidx.test.ext:junit:1.3.0")
-    androidTestImplementation("junit:junit:4.13.2")
+    // Tauri's public signatures require these types at compile time only.
+    add(publicApiSignatures.name, "androidx.appcompat:appcompat:1.6.0")
+    androidTestCompileOnly(publicApiSignatureClasspath)
+    androidTestImplementation("junit:junit:4.13.2") { isTransitive = false }
+    androidTestImplementation("org.hamcrest:hamcrest-core:1.3") { isTransitive = false }
 }
 
 tasks.named("preBuild").configure {

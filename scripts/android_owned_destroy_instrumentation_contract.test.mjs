@@ -18,22 +18,27 @@ test('API linkage is checksum-bound compile-only JAR, never packaged AAR or impl
   assert.match(gradle, /TAURI_ANDROID_API_SOURCE_RECEIPT_REQUIRED/);
   assert.match(gradle, /compileOnly\(files\(apiClassesJar\)\)/);
   assert.match(gradle, /androidTestCompileOnly\(files\(apiClassesJar\)\)/);
-  assert.match(gradle, /androidTestImplementation\("androidx\.appcompat:appcompat:1\.6\.0"\)/);
+  assert.match(gradle, /add\(publicApiSignatures\.name, "androidx\.appcompat:appcompat:1\.6\.0"\)/);
   const compileOnlyLines = (source) => source.split('\n')
     .filter((line) => /^\s*(?:androidTest)?[cC]ompileOnly\s*\(/.test(line))
     .map((line) => line.trim());
-  const exactApiJarOnly = (source) => JSON.stringify(compileOnlyLines(source)) === JSON.stringify([
+  const exactLocalJarInputs = (source) => JSON.stringify(compileOnlyLines(source)) === JSON.stringify([
     'compileOnly(files(apiClassesJar))',
     'androidTestCompileOnly(files(apiClassesJar))',
+    'androidTestCompileOnly(publicApiSignatureClasspath)',
   ]);
-  assert.equal(exactApiJarOnly(gradle), true);
-  assert.equal(exactApiJarOnly(gradle.replace(
+  assert.equal(exactLocalJarInputs(gradle), true);
+  assert.equal(exactLocalJarInputs(gradle.replace(
     'androidTestCompileOnly(files(apiClassesJar))',
     'androidTestCompileOnly("androidx.appcompat:appcompat:1.6.0")'
   )), false);
-  assert.equal(exactApiJarOnly(gradle.replace(
+  assert.equal(exactLocalJarInputs(gradle.replace(
     'compileOnly(files(apiClassesJar))',
     'compileOnly(project(":tauri-android"))'
+  )), false);
+  assert.equal(exactLocalJarInputs(gradle.replace(
+    'androidTestCompileOnly(publicApiSignatureClasspath)',
+    'androidTestCompileOnly(publicApiSignatures)'
   )), false);
   const hashBindingContract = (source) => /require\(digest == apiClassesJarSha256\)/.test(source) &&
     /TAURI_ANDROID_API_CLASSES_JAR_HASH_MISMATCH/.test(source);
@@ -147,16 +152,117 @@ test('reported artifact is fixed-schema, redacted, and scoped to this selected r
 });
 
 
-test('Java-only module keeps ordinary Kotlin runtime in the test APK, not its empty main target', async () => {
+test('AppCompat signatures are isolated, JAR-only, task-bound and receipted without resource extraction', async () => {
+  const gradle = await read('app/build.gradle.kts');
+  const signatureContract = (source) => [
+    'configurations.create("ownedPublicApiSignatures")',
+    'isCanBeResolved = true',
+    'isCanBeConsumed = false',
+    'isTransitive = true',
+    'entry.name == "classes.jar"',
+    'Regex("libs/[A-Za-z0-9_.-]+\\\\.jar").matches(entry.name)',
+    'signatureEntries(input).map { entry ->',
+    'archive.getInputStream(jar)',
+    'input.copyTo(output, overwrite = true)',
+    'files(signatureJarFiles).builtBy(extractPublicApiSignatureJars)',
+    'androidTestCompileOnly(publicApiSignatureClasspath)',
+    '"component" to artifact.moduleVersion.id.toString()',
+    '"artifactSha256" to signatureSha256(input)',
+    '"sha256" to signatureSha256(output)',
+    '"PUBLIC_COMPILE_ONLY_SIGNATURES_NO_RUNTIME_COPIES"',
+  ].every((required) => source.includes(required)) &&
+    !/zipTree\(|extendsFrom\(|(?:include|from)\([^\n]*["']res\//.test(source);
+  assert.equal(signatureContract(gradle), true);
+  for (const required of [
+    'entry.name == "classes.jar"',
+    'Regex("libs/[A-Za-z0-9_.-]+\\\\.jar").matches(entry.name)',
+    '.builtBy(extractPublicApiSignatureJars)',
+    '"artifactSha256" to signatureSha256(input)',
+    '"sha256" to signatureSha256(output)',
+  ]) {
+    assert.ok(gradle.includes(required));
+    assert.equal(signatureContract(gradle.replace(required, 'REMOVED_REQUIRED_SIGNATURE_GUARD')), false);
+  }
+  assert.equal(signatureContract(gradle.replace(
+    'androidTestCompileOnly(publicApiSignatureClasspath)', 'androidTestCompileOnly(publicApiSignatures)'
+  )), false);
+});
+
+test('platform runner executes genuine one-method JUnit with callback-only statuses and fail-closed bounded output', async () => {
+  const runner = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyInstrumentationRunner.java');
+  const testSource = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java');
+  const genuineJUnitContract = (source) => [
+    'extends Instrumentation',
+    'super.onCreate(arguments);',
+    'start();',
+    'Looper.myLooper() == Looper.getMainLooper()',
+    'JUnitCore junit = new JUnitCore();',
+    'junit.addListener(observed);',
+    'junit.addListener(new TextListener(text));',
+    'junit.run(Request.method(OwnedDestroyRetryTest.class, TEST_METHOD))',
+    'publish(1, description);',
+    'publish(failures == 0 && assumptions == 0 ? 0 : -2, description);',
+    'identityMatched && runStarts == 1 && runFinishes == 1 && starts == 1 && finishes == 1',
+    'failures == 0 && ignored == 0 && assumptions == 0 && result.wasSuccessful()',
+    'result.getRunCount() == 1 && result.getFailureCount() == 0',
+    'result.getIgnoreCount() == 0 && result.getAssumptionFailureCount() == 0',
+    'observed.singleSuccessfulTest(result) && !output.truncated() && !text.checkError()',
+    'MAX_BYTES = 16_384',
+    'Math.min(length, MAX_BYTES - bytes.size())',
+    'finish(success ? Activity.RESULT_OK : Activity.RESULT_CANCELED, results);',
+  ].every((required) => source.includes(required)) &&
+    /catch \(Throwable failure\) \{\s*success = false;/.test(source) &&
+    (source.match(/\bsendStatus\(/g) ?? []).length === 1 &&
+    !/new Result\(|OK \(1 test\)|owned_destroy_evidence|AndroidJUnitRunner|InstrumentationRegistry/.test(source);
+  assert.equal(genuineJUnitContract(runner), true);
+  assert.match(runner, /TEST_CLASS = "com\.yawf\.ownedstartup\.OwnedDestroyRetryTest"/);
+  assert.match(runner, /TEST_METHOD = "acceptedPluginLoadFailureIsDestroyedThenOneNativeRetrySucceeds"/);
+  assert.match(runner, /\(TEST_CLASS \+ "#" \+ TEST_METHOD\)\.equals\(arguments\.getString\("class"\)\)/);
+  assert.match(runner, /runner == null \|\| runner\.getClass\(\) != OwnedDestroyInstrumentationRunner\.class \|\| !runner\.junitRunning/);
+  assert.match(runner, /void testStarted\(Description description\) \{\s*starts\+\+;\s*publish\(1, description\)/);
+  assert.match(runner, /void testFinished\(Description description\) \{\s*finishes\+\+;\s*publish\(/);
+  assert.match(runner, /status\.putString\("class", description\.getClassName\(\)\)/);
+  assert.match(runner, /status\.putString\("test", description\.getMethodName\(\)\)/);
+  assert.match(runner, /status\.putInt\("numtests", 1\)/);
+  assert.match(testSource, /OwnedDestroyInstrumentationRunner\.currentRunner\(\)/);
+  assert.equal((testSource.match(/^\s*@Test$/gm) ?? []).length, 1);
+  assert.doesNotMatch(`${runner}\n${testSource}`, /androidx\.|InstrumentationRegistry|@RunWith|AndroidJUnit4/);
+  for (const required of [
+    'junit.run(Request.method(OwnedDestroyRetryTest.class, TEST_METHOD))',
+    'junit.addListener(new TextListener(text));',
+    'publish(1, description);',
+    'result.getRunCount() == 1 && result.getFailureCount() == 0',
+    'result.getIgnoreCount() == 0 && result.getAssumptionFailureCount() == 0',
+    '!output.truncated()',
+    'success = false;\n            // Bootstrap',
+  ]) {
+    assert.ok(runner.includes(required));
+    assert.equal(genuineJUnitContract(runner.replace(required, 'REMOVED_REQUIRED_JUNIT_GUARD')), false);
+  }
+  assert.equal(genuineJUnitContract(runner.replace(
+    'finish(success ? Activity.RESULT_OK : Activity.RESULT_CANCELED, results);',
+    'finish(Activity.RESULT_OK, results);'
+  )), false);
+});
+
+test('Java-only test APK packages only pinned JUnit and Hamcrest, never AndroidX or Kotlin runtimes', async () => {
   const gradle = await read('app/build.gradle.kts');
   const properties = await read('gradle.properties');
   const moduleKotlinDisabled = (source) => /android \{\n    \/\/[^\n]*\n    enableKotlin = false\n/.test(source);
-  const testKotlinRuntime = (source) => /^    androidTestImplementation\("org\.jetbrains\.kotlin:kotlin-stdlib:2\.3\.21"\)$/m.test(source);
+  const onlyJUnitRuntime = (source) => JSON.stringify(source.split('\n').filter((line) =>
+    /\b(?:[A-Za-z]*(?:Implementation|RuntimeOnly)|implementation|runtimeOnly)\s*\(/.test(line)
+  ).map((line) => line.trim())) === JSON.stringify([
+    'androidTestImplementation("junit:junit:4.13.2") { isTransitive = false }',
+    'androidTestImplementation("org.hamcrest:hamcrest-core:1.3") { isTransitive = false }',
+  ]);
   assert.equal(moduleKotlinDisabled(gradle), true);
-  assert.equal(testKotlinRuntime(gradle), true);
+  assert.equal(onlyJUnitRuntime(gradle), true);
   assert.equal(moduleKotlinDisabled(gradle.replace('enableKotlin = false', '')), false);
-  assert.equal(testKotlinRuntime(gradle.replace('androidTestImplementation("org.jetbrains.kotlin:kotlin-stdlib:2.3.21")', '')), false);
-  assert.equal(testKotlinRuntime(gradle.replace('androidTestImplementation("org.jetbrains.kotlin:kotlin-stdlib:2.3.21")', 'compileOnly("org.jetbrains.kotlin:kotlin-stdlib:2.3.21")')), false);
+  for (const unwanted of ['androidx.test:runner:1.7.0', 'androidx.appcompat:appcompat:1.6.0', 'org.jetbrains.kotlin:kotlin-stdlib:2.3.21']) {
+    assert.equal(onlyJUnitRuntime(`${gradle}\nandroidTestImplementation("${unwanted}")\n`), false);
+  }
+  assert.equal(onlyJUnitRuntime(gradle.replace('junit:junit:4.13.2', 'junit:junit:4.12')), false);
+  assert.equal(onlyJUnitRuntime(gradle.replace('org.hamcrest:hamcrest-core:1.3', 'org.hamcrest:hamcrest-core:2.2')), false);
   assert.doesNotMatch(properties, /android\.(?:builtInKotlin|newDsl)\s*=\s*false/);
   assert.match(gradle, /compileOnly\(files\(apiClassesJar\)\)/);
   assert.match(gradle, /androidTestCompileOnly\(files\(apiClassesJar\)\)/);

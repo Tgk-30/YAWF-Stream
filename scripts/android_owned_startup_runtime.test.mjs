@@ -136,6 +136,29 @@ try:
 finally:f.close()
 `));
 
+test('test APK rejects AndroidX definitions in every DEX without rejecting references or retaining class names',()=>run(String.raw`
+names=['Landroidx/test/runner/AndroidJUnitRunner;','Landroidx/startup/InitializationProvider;','Landroidx/appcompat/app/AppCompatActivity;','Landroidx/private/CustomerName;']
+f=Fixture()
+try:
+ p=pathlib.Path(f.args.test_apk)
+ for name in names:
+  assert m.dex_class_counts(dex(name,False))==(0,0)
+  assert m.dex_class_counts(dex(name,True))==(1,0)
+  with zipfile.ZipFile(p,'w')as archive:
+   archive.writestr('classes.dex',dex('Landroidxish/Observer;',True));archive.writestr('classes10.dex',dex(name,False))
+  assert m.no_tauri_definitions(p)=={'dexFiles':2,'classDefinitions':1,'tauriClassDefinitions':0}
+  for entry in ['classes.dex','classes10.dex']:
+   with zipfile.ZipFile(p,'w')as archive:
+    archive.writestr(entry,dex(name,True))
+   try:m.no_tauri_definitions(p)
+   except m.Refusal as error:
+    assert str(error)=='BUNDLED_ANDROIDX_CLASS_DEFINITION'
+    assert error.module_evidence is None
+    assert name not in str(error) and 'CustomerName'not in str(error)
+   else:raise AssertionError('bundled AndroidX definition accepted')
+finally:f.close()
+`));
+
 test('only one complete exact-schema final evidence plus genuine JUnit completion qualifies',()=>run(String.raw`
 assert m.evidence(output())==proof()
 xml='<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="'+m.TEST_PACKAGE+'"><instrumentation android:name="'+m.RUNNER+'" android:targetPackage="'+m.TARGET+'"/></manifest>'

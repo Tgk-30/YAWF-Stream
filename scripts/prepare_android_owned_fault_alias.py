@@ -25,12 +25,12 @@ METHOD = "(Landroid/webkit/WebView;)V"
 CLASSES = ("app.tauri.plugin.PluginManager", "app.tauri.plugin.PluginHandle")
 CRATE = "f316751027fc2644221d1a448564d519efb07067fda584879d9cda966391d212"
 MODULE_FILES = {
-    "README.md": "7be8d39d3583b2443cbd3e3936717af6350157cf516c5d9055c113f3421ea566",
-    "app/build.gradle.kts": "a08e4fd5f9489f45662ecd1bb665d3a7db89d1e6a0f97a781d036288e52b6101",
+    "README.md": "b5c971e96a6751609046650e5c8d5c435a890f45c1261485d7a093641930f06b",
+    "app/build.gradle.kts": "f287aacede66c297d7cb66ebd12e0d9f2ae3d9db1f4c52121fd6e9e925adf4fb",
     "app/src/androidTest/AndroidManifest.xml": "bb1c618c5a517eba63d8c2355b1470a355b2baca85e393695b2e05dcc96001d3",
     "app/src/androidTest/java/com/yawf/ownedstartup/FaultOncePlugin.java": "14c3fb04da8343d19b4392b8b3c6eb31cf4cdfcea33776ba10ce36cdf18f1369",
-    "app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyInstrumentationRunner.java": "746ad475010a9fc0ec067325c6c43ba4f339d626f6f50e5cb50d25c652ac372c",
-    "app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java": "c07e8fc633a1acb03210cf5b97e5d81e15381e96d932750be2ae4144b288f4df",
+    "app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyInstrumentationRunner.java": "a643859077b023a8a967327a134702a3394976b1e9fb5c485e835e7870ee0d6c",
+    "app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java": "e0eb2c01190d95b47b681a377aaa04f432a84c8291998fd4f332be029f87ab90",
     "app/src/main/AndroidManifest.xml": "301a12775b404acb424205c2289dbb25b15924e83ba54911a4739dd1d7238105",
     "build.gradle.kts": "08ebf0c379db7cd09ef90385dd9397e249498ce070c1b594a9735ab88ba7707f",
     "gradle.properties": "fb298af7d84d0e20523e7172625a8d975a11efa043c573ca97f8997a0e84fb5f",

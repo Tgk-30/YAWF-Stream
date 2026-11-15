@@ -14,9 +14,6 @@ import android.view.ViewGroup;
 import android.webkit.WebView;
 import android.widget.Button;
 
-import androidx.test.ext.junit.runners.AndroidJUnit4;
-import androidx.test.platform.app.InstrumentationRegistry;
-
 import app.tauri.plugin.Plugin;
 import app.tauri.plugin.PluginHandle;
 import app.tauri.plugin.PluginManager;
@@ -24,7 +21,6 @@ import app.tauri.plugin.PluginManager;
 import org.json.JSONObject;
 import org.junit.Rule;
 import org.junit.Test;
-import org.junit.runner.RunWith;
 import org.junit.rules.TestWatcher;
 import org.junit.runner.Description;
 
@@ -37,7 +33,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 
 /** One real app launch, one qualifying injected failure, one verified native tap, no retry loop. */
-@RunWith(AndroidJUnit4.class)
 public final class OwnedDestroyRetryTest {
     private static final long TOTAL_DEADLINE_MS = 150_000L;
     private static final long FAILURE_UI_DEADLINE_MS = 60_000L;
@@ -82,8 +77,8 @@ public final class OwnedDestroyRetryTest {
         startedAt = SystemClock.elapsedRealtime();
         phase = "PREFLIGHT";
         OwnedDestroyInstrumentationRunner instrumentation =
-                (OwnedDestroyInstrumentationRunner) InstrumentationRegistry.getInstrumentation();
-        Context target = InstrumentationRegistry.getInstrumentation().getTargetContext();
+                OwnedDestroyInstrumentationRunner.currentRunner();
+        Context target = instrumentation.getTargetContext();
         require(OwnedDestroyInstrumentationRunner.TARGET_PACKAGE.equals(target.getPackageName()), "TARGET_PACKAGE_MISMATCH");
         targetPackageMatched = true;
         require((target.getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) == 0,
@@ -97,7 +92,7 @@ public final class OwnedDestroyRetryTest {
                 OwnedDestroyInstrumentationRunner.TARGET_ACTIVITY.equals(launch.getComponent().getClassName()),
                 "TARGET_LAUNCH_COMPONENT_MISMATCH");
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-        InstrumentationRegistry.getInstrumentation().startActivitySync(launch);
+        instrumentation.startActivitySync(launch);
         await(instrumentation, FAILURE_UI_DEADLINE_MS, this::failureUiReady, "INJECTED_FAILURE_UI_TIMEOUT");
 
         phase = "PRE_RETRY_ASSERTIONS";
@@ -123,7 +118,7 @@ public final class OwnedDestroyRetryTest {
         require(SystemClock.elapsedRealtime() - tap.capturedAt <= TAP_PLAN_MAX_AGE_MS, "RETRY_TAP_PLAN_EXPIRED");
         require(tapCount == 0, "RETRY_TAP_ALREADY_USED");
         tapCount = 1;
-        sendExactlyOneTap(InstrumentationRegistry.getInstrumentation(), tap);
+        sendExactlyOneTap(instrumentation, tap);
 
         phase = "WAITING_FOR_SAME_ACTIVITY_RETRY";
         await(instrumentation, RETRY_DEADLINE_MS, this::successfulRetryReady, "RETRY_SUCCESS_TIMEOUT");
@@ -158,10 +153,10 @@ public final class OwnedDestroyRetryTest {
     }
 
     private boolean failureUiReady() {
-        String refusal = ((OwnedDestroyInstrumentationRunner) InstrumentationRegistry.getInstrumentation()).refusalCode();
+        String refusal = OwnedDestroyInstrumentationRunner.currentRunner().refusalCode();
         if (refusal != null) fail("RUNNER_REFUSED_" + refusal);
-        FaultOncePlugin fault = ((OwnedDestroyInstrumentationRunner) InstrumentationRegistry.getInstrumentation()).faultPlugin();
-        Activity activity = ((OwnedDestroyInstrumentationRunner) InstrumentationRegistry.getInstrumentation()).targetActivity();
+        FaultOncePlugin fault = OwnedDestroyInstrumentationRunner.currentRunner().faultPlugin();
+        Activity activity = OwnedDestroyInstrumentationRunner.currentRunner().targetActivity();
         if (fault == null || activity == null) return false;
         if (fault.loadCount() == 0) return false;
         if (!fault.firstPluginVerified()) fail("FAULT_NOT_FIRST");
@@ -172,7 +167,7 @@ public final class OwnedDestroyRetryTest {
 
     private boolean successfulRetryReady() {
         OwnedDestroyInstrumentationRunner runner =
-                (OwnedDestroyInstrumentationRunner) InstrumentationRegistry.getInstrumentation();
+                OwnedDestroyInstrumentationRunner.currentRunner();
         String refusal = runner.refusalCode();
         if (refusal != null) fail("RUNNER_REFUSED_" + refusal);
         Activity activity = runner.targetActivity();
@@ -187,7 +182,7 @@ public final class OwnedDestroyRetryTest {
 
     private boolean pluginHandleLoaded(FaultOncePlugin fault) {
         AtomicReference<Boolean> result = new AtomicReference<>(false);
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> result.set(pluginHandleLoadedOnMain(fault)));
+        OwnedDestroyInstrumentationRunner.currentRunner().runOnMainSync(() -> result.set(pluginHandleLoadedOnMain(fault)));
         return result.get();
     }
 
@@ -243,7 +238,7 @@ public final class OwnedDestroyRetryTest {
 
     private static WebView readUniqueWryWebViewField(Activity activity) {
         AtomicReference<WebView> result = new AtomicReference<>();
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> result.set(readUniqueWryWebViewFieldOnMain(activity)));
+        OwnedDestroyInstrumentationRunner.currentRunner().runOnMainSync(() -> result.set(readUniqueWryWebViewFieldOnMain(activity)));
         return result.get();
     }
 
@@ -263,7 +258,7 @@ public final class OwnedDestroyRetryTest {
 
     private static WebView readUniqueHelperAcceptedWebView(Activity activity) {
         AtomicReference<WebView> result = new AtomicReference<>();
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> result.set(readUniqueHelperAcceptedWebViewOnMain(activity)));
+        OwnedDestroyInstrumentationRunner.currentRunner().runOnMainSync(() -> result.set(readUniqueHelperAcceptedWebViewOnMain(activity)));
         return result.get();
     }
 
@@ -283,7 +278,7 @@ public final class OwnedDestroyRetryTest {
 
     private static boolean mainActivityReferencesNewView(Activity activity, WebView newView, WebView oldView) {
         AtomicReference<Boolean> result = new AtomicReference<>(false);
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(() ->
+        OwnedDestroyInstrumentationRunner.currentRunner().runOnMainSync(() ->
                 result.set(mainActivityReferencesNewViewOnMain(activity, newView, oldView)));
         return result.get();
     }
@@ -320,21 +315,21 @@ public final class OwnedDestroyRetryTest {
 
     private static boolean viewDetachedOnMain(View view) {
         AtomicReference<Boolean> result = new AtomicReference<>(false);
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(() ->
+        OwnedDestroyInstrumentationRunner.currentRunner().runOnMainSync(() ->
                 result.set(view.getParent() == null && !view.isAttachedToWindow()));
         return result.get();
     }
 
     private static boolean viewAttachedOnMain(View view) {
         AtomicReference<Boolean> result = new AtomicReference<>(false);
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(() ->
+        OwnedDestroyInstrumentationRunner.currentRunner().runOnMainSync(() ->
                 result.set(view.getParent() != null && view.isAttachedToWindow()));
         return result.get();
     }
 
     private static UiSnapshot inspectOnMain(Activity activity) {
         AtomicReference<UiSnapshot> result = new AtomicReference<>();
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+        OwnedDestroyInstrumentationRunner.currentRunner().runOnMainSync(() -> {
             View decor = activity.getWindow().getDecorView();
             List<WebView> webViews = new ArrayList<>();
             List<Button> retryButtons = new ArrayList<>();
@@ -363,7 +358,7 @@ public final class OwnedDestroyRetryTest {
 
     private static TapPlan buildTapPlanOnMain(Activity activity) {
         AtomicReference<TapPlan> result = new AtomicReference<>();
-        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+        OwnedDestroyInstrumentationRunner.currentRunner().runOnMainSync(() -> {
             View decor = activity.getWindow().getDecorView();
             List<WebView> webViews = new ArrayList<>();
             List<Button> matches = new ArrayList<>();
@@ -433,7 +428,7 @@ public final class OwnedDestroyRetryTest {
     private void emitEvidence() {
         OwnedDestroyInstrumentationRunner runner = null;
         try {
-            runner = (OwnedDestroyInstrumentationRunner) InstrumentationRegistry.getInstrumentation();
+            runner = OwnedDestroyInstrumentationRunner.currentRunner();
         } catch (RuntimeException ignored) { }
         FaultOncePlugin fault = runner == null ? null : runner.faultPlugin();
         Activity activity = runner == null ? null : runner.targetActivity();
@@ -469,7 +464,7 @@ public final class OwnedDestroyRetryTest {
         evidence.put("pluginHandleLoaded", fault != null && pluginHandleLoaded(fault));
         Bundle status = new Bundle();
         status.putString("owned_destroy_evidence", new JSONObject(evidence).toString());
-        InstrumentationRegistry.getInstrumentation().sendStatus(0, status);
+        OwnedDestroyInstrumentationRunner.currentRunner().sendStatus(0, status);
     }
 
     private static boolean safeSnapshotHasNoRetry(Activity activity) {
