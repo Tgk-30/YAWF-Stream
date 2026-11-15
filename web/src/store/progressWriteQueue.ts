@@ -15,10 +15,10 @@ export interface ProgressWriteJob {
 
 const MAX_PENDING_PROGRESS_WRITES = 64;
 const PROFILE_PROGRESS_DRAIN_TIMEOUT_MS = 12_000;
-export const PROGRESS_HISTORY_TIMEOUT_MS = 10_000;
+const PROGRESS_HISTORY_TIMEOUT_MS = 10_000;
 
 /** Timeout/abort wrapper kept in the lazily loaded progress-only chunk. */
-export async function withProgressWriteTimeout<T>(
+async function withProgressWriteTimeout<T>(
   signal: AbortSignal,
   write: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
@@ -62,6 +62,7 @@ export class ProgressWriteQueue {
   recordResume(
     store: object,
     generation: number,
+    remote: boolean,
     persist: (entry: WatchHistoryUpsert, signal: AbortSignal) => Promise<unknown>,
     item: MediaPreview,
     progressSeconds: number,
@@ -120,7 +121,11 @@ export class ProgressWriteQueue {
       episodeId: episodeId ?? null,
       snapshot: entry,
       mergeSnapshot: mergePendingEntries,
-      write: (signal, snapshot) => persist(snapshot as typeof entry, signal),
+      write: (signal, snapshot) => remote
+        ? withProgressWriteTimeout(signal, (writeSignal) =>
+            persist(snapshot as typeof entry, writeSignal),
+          )
+        : persist(snapshot as typeof entry, signal),
     });
   }
 

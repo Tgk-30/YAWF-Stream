@@ -53,14 +53,10 @@ class ServerAPI {
     return this.request<T>("GET", path);
   }
 
-  async put<T>(path: string, body: unknown): Promise<T> {
-    return this.request<T>("PUT", path, body);
-  }
-
-  async putProgress<T>(
+  async put<T>(
     path: string,
     body: unknown,
-    signal: AbortSignal,
+    signal?: AbortSignal,
   ): Promise<T> {
     return this.request<T>("PUT", path, body, signal);
   }
@@ -370,25 +366,14 @@ export class RemoteStore implements Store, SecretStore {
     throw unsupportedRemoteWrite("assignWatchlistFolder");
   }
 
-  async recordHistory(entry: WatchHistoryUpsert): Promise<WatchHistoryRecord> {
-    return this.writeHistory(entry);
-  }
-
-  /** Playback-only bounded write path. Other ServerAPI requests retain their existing semantics. */
-  async recordHistoryProgress(
-    entry: WatchHistoryUpsert,
-    signal: AbortSignal,
-  ): Promise<WatchHistoryRecord> {
-    const { withProgressWriteTimeout } = await import("../store/progressWriteQueue");
-    return withProgressWriteTimeout(signal, (writeSignal) =>
-      this.writeHistory(entry, writeSignal),
-    );
-  }
-
-  private async writeHistory(
+  /** Only the lazy playback queue supplies cancellation and a write deadline. */
+  async recordHistory(
     entry: WatchHistoryUpsert,
     signal?: AbortSignal,
   ): Promise<WatchHistoryRecord> {
+    if (signal?.aborted) {
+      throw new DOMException("Progress write cancelled", "AbortError");
+    }
     const episodeId = entry.episodeId ?? null;
     const progressSeconds = entry.progressSeconds ?? 0;
     const durationSeconds = entry.durationSeconds ?? null;
@@ -423,9 +408,7 @@ export class RemoteStore implements Store, SecretStore {
       ok?: boolean;
       item?: ServerHistoryResponse["items"][number];
     };
-    const response = signal == null
-      ? await this.api.put<Response>(path, body)
-      : await this.api.putProgress<Response>(path, body, signal);
+    const response = await this.api.put<Response>(path, body, signal);
     if (response.item != null) return mapHistory(response.item);
     // Older servers return only { ok: true }. Keep that response compatible by
     // building the submitted record locally rather than re-fetching up to 500

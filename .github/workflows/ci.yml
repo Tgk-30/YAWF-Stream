@@ -345,7 +345,20 @@ jobs:
           npm run build || build_status=$?
           test_status=0
           npx vitest run || test_status=$?
-          test "$build_status" -eq 0 && test "$test_status" -eq 0
+          causal_status=0
+          node ../scripts/check_progress_write_regressions.mjs || causal_status=$?
+          test "$build_status" -eq 0 && test "$test_status" -eq 0 && test "$causal_status" -eq 0
+
+      - name: Retain progress regression causality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: progress-write-regression-causality
+          path: |
+            ${{ runner.temp }}/progress-write-regressions.json
+            ${{ runner.temp }}/progress-write-regressions-*/*.json
+          if-no-files-found: warn
+          retention-days: 3
 
       - name: Retain exact app bundle diagnostics
         if: always()

@@ -1446,6 +1446,32 @@ describe("recordResume", () => {
     expect(result.current.continueWatching).toBe(continueWatchingBefore);
   });
 
+  it("keeps Local Mode progress unbounded and passes no transport signal", async () => {
+    const write = deferred<unknown>();
+    const localRecordHistory = vi.fn((_entry: unknown) => write.promise);
+    getStore.mockReturnValue({ ...fakeStore, recordHistory: localRecordHistory });
+    const { result } = await renderStore();
+    loadContinueWatching.mockClear();
+    vi.useFakeTimers();
+    act(() => result.current.recordResume(createProgressWriteQueue, media("local-no-deadline"), 30, 100));
+    const refresh = result.current.refreshContinueWatching();
+    const settled = vi.fn();
+    void refresh.then(settled);
+    expect(localRecordHistory).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ mediaId: "local-no-deadline", progressSeconds: 30 }),
+    );
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_001); });
+    expect(settled).not.toHaveBeenCalled();
+    expect(loadContinueWatching).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => {
+      write.resolve({});
+      await refresh;
+    });
+    expect(loadContinueWatching).toHaveBeenCalledTimes(1);
+  });
+
   it("does not invalidate pending bootstrap history slices on a resume tick", async () => {
     const historyPending = deferred<MediaPreview[]>();
     const continuePending = deferred<unknown[]>();
@@ -2278,12 +2304,12 @@ describe("reloadProfileData", () => {
       resetProfileCache: ReturnType<typeof vi.fn>;
       getCachedResolutions: (ids: string[]) => Promise<unknown[]>;
       deleteCachedResolution: (id: string) => Promise<void>;
-      recordHistoryProgress: (entry: unknown, signal: AbortSignal) => Promise<unknown>;
+      recordHistory: (entry: unknown, signal: AbortSignal) => Promise<unknown>;
     };
     remote.getCachedResolutions = () => Promise.resolve([]);
     remote.deleteCachedResolution = () => Promise.resolve();
     let requestSignal: AbortSignal | undefined;
-    remote.recordHistoryProgress = vi.fn((_entry: unknown, signal: AbortSignal) => {
+    remote.recordHistory = vi.fn((_entry: unknown, signal: AbortSignal) => {
       requestSignal = signal;
       return new Promise((_resolve, reject) => {
         signal.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError")), { once: true });
@@ -2299,43 +2325,65 @@ describe("reloadProfileData", () => {
       await result.current.reloadProfileData();
     });
     expect(requestSignal?.aborted).toBe(true);
-    expect(remote.recordHistoryProgress).toHaveBeenCalledTimes(1);
+    expect(remote.recordHistory).toHaveBeenCalledTimes(1);
   });
 
-  it("times out the bounded profile-transition drain and aborts the old request", async () => {
+  it("bounds the profile drain at 12 seconds while remote progress times out and advances", async () => {
     const Ctor = MockRemoteStore as unknown as new () => Record<string, unknown>;
     const remote = new Ctor() as unknown as {
       resetProfileCache: ReturnType<typeof vi.fn>;
       getCachedResolutions: (ids: string[]) => Promise<unknown[]>;
       deleteCachedResolution: (id: string) => Promise<void>;
-      recordHistoryProgress: (entry: unknown, signal: AbortSignal) => Promise<unknown>;
+      recordHistory: (entry: unknown, signal: AbortSignal) => Promise<unknown>;
     };
     remote.getCachedResolutions = () => Promise.resolve([]);
     remote.deleteCachedResolution = () => Promise.resolve();
-    let requestSignal: AbortSignal | undefined;
-    remote.recordHistoryProgress = vi.fn((_entry: unknown, signal: AbortSignal) => {
-      requestSignal = signal;
+    const requestSignals: AbortSignal[] = [];
+    remote.recordHistory = vi.fn((_entry: unknown, signal: AbortSignal) => {
+      requestSignals.push(signal);
       return new Promise((_resolve, reject) => {
         signal.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError")), { once: true });
       });
     });
     getStore.mockReturnValue(remote as never);
     const { result } = await renderStore();
-    act(() => result.current.recordResume(createProgressWriteQueue, media("slow-profile-progress"), 19, 100));
-    await waitFor(() => expect(requestSignal).toBeDefined());
     vi.useFakeTimers();
+    act(() => {
+      result.current.recordResume(createProgressWriteQueue, media("slow-profile-progress"), 19, 100);
+      result.current.recordResume(createProgressWriteQueue, media("next-slow-profile-progress"), 20, 100);
+      result.current.recordResume(createProgressWriteQueue, media("cancelled-before-profile-switch"), 21, 100);
+    });
+    expect(requestSignals).toHaveLength(1);
     let switched = false;
     const transition = result.current.runProfileTransition(async (markProfileChanged) => {
       switched = true;
       markProfileChanged();
     });
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(12_001);
-      await transition;
+      await vi.advanceTimersByTimeAsync(9_999);
     });
-    vi.useRealTimers();
-    expect(requestSignal?.aborted).toBe(true);
+    expect(requestSignals[0]?.aborted).toBe(false);
+    expect(switched).toBe(false);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(requestSignals[0]?.aborted).toBe(true);
+    expect(requestSignals).toHaveLength(2);
+    expect(requestSignals[1]?.aborted).toBe(false);
+    expect(switched).toBe(false);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_999);
+    });
+    expect(requestSignals[1]?.aborted).toBe(false);
+    expect(switched).toBe(false);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
     expect(switched).toBe(true);
+    expect(requestSignals[1]?.aborted).toBe(true);
+    expect(requestSignals).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => { await transition; });
   });
 
   it("does NOT call resetProfileCache for a plain (non-Remote) store", async () => {

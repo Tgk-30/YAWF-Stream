@@ -3,6 +3,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteStore } from "./RemoteStore";
+import { createProgressWriteQueue } from "../store/progressWriteQueue";
 
 function jsonResponse(obj: unknown, status = 200) {
   return {
@@ -24,6 +25,18 @@ function histItem(over: Record<string, unknown> = {}) {
     preview: { id: "tt1", type: "movie", title: "X" },
     ...over,
   };
+}
+
+function recordProgress(
+  queue: ReturnType<typeof createProgressWriteQueue>,
+  remote: RemoteStore,
+  mediaId: string,
+): void {
+  queue.recordResume(
+    remote, 1, true,
+    (entry, signal) => remote.recordHistory(entry, signal),
+    { id: mediaId, type: "movie", title: mediaId }, 10, null,
+  );
 }
 
 describe("RemoteStore", () => {
@@ -73,26 +86,24 @@ describe("RemoteStore", () => {
   });
 
   describe("progress-only history timeout", () => {
-    it("aborts a stalled progress PUT without changing ordinary history PUTs", async () => {
-      // Detail has already loaded the actual queue module before progress starts.
-      // Measure the transport deadline, not dynamic chunk acquisition time.
-      await import("../store/progressWriteQueue");
+    it("aborts a stalled queued progress PUT at 10 seconds and advances without changing ordinary history PUTs", async () => {
       vi.useFakeTimers();
+      const queue = createProgressWriteQueue();
+      const remote = store();
       let progressSignal: AbortSignal | undefined;
-      let markStarted!: () => void;
-      const requestStarted = new Promise<void>((resolve) => { markStarted = resolve; });
-      fetchMock.mockImplementation((_url: string, init: RequestInit) => {
-        progressSignal = init.signal ?? undefined;
-        markStarted();
-        return new Promise(() => {});
-      });
-      const pending = store().recordHistoryProgress({
-        mediaId: "tt-timeout",
-        progressSeconds: 10,
-        preview: { id: "tt-timeout", type: "movie", title: "T" },
-      }, new AbortController().signal);
-      const assertion = expect(pending).rejects.toThrow("Progress write timed out.");
-      await requestStarted;
+      fetchMock
+        .mockImplementationOnce((_url: string, init: RequestInit) => {
+          progressSignal = init.signal ?? undefined;
+          // Ignore abort to prove the queue's deadline also bounds transports
+          // that never settle, not just well-behaved fetch cancellation.
+          return new Promise(() => {});
+        })
+        .mockResolvedValue(jsonResponse({ ok: true }));
+      recordProgress(queue, remote, "tt-timeout");
+      recordProgress(queue, remote, "tt-after-timeout");
+      const pending = queue.flush();
+      const settled = vi.fn();
+      void pending.then(settled);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(progressSignal).toBeDefined();
       expect(progressSignal?.aborted).toBe(false);
@@ -100,65 +111,72 @@ describe("RemoteStore", () => {
       await vi.advanceTimersByTimeAsync(9_999);
       expect(Date.now() - startedAt).toBe(9_999);
       expect(progressSignal?.aborted).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(settled).not.toHaveBeenCalled();
       await vi.advanceTimersByTimeAsync(1);
-      await assertion;
       expect(Date.now() - startedAt).toBe(10_000);
       expect(progressSignal?.aborted).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock.mock.calls[1]![0]).toBe("http://srv/api/history/tt-after-timeout");
+      await pending;
+      expect(settled).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
 
       fetchMock.mockReset().mockResolvedValue(jsonResponse({ ok: true }));
-      await store().recordHistory({
+      await remote.recordHistory({
         mediaId: "tt-normal",
         progressSeconds: 11,
         preview: { id: "tt-normal", type: "movie", title: "N" },
       });
       const normalInit = fetchMock.mock.calls[0]![1] as RequestInit;
-      expect(normalInit.signal).toBeUndefined();
-      vi.useRealTimers();
+      expect(normalInit).not.toHaveProperty("signal");
     });
 
     it("aborts promptly when its owning profile generation is cancelled", async () => {
-      await import("../store/progressWriteQueue");
+      vi.useFakeTimers();
+      const queue = createProgressWriteQueue();
       let observedSignal: AbortSignal | undefined;
-      let markStarted!: () => void;
-      const requestStarted = new Promise<void>((resolve) => { markStarted = resolve; });
       fetchMock.mockImplementation((_url: string, init: RequestInit) => {
         observedSignal = init.signal ?? undefined;
-        markStarted();
         return new Promise(() => {});
       });
+      recordProgress(queue, store(), "tt-cancel");
+      const pending = queue.flush();
+      expect(observedSignal).toBeDefined();
+      expect(observedSignal?.aborted).toBe(false);
+      queue.cancelGeneration(1);
+      expect(observedSignal?.aborted).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      await pending;
+    });
+
+    it("does not dispatch a history PUT with an already-aborted progress signal", async () => {
       const owner = new AbortController();
-      const pending = store().recordHistoryProgress({
+      owner.abort();
+      fetchMock.mockResolvedValue(jsonResponse({ ok: true }));
+      const pending = store().recordHistory({
         mediaId: "tt-cancel",
         progressSeconds: 12,
         preview: { id: "tt-cancel", type: "movie", title: "C" },
       }, owner.signal);
-      const assertion = expect(pending).rejects.toMatchObject({ name: "AbortError" });
-      await requestStarted;
-      expect(observedSignal).toBeDefined();
-      expect(observedSignal?.aborted).toBe(false);
-      owner.abort();
-      await assertion;
-      expect(observedSignal?.aborted).toBe(true);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).not.toHaveBeenCalled();
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     });
 
-    it.each(["before-call", "before-dispatch"] as const)(
-      "does not dispatch a progress PUT when cancelled %s",
-      async (timing) => {
-        await import("../store/progressWriteQueue");
-        const owner = new AbortController();
-        if (timing === "before-call") owner.abort();
-        const pending = store().recordHistoryProgress({
-          mediaId: "tt-never-dispatch",
-          progressSeconds: 12,
-          preview: { id: "tt-never-dispatch", type: "movie", title: "C" },
-        }, owner.signal);
-        const assertion = expect(pending).rejects.toMatchObject({ name: "AbortError" });
-        if (timing === "before-dispatch") owner.abort();
-        await assertion;
-        expect(fetchMock).not.toHaveBeenCalled();
-      },
-    );
+    it("does not dispatch queued progress cancelled before its turn", async () => {
+      const queue = createProgressWriteQueue();
+      const remote = store();
+      fetchMock
+        .mockImplementationOnce(() => new Promise(() => {}))
+        .mockResolvedValue(jsonResponse({ ok: true }));
+      recordProgress(queue, remote, "tt-active");
+      recordProgress(queue, remote, "tt-never-dispatch");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      queue.cancelGeneration(1);
+      await queue.flush();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]![0]).toBe("http://srv/api/history/tt-active");
+    });
   });
 
   describe("continueWatching - resumable-only, filtered before the slice", () => {
