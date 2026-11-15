@@ -20,7 +20,7 @@ test('unreviewed upstream/patch/provenance, added file and Cargo override drift 
     ['upstream', 'vendor/tauri-runtime-wry/LICENSE-MIT', text => text + '\n'],
     ['patch', 'vendor/tauri-runtime-wry/src/lib.rs', text => text.replace('webview_runtime_installed: true,', 'webview_runtime_installed: false,')],
     ['provenance', 'vendor/tauri-runtime-wry.PROVENANCE.json', text => text.replace('249374224cd5e56572d1e803659d03afb1d76a87ad7728fa20dd1bc2f443ebbf', '0'.repeat(64))],
-    ['target', 'Cargo.toml', text => text.replace(`features = ["${feature}"]`, 'features = []')],
+    ['target', 'Cargo.toml', text => text.replace(`features = ["${feature}", "android-app-owned-window-destroy"]`, 'features = []')],
     ['override', 'Cargo.toml', text => text.replace('[patch.crates-io]', '[patch.crates-io]\nwry = { path = "unreviewed" }')],
     ['lock', 'Cargo.lock', text => text.replace('name = "tauri-runtime-wry"\nversion = "2.12.2"', 'name = "tauri-runtime-wry"\nversion = "2.12.3"')],
     ['added', 'vendor/tauri-runtime-wry/extra.rs', () => '// unreviewed'],

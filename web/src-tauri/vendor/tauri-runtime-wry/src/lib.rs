@@ -1501,6 +1501,8 @@ pub enum Message<T: 'static> {
   #[cfg(target_os = "macos")]
   SetDockVisibility(bool),
   RequestExit(i32),
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  AndroidOwnedDestroyComplete(WindowId, WebviewId, u64, bool),
   Application(ApplicationMessage),
   Window(WindowId, WindowMessage),
   Webview(WindowId, WebviewId, WebviewMessage),
@@ -2444,6 +2446,8 @@ pub struct WindowWrapper {
   // whether this window has child webviews
   // or it's just a container for a single webview
   has_children: AtomicBool,
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  android_owned_destroy: Option<(u64, WebviewId)>,
   webviews: Vec<WebviewWrapper>,
   window_event_listeners: WindowEventListeners,
   #[cfg(windows)]
@@ -2783,9 +2787,15 @@ impl<T: UserEvent> Wry<T> {
       // Opt-in Android hosts must defer EVERY initial WebView and require actual
       // asynchronous provider startup success before requesting construction.
       // Do not cache an advisory ActivityNotFound result before that host gate.
-      #[cfg(all(target_os = "android", feature = "android-app-verifies-webview-runtime"))]
+      #[cfg(all(
+        target_os = "android",
+        feature = "android-app-verifies-webview-runtime"
+      ))]
       webview_runtime_installed: true,
-      #[cfg(not(all(target_os = "android", feature = "android-app-verifies-webview-runtime")))]
+      #[cfg(not(all(
+        target_os = "android",
+        feature = "android-app-verifies-webview-runtime"
+      )))]
       webview_runtime_installed: wry::webview_version().is_ok(),
     };
 
@@ -3067,6 +3077,8 @@ impl<T: UserEvent> Runtime<T> for Wry<T> {
             control_flow,
             EventLoopIterationContext {
               callback: &mut callback,
+              #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+              android_owned_destroy_proxy: &proxy,
               window_id_map,
               windows,
               #[cfg(feature = "tracing")]
@@ -3085,6 +3097,8 @@ impl<T: UserEvent> Runtime<T> for Wry<T> {
           control_flow,
           EventLoopIterationContext {
             callback: &mut callback,
+            #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+            android_owned_destroy_proxy: &proxy,
             windows,
             window_id_map,
             #[cfg(feature = "tracing")]
@@ -3136,6 +3150,8 @@ fn make_event_handler<T: UserEvent, F: FnMut(RunEvent<T>) + 'static>(
         control_flow,
         EventLoopIterationContext {
           callback: &mut callback,
+          #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+          android_owned_destroy_proxy: &proxy,
           window_id_map: &window_id_map,
           windows: &windows,
           #[cfg(feature = "tracing")]
@@ -3153,6 +3169,8 @@ fn make_event_handler<T: UserEvent, F: FnMut(RunEvent<T>) + 'static>(
       control_flow,
       EventLoopIterationContext {
         callback: &mut callback,
+        #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+        android_owned_destroy_proxy: &proxy,
         window_id_map: &window_id_map,
         windows: &windows,
         #[cfg(feature = "tracing")]
@@ -3163,6 +3181,8 @@ fn make_event_handler<T: UserEvent, F: FnMut(RunEvent<T>) + 'static>(
 }
 
 pub struct EventLoopIterationContext<'a, T: UserEvent> {
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  pub android_owned_destroy_proxy: &'a TaoEventLoopProxy<Message<T>>,
   pub callback: &'a mut (dyn FnMut(RunEvent<T>) + 'static),
   pub window_id_map: &'a WindowIdStore,
   pub windows: &'a WindowsStore,
@@ -3193,6 +3213,10 @@ fn handle_user_message<T: UserEvent>(
     #[cfg(target_os = "macos")]
     Message::SetDockVisibility(visible) => event_loop.set_dock_visibility(visible),
     Message::RequestExit(_code) => panic!("cannot handle RequestExit on the main thread"),
+    #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+    Message::AndroidOwnedDestroyComplete(..) => {
+      panic!("owned destroy completion must run on the event loop")
+    }
     Message::Application(application_message) => match application_message {
       #[cfg(target_os = "macos")]
       ApplicationMessage::Show => {
@@ -4028,6 +4052,8 @@ fn handle_user_message<T: UserEvent>(
           WindowWrapper {
             label,
             has_children: AtomicBool::new(false),
+            #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+            android_owned_destroy: None,
             inner: Some(window.clone()),
             window_event_listeners: Default::default(),
             webviews: Vec::new(),
@@ -4111,6 +4137,8 @@ fn handle_event_loop<T: UserEvent>(
   context: EventLoopIterationContext<'_, T>,
 ) {
   let EventLoopIterationContext {
+    #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+    android_owned_destroy_proxy,
     callback,
     window_id_map,
     windows,
@@ -4321,7 +4349,23 @@ fn handle_event_loop<T: UserEvent>(
         on_close_requested(callback, id, windows);
       }
       Message::Window(id, WindowMessage::Destroy) => {
+        #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+        request_android_owned_destroy(id, windows, android_owned_destroy_proxy);
+        #[cfg(not(all(target_os = "android", feature = "android-app-owned-window-destroy")))]
         on_window_close(id, windows);
+      }
+      #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+      Message::AndroidOwnedDestroyComplete(id, webview_id, nonce, success) => {
+        complete_android_owned_destroy(
+          id,
+          webview_id,
+          nonce,
+          success,
+          windows,
+          window_id_map,
+          callback,
+          control_flow,
+        );
       }
       Message::UserEvent(t) => callback(RunEvent::UserEvent(t)),
       message => {
@@ -4381,6 +4425,91 @@ fn on_close_requested<'a, T: UserEvent>(
     if let Ok(true) = rx.try_recv() {
     } else {
       on_window_close(window_id, windows);
+    }
+  }
+}
+
+#[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+fn request_android_owned_destroy<T: UserEvent>(
+  window_id: WindowId,
+  windows: &WindowsStore,
+  proxy: &TaoEventLoopProxy<Message<T>>,
+) {
+  static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+  let mut store = windows.0.borrow_mut();
+  let Some(window) = store.get_mut(&window_id) else {
+    return;
+  };
+  if window.inner.is_none() || window.webviews.len() != 1 || window.android_owned_destroy.is_some()
+  {
+    return;
+  }
+  let webview = &window.webviews[0];
+  let webview_id = webview.id;
+  let Ok(nonce) = NONCE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+    value.checked_add(1)
+  }) else {
+    return;
+  };
+  window.android_owned_destroy = Some((nonce, webview_id));
+  let proxy = proxy.clone();
+  // UI cleanup is asynchronous. Keep the wrapper and label until its exact
+  // nonce/id result returns through Tao; never block either event loop.
+  webview.destroy_owned_async(move |success| {
+    let _ = proxy.send_event(Message::AndroidOwnedDestroyComplete(
+      window_id, webview_id, nonce, success,
+    ));
+  });
+}
+
+#[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+fn complete_android_owned_destroy<T: UserEvent>(
+  window_id: WindowId,
+  webview_id: WebviewId,
+  nonce: u64,
+  success: bool,
+  windows: &WindowsStore,
+  window_id_map: &WindowIdStore,
+  callback: &mut (dyn FnMut(RunEvent<T>) + 'static),
+  control_flow: &mut ControlFlow,
+) {
+  if !success {
+    return;
+  }
+  let removed = {
+    let mut store = windows.0.borrow_mut();
+    let Some(window) = store.get(&window_id) else {
+      return;
+    };
+    if window.inner.is_none()
+      || window.webviews.len() != 1
+      || window.webviews[0].id != webview_id
+      || window.android_owned_destroy != Some((nonce, webview_id))
+    {
+      return;
+    }
+    store.remove(&window_id).unwrap()
+  };
+  if let Some(inner) = &removed.inner {
+    window_id_map.0.lock().unwrap().remove(&inner.id());
+  }
+  let label = removed.label.clone();
+  let listeners = removed.window_event_listeners.clone();
+  drop(removed);
+  // Tauri consumes this genuine runtime event, removes public labels/listeners
+  // and IPC before forwarding it to the application's RunEvent callback.
+  callback(RunEvent::WindowEvent {
+    label,
+    event: WindowEvent::Destroyed,
+  });
+  for handler in listeners.lock().unwrap().values() {
+    handler(&WindowEvent::Destroyed);
+  }
+  if windows.0.borrow().is_empty() {
+    let (tx, rx) = channel();
+    callback(RunEvent::ExitRequested { code: None, tx });
+    if !matches!(rx.try_recv(), Ok(ExitRequestedEventAction::Prevent)) {
+      *control_flow = ControlFlow::Exit;
     }
   }
 }
@@ -4641,6 +4770,8 @@ fn create_window<T: UserEvent, F: Fn(RawWindow) + Send + 'static>(
   Ok(WindowWrapper {
     label,
     has_children: AtomicBool::new(has_children),
+    #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+    android_owned_destroy: None,
     inner: Some(window),
     webviews,
     window_event_listeners,

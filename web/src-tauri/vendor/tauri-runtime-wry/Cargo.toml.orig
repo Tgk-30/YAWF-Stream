@@ -61,6 +61,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 jni = "0.21"
 
 [features]
+# Android-only opt-in: exact-object asynchronous owned window cleanup.
+android-app-owned-window-destroy = ["wry/android-app-owned-window-destroy"]
 # Android-only opt-in: the host gates ALL initial constructors on real async success.
 android-app-verifies-webview-runtime = ["wry/android-app-create-webview-completion"]
 default = ["x11", "dbus"]

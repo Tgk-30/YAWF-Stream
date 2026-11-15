@@ -321,6 +321,22 @@ fun main(args: Array<String>) {
     expect(YawfWebViewStartup.constructionStored(nextTicket, next), "exact retry storage commits")
    }
   }
+  "owned-cleanup-reference" -> {
+   val ticket = ready(); authorize(ticket); val accepted = WebView(activity)
+   expect(YawfWebViewStartup.onWebViewCreate(activity, accepted), "accepted object captured")
+   YawfWebViewStartup.onPause(activity)
+   fun field(name: String): Any? = YawfWebViewStartup.javaClass.getDeclaredField(name).let { it.isAccessible = true; it.get(YawfWebViewStartup) }
+   val queued = field("queuedTicket"); val cleanup = field("cleanupTicket")
+   expect(cleanup == ticket, "quarantine already armed")
+   YawfWebViewStartup.onOwnedWebViewDestroy(MainActivity(), accepted)
+   expect(field("acceptedWebView") === accepted, "foreign Activity cannot release owned reference")
+   YawfWebViewStartup.onOwnedWebViewDestroy(activity, WebView(activity))
+   expect(field("acceptedWebView") === accepted, "foreign object cannot release accepted reference")
+   YawfWebViewStartup.onOwnedWebViewDestroy(activity, accepted)
+   expect(field("acceptedWebView") == null, "exact Java cleanup releases accepted object")
+   expect(field("queuedTicket") == queued && field("cleanupTicket") == cleanup, "object cleanup never clears ticket/quarantine before true logical Destroyed")
+   expect(!YawfWebViewStartup.isAttached(ticket), "cleanup cannot commit")
+  }
   else -> error("unknown coordinator scenario")
  }
  println("Startup coordinator passed: "+args.single())
@@ -339,11 +355,12 @@ function compileCoordinator(t,helperText) {
  assert.equal(built.status,0,built.stdout+built.stderr);if(!helperText)coordinatorCompiled=output;return {...tools,output};
 }
 function runCoordinator(tools,scenario) {return spawnSync(tools.java,[`-Djava.io.tmpdir=${work}`,'-cp',[tools.output,tools.stdlib].join(delimiter),'com.tgk30.debridstreamer.CoordinatorBehaviorKt',scenario],{encoding:'utf8',timeout:10000});}
-for(const scenario of ['native-first-frame','callback-only-completion','failure-manual-retry','deadline-and-late-callback','configuration-owner-rebind','back-and-same-process-reentry','queued-owner-loss-quarantine','deadline-between-queue-and-hook','paused-success-no-launch','late-native-listener','bridge-after-early-back','stored-null','stored-stale','owner-loss-after-hook','storage-failure-retry'])test(`actual Kotlin startup coordinator with fake platform/JNI boundary: ${scenario}`,t=>{
+for(const scenario of ['native-first-frame','callback-only-completion','failure-manual-retry','deadline-and-late-callback','configuration-owner-rebind','back-and-same-process-reentry','queued-owner-loss-quarantine','deadline-between-queue-and-hook','paused-success-no-launch','late-native-listener','bridge-after-early-back','stored-null','stored-stale','owner-loss-after-hook','storage-failure-retry','owned-cleanup-reference'])test(`actual Kotlin startup coordinator with fake platform/JNI boundary: ${scenario}`,t=>{
  const tools=compileCoordinator(t);if(!tools)return;const result=runCoordinator(tools,scenario);assert.equal(result.status,0,result.stdout+result.stderr);assert.match(result.stdout,/Startup coordinator passed/);
 });
 
 const coordinatorMutations=[
+ ['owned-cleanup-retains-reference','if (acceptedActivity?.get() === activity && acceptedWebView === webView) clearAccepted(acceptedTicket)','if (false) clearAccepted(acceptedTicket)','owned-cleanup-reference'],
  ['stored-object-identity','acceptedWebView !== webView','false','stored-stale'],
  ['stored-null-proof','webView == null || acceptedWebView !== webView','false || false','stored-null'],
  ['post-hook-owner-loss-combined-fences','!usable(activity) || queuedTicket != request || cleanupTicket != 0L || attachedTicket != 0L ||\n      !gate.claimHandoff(ownerKey, gate.generation, now())','false','owner-loss-after-hook'],

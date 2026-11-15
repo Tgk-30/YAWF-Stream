@@ -44,6 +44,8 @@ targets = [
 ]
 
 [features]
+# Android-only opt-in: exact-object asynchronous owned window cleanup.
+android-app-owned-window-destroy = []
 # Android app opt-in: retain the pipe for post-storage identity acknowledgement.
 android-app-create-webview-completion = []
 default = [

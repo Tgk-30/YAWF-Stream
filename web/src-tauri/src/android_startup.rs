@@ -253,7 +253,6 @@ fn queue_storage_proof(
             // This message shares Wry's FIFO with CreateWebView. Only the exact
             // synchronously accepted object after ACTIVITY_PROXY storage qualifies.
             let attached = CONSTRUCTION.load(Ordering::Acquire) == ticket
-                && !webview.is_null()
                 && call(
                     env,
                     &helper,

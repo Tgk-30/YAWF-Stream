@@ -76,7 +76,18 @@ fn main() {
         println!("cargo:rerun-if-env-changed={class_extension_env}");
         println!("cargo:rerun-if-env-changed={class_init_env}");
 
-        let content = fs::read_to_string(file.path())
+        let input_path = if cfg!(feature = "android-app-owned-window-destroy")
+          && (file.file_name() == "WryActivity.kt" || file.file_name() == "proguard-wry.pro")
+        {
+          let path = PathBuf::from(env_var("CARGO_MANIFEST_DIR"))
+            .join("src/android/owned")
+            .join(file.file_name());
+          println!("cargo:rerun-if-changed={}", path.display());
+          path
+        } else {
+          file.path()
+        };
+        let content = fs::read_to_string(input_path)
           .expect("failed to read kotlin file as string")
           .replace("{{package}}", &package)
           .replace("{{package-unescaped}}", &package.replace('`', ""))

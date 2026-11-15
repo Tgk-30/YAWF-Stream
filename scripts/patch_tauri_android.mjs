@@ -1212,6 +1212,12 @@ function patchedMainActivity(packageName) {
     if (activity.split(before).length !== 2) throw new Error("Unsupported asynchronous Android startup Activity template.");
     activity = activity.replace(before, after);
   }
+  activity = activity.replace('  override fun onWebViewCreate(webView: WebView) {', `  override fun onOwnedWebViewDestroy(webView: WebView) {
+    YawfWebViewStartup.onOwnedWebViewDestroy(this, webView)
+    super.onOwnedWebViewDestroy(webView)
+  }
+
+  override fun onWebViewCreate(webView: WebView) {`);
   return activity;
 }
 

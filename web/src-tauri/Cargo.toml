@@ -120,7 +120,7 @@ windows-sys = { version = "0.59", features = [
 
 [target.'cfg(target_os = "android")'.dependencies]
 # Required only with the mandatory application async-success constructor gate.
-tauri-runtime-wry = { version = "=2.12.2", default-features = false, features = ["android-app-verifies-webview-runtime"] }
+tauri-runtime-wry = { version = "=2.12.2", default-features = false, features = ["android-app-verifies-webview-runtime", "android-app-owned-window-destroy"] }
 libc = "0.2"
 # Read WindowInsets from the native WebView. Android WebView does not expose
 # these as CSS env(safe-area-inset-*) values, even with viewport-fit=cover.

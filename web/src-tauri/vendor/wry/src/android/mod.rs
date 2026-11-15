@@ -99,6 +99,31 @@ pub fn destroy_webview(activity_id: ActivityId, webview_id: &WebviewId) {
   ASSET_LOADER_DOMAIN.lock().unwrap().remove(webview_id);
 }
 
+#[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+fn destroy_owned_handlers(
+  activity_id: ActivityId,
+  webview_id: &WebviewId,
+  generation: u64,
+) -> bool {
+  let mut attributes = WEBVIEW_ATTRIBUTES.lock().unwrap();
+  if attributes
+    .get(&activity_id)
+    .map(|attrs| (&attrs.id, attrs.owned_generation))
+    != Some((webview_id, generation))
+  {
+    return false;
+  }
+  attributes.remove(&activity_id);
+  IPC.lock().unwrap().remove(webview_id);
+  REQUEST_HANDLER.lock().unwrap().remove(webview_id);
+  TITLE_CHANGE_HANDLER.lock().unwrap().remove(webview_id);
+  URL_LOADING_OVERRIDE.lock().unwrap().remove(webview_id);
+  ON_LOAD_HANDLER.lock().unwrap().remove(webview_id);
+  PERMISSION_HANDLER.lock().unwrap().remove(webview_id);
+  ASSET_LOADER_DOMAIN.lock().unwrap().remove(webview_id);
+  true
+}
+
 /// Sets up the necessary logic for wry to be able to create the webviews later.
 ///
 /// This function must be run on the thread where the [`JNIEnv`] is registered and the looper is local,
@@ -309,7 +334,20 @@ impl InnerWebView {
         .insert(id.clone(), UnsafePermissionHandler::new(permission_handler));
     }
 
+    #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+    static OWNED_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+    let owned_generation = OWNED_GENERATION
+      .fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |value| value.checked_add(1),
+      )
+      .map_err(|_| Error::ActivityNotFound)?;
+
     let attributes = CreateWebViewAttributes {
+      #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+      owned_generation,
       id: id.clone(),
       url,
       html,
@@ -333,6 +371,17 @@ impl InnerWebView {
     MainPipe::send(activity_id, WebViewMessage::CreateWebView(attributes));
 
     Ok(Self { id, activity_id })
+  }
+
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  pub fn destroy_owned_async<F: FnOnce(bool) + Send + 'static>(&self, callback: F) -> bool {
+    MainPipe::try_send_owned(
+      self.activity_id,
+      WebViewMessage::DestroyOwned {
+        webview_id: self.id.clone(),
+        callback: Box::new(callback),
+      },
+    )
   }
 
   pub fn print(&self) -> crate::Result<()> {

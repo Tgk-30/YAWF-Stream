@@ -1,3 +1,4 @@
+import {inverseAndroidOwnedDestroy} from './check_android_owned_destroy_vendor.mjs';
 import {checkAndroidCreationVendor} from './check_android_creation_vendor.mjs';
 import {createHash} from 'node:crypto';
 import {lstatSync, readFileSync, readdirSync} from 'node:fs';
@@ -6,7 +7,7 @@ import {fileURLToPath, pathToFileURL} from 'node:url';
 import assert from 'node:assert/strict';
 
 const upstreamTree = '249374224cd5e56572d1e803659d03afb1d76a87ad7728fa20dd1bc2f443ebbf';
-const patchedTree = 'ea0baf8ac8a8022971557c7f3f23a42c403212ebb1361aeec7f47e3b2077a99e';
+const patchedTree = '801745cc37bc75365cabf7a0ba993d5a28455c95b47fa1c51db0b60d752db17e';
 const archiveSha = '8d61892587aea2a85245bcaec98c6fe46268874c0a0deae5535fb71ca7b93eae';
 export const feature = 'android-app-verifies-webview-runtime';
 export const originalField = '      webview_runtime_installed: wry::webview_version().is_ok(),';
@@ -57,9 +58,10 @@ export function checkAndroidStartupRuntimeVendor(root = resolve(dirname(fileURLT
   assert.equal(treeHash(provenance.patchedFiles), patchedTree, 'Pinned reviewed patch inventory');
   const current = inventory(vendor);
   assert.deepEqual(current, provenance.patchedFiles, 'Vendor inventory/content drift');
-  const reconstructed = {...current};
+  const inverse = inverseAndroidOwnedDestroy('tauri-runtime-wry', vendor, current);
+  const reconstructed = inverse.files;
   for (const path of provenance.patchFiles) {
-    let source = readFileSync(join(vendor, path), 'utf8');
+    let source = inverse.read(path);
     const patch = path === 'src/lib.rs' ? patchedField : manifestFeature;
     exactlyOnce(source, patch);
     source = source.replace(patch, path === 'src/lib.rs' ? originalField : '');
@@ -69,8 +71,9 @@ export function checkAndroidStartupRuntimeVendor(root = resolve(dirname(fileURLT
   const cargo = readFileSync(join(tauri, 'Cargo.toml'), 'utf8');
   const android = cargo.split('[target.\'cfg(target_os = "android")\'.dependencies]\n')[1]?.split('\n[')[0];
   assert.ok(android, 'Android target dependencies');
-  exactlyOnce(android, `tauri-runtime-wry = { version = "=2.12.2", default-features = false, features = ["${feature}"] }`);
+  exactlyOnce(android, `tauri-runtime-wry = { version = "=2.12.2", default-features = false, features = ["${feature}", "android-app-owned-window-destroy"] }`);
   exactlyOnce(cargo, feature);
+  exactlyOnce(cargo, 'android-app-owned-window-destroy');
   const overrides = cargo.split('[patch.crates-io]\n')[1]?.split('\n[')[0].split('\n').filter(line => line.trim() && !line.startsWith('#'));
   assert.deepEqual(overrides, ['tauri-runtime-wry = { path = "vendor/tauri-runtime-wry" }', 'wry = { path = "vendor/wry" }'], 'Exactly two reviewed crate path overrides');
   const lock = readFileSync(join(tauri, 'Cargo.lock'), 'utf8');

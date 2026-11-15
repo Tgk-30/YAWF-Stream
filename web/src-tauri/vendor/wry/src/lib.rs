@@ -2092,6 +2092,13 @@ impl WebView {
     self.webview.id()
   }
 
+  /// Queues exact-object Android cleanup. The callback runs on the UI thread;
+  /// callers must post their logical completion back to their own event loop.
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  pub fn destroy_owned_async<F: FnOnce(bool) + Send + 'static>(&self, callback: F) -> bool {
+    self.webview.destroy_owned_async(callback)
+  }
+
   /// Get the current url of the webview
   pub fn url(&self) -> Result<String> {
     self.webview.url()

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <instrumentation
+        android:name="com.yawf.ownedstartup.OwnedDestroyInstrumentationRunner"
+        android:targetPackage="com.tgk30.debridstreamer"
+        android:label="YAWF owned startup destroy test"
+        tools:replace="android:targetPackage" />
+</manifest>

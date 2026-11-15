@@ -42,6 +42,7 @@ internal object YawfWebViewStartup {
   @Volatile private var attachedTicket = 0L
   // HOOK_ACCEPTED is not completion: Wry still has fallible work and storage.
   private var acceptedWebView: WebView? = null
+  private var acceptedActivity: WeakReference<MainActivity>? = null
   private var acceptedTicket = 0L
   private var acceptedGate: YawfWebViewStartupGate? = null
   private var acceptedOwnerKey: Any? = null
@@ -118,6 +119,7 @@ internal object YawfWebViewStartup {
     // Retain the actual object synchronously. A later, FIFO JNI callback sees
     // ACTIVITY_PROXY.webview only after Wry's clients/content/plugins/globalref.
     acceptedWebView = webView
+    acceptedActivity = WeakReference(activity)
     acceptedTicket = ticket
     acceptedGate = gate
     acceptedOwnerKey = ownerKey
@@ -137,9 +139,17 @@ internal object YawfWebViewStartup {
     return true
   }
 
+  fun onOwnedWebViewDestroy(activity: MainActivity, webView: WebView) {
+    checkMain()
+    // The Activity owns the exact object even after owner loss. Only release
+    // this reference; the worker clears tickets/quarantine after real Destroyed.
+    if (acceptedActivity?.get() === activity && acceptedWebView === webView) clearAccepted(acceptedTicket)
+  }
+
   private fun clearAccepted(request: Long) {
     if (acceptedTicket != request) return
     acceptedWebView = null
+    acceptedActivity = null
     acceptedTicket = 0L
     acceptedGate = null
     acceptedOwnerKey = null

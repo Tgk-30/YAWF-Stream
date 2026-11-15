@@ -14,6 +14,11 @@ const create=block(runtime,'      WebViewMessage::CreateWebView(attrs) => {','  
 const jni=block(runtime,'      WebViewMessage::Jni(f) => {','      WebViewMessage::LoadUrl(');
 const callback=block(app,'        platform.jni_handle().exec(move |env, _activity, webview| {','        });').split('\n').slice(1).join('\n');
 const destroy=block(app,'fn destroy_pending(', '\nfn clear(');
+function replaceFormattedPatch(source,before,after) {
+ const escaped=[...before.replace(/\s+/g,'')].map(c=>c.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('\\s*');
+ const pattern=new RegExp(escaped);assert.match(source,pattern,'actual formatted causal patch must exist');
+ return source.replace(pattern,after);
+}
 const bins=new Map();
 function build({feature=true,android=true,oldRecv=false,oldPlugin=false,weakIdentity=false}={}) {
  const key=[feature,android,oldRecv,oldPlugin,weakIdentity].join('-');if(bins.has(key))return bins.get(key);
@@ -112,15 +117,15 @@ fn main(){let scenario=std::env::args().nth(1).unwrap();FAIL.set(if scenario=="q
 }
 `;
  let text=source.replace('IDENTITY',weakIdentity?'true':'view.id==ACCEPTED.load(Ordering::SeqCst)')
-  .replace('RECV',(oldRecv?recv.replace(patchedRecv,originalRecv):recv).replaceAll('target_os = "android"','test_android'))
-  .replace('CREATE',(oldPlugin?create.replace(patchedPlugin,originalPlugin):create).replaceAll('target_os = "android"','test_android'))
+  .replace('RECV',(oldRecv?replaceFormattedPatch(recv,patchedRecv,originalRecv):recv).replaceAll('target_os = "android"','test_android'))
+  .replace('CREATE',(oldPlugin?replaceFormattedPatch(create,patchedPlugin,originalPlugin):create).replaceAll('target_os = "android"','test_android'))
   .replace('\nJNI\n','\n'+jni+'\n').replace('CALLBACK',callback).replace('\nDESTROY\n','\n'+destroy+'\n');
  const file=join(work,key+'.rs'),binary=join(work,key);writeFileSync(file,text);
  const args=['--edition','2021','--crate-name','creation_path','-o',binary,file];if(android)args.push('--cfg','test_android');if(feature)args.push('--cfg',`feature="${creationFeature}"`);
  const result=spawnSync(process.env.RUSTC||'/opt/homebrew/bin/rustc',args,{encoding:'utf8',timeout:30000});assert.equal(result.status,0,result.stderr);bins.set(key,binary);return binary;
 }
 function run(config,scenario){return spawnSync(build(config),[scenario],{encoding:'utf8',timeout:5000});}
-test('Wry creation vendor entire official inventory and exact Android opt-in delta pinned',()=>assert.equal(checkAndroidCreationVendor().files,84));
+test('Wry creation vendor entire official inventory and exact Android opt-in delta pinned',()=>assert.equal(checkAndroidCreationVendor().files,86));
 for(const scenario of ['success','load','client','ipc','content','plugin','globalref','null','owner-loss','non-create','quarantine','dispatch-failure','proof'])test(`actual entire Wry CreateWebView/recv plus app FIFO callback: ${scenario}`,()=>{const r=run({},scenario);assert.equal(r.status,0,r.stdout+r.stderr);});
 for(const config of [{feature:false},{android:false}])for(const scenario of ['success','load','plugin','non-create'])test(`original behavior controls ${JSON.stringify(config)}: ${scenario}`,()=>{const r=run(config,scenario);assert.equal(r.status,0,r.stdout+r.stderr);});
 for(const [name,config,scenario]of [['original recv poisons queued post-storage callback',{oldRecv:true},'load'],['original non-JNI plugin swallow falsely stores and commits',{oldPlugin:true},'plugin'],['nonnull old globalref cannot replace exact identity',{weakIdentity:true},'client']])test(`individual causal creation revert: ${name}`,()=>{const r=run(config,scenario);assert.notEqual(r.status,0);assert.match(r.stderr,/panicked/);});

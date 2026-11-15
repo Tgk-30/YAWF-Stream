@@ -1,3 +1,4 @@
+import {inverseAndroidOwnedDestroy} from './check_android_owned_destroy_vendor.mjs';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {readFileSync, readdirSync, lstatSync} from 'node:fs';
@@ -52,13 +53,14 @@ export function checkAndroidCreationVendor(root=resolve(dirname(fileURLToPath(im
   assert.equal(p.schema,1);assert.equal(p.crate,'wry');assert.equal(p.version,'0.57.0');
   assert.equal(p.upstreamArchiveSha256,'a819957a01b3119af85e638a38d242af76dbc87d130dca67bfd0441072e21ff0');
   assert.equal(p.upstreamTreeSha256,'81150226bcaee84520d6e2c79e0b0925d2430c461e81ba18d36dfb81140c6906');
-  assert.equal(p.patchedTreeSha256,'d4aceee61b85059caecd563f7e2a0eb2a11c0b39cd31cf83b40652952e777821');
-  assert.deepEqual(p.patchFiles,['Cargo.toml','Cargo.toml.orig','src/android/main_pipe.rs']);
+  assert.equal(p.patchedTreeSha256,'6feec215173ea5e574741128c4065a4363f0131f1364d5e9548e0c4f0f4efa1a');
+  assert.deepEqual(p.patchFiles,['Cargo.toml','Cargo.toml.orig','build.rs','src/android/binding.rs','src/android/main_pipe.rs','src/android/mod.rs','src/android/owned/WryActivity.kt','src/android/owned/proguard-wry.pro','src/lib.rs']);
   assert.equal(tree(p.upstreamFiles),p.upstreamTreeSha256);assert.equal(tree(p.patchedFiles),p.patchedTreeSha256);
   const current=inventory(vendor);assert.deepEqual(current,p.patchedFiles,'Entire Wry patch inventory/content drift');
-  const reconstructed={...current};
-  for(const name of p.patchFiles) {
-    let text=readFileSync(join(vendor,name),'utf8');
+  const inverse=inverseAndroidOwnedDestroy('wry',vendor,current);
+  const reconstructed=inverse.files;
+  for(const name of ['Cargo.toml','Cargo.toml.orig','src/android/main_pipe.rs']) {
+    let text=inverse.read(name);
     for(const [after,before]of name.endsWith('.rs')?[[patchedRecv,originalRecv],[patchedPlugin,originalPlugin]]:[[manifestFeature,'']]) {
       assert.equal(text.split(after).length,2,'Exactly one reviewed Wry delta');text=text.replace(after,before);
     }

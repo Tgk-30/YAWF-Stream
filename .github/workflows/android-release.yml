@@ -144,6 +144,7 @@ jobs:
           kotlin_maven_root="$(node ../scripts/fetch_android_kotlin_compiler.mjs "$RUNNER_TEMP/yawf-kotlin-m2")"
           kotlin_gradle_home="$(node ../scripts/prepare_android_kotlin_gradle.mjs "$kotlin_maven_root" "$RUNNER_TEMP/yawf-kotlin-gradle-home")"
           export GRADLE_USER_HOME="$kotlin_gradle_home"
+          printf 'GRADLE_USER_HOME=%s\n' "$kotlin_gradle_home" >> "$GITHUB_ENV"
           npm run tauri -- android build --apk
 
       # Tauri's generated Gradle carries no signing config, so the release APK
@@ -231,6 +232,84 @@ jobs:
         with:
           name: android-phone-verification-candidate
           path: ${{ runner.temp }}/phone-candidate/*
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Validate the Android API fixture producer
+        if: github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'
+        run: node --test scripts/prepare_android_tauri_api_fixture.test.mjs
+
+      - name: Run the same build's API compile-JAR task
+        if: github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'
+        working-directory: web/src-tauri/gen/android
+        run: ./gradlew --no-daemon --offline :tauri-android:bundleLibCompileToJarRelease
+
+      - name: Bind the exact public Android API fixture
+        if: github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --manifest-path web/src-tauri/Cargo.toml --locked --offline --format-version 1 > "$RUNNER_TEMP/android-api-cargo-metadata.json"
+          python3 - <<'PY'
+          import hashlib, json, os, shutil, subprocess
+          from pathlib import Path
+
+          temporary = Path(os.environ["RUNNER_TEMP"])
+          metadata = json.loads((temporary / "android-api-cargo-metadata.json").read_text())
+          packages = [p for p in metadata["packages"] if p["name"] == "tauri" and p["version"] == "2.12.4"]
+          assert len(packages) == 1, "EXACT_TAURI_API_PACKAGE_REQUIRED"
+          source = Path(packages[0]["manifest_path"]).parent
+          home = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))
+          archive = home / "registry/cache" / source.parent.name / "tauri-2.12.4.crate"
+          task = ":tauri-android:bundleLibCompileToJarRelease"
+          relative = Path("mobile/android/build/intermediates/compile_library_classes_jar/release/bundleLibCompileToJarRelease/classes.jar")
+          jar = source / relative
+          assert jar.is_file(), "EXACT_API_COMPILE_TASK_OUTPUT_REQUIRED"
+          output = temporary / "phone-api-fixture"
+          output.mkdir()
+          subprocess.run([
+              "python3", "scripts/prepare_android_tauri_api_fixture.py",
+              "--cargo-lock", "web/src-tauri/Cargo.lock",
+              "--crate-archive", str(archive), "--api-source", str(source),
+              "--classes-jar", str(jar), "--output", str(output),
+              "--build-environment", "gha-ubuntu24-jdk17-api-release",
+          ], check=True)
+          mapping = Path("web/src-tauri/gen/android/app/build/outputs/mapping/universalRelease/mapping.txt")
+          assert mapping.is_file() and mapping.stat().st_size <= 64 * 1024 * 1024, "BOUNDED_RELEASE_MAPPING_REQUIRED"
+          shutil.copyfile(mapping, output / "android-r8-mapping.txt")
+          version = json.loads(Path("web/package.json").read_text())["version"]
+          apk = temporary / "phone-candidate" / ("YAWF.Stream_Android_" + version + ".apk")
+          with (output / "plugin-runtime-code.txt").open("xb") as code:
+              subprocess.run([
+                  "apkanalyzer", "dex", "code", "--class", "app.tauri.plugin.Plugin", str(apk),
+              ], stdout=code, check=True, timeout=90)
+          assert (output / "plugin-runtime-code.txt").stat().st_size <= 2 * 1024 * 1024, "PLUGIN_CODE_BOUND"
+          binding = {
+              "schemaVersion": 1,
+              "scope": "COMPILE_ONLY_API_OUTPUT_NOT_RUNTIME_QUALIFICATION",
+              "source": os.environ["GITHUB_SHA"],
+              "runId": os.environ["GITHUB_RUN_ID"],
+              "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "gradleProject": ":tauri-android",
+              "producerTask": task,
+              "producerTaskInvokedInThisJob": True,
+              "jarPathWithinVerifiedCrate": relative.as_posix(),
+              "ordinaryApkBuildInSameJob": True,
+              "freshCompilationClaim": False,
+              "releaseMappingSha256": hashlib.sha256(mapping.read_bytes()).hexdigest(),
+              "pluginRuntimeCodeSha256": hashlib.sha256((output / "plugin-runtime-code.txt").read_bytes()).hexdigest(),
+              "minifiedHookAvailabilityClaim": False,
+          }
+          (output / "api-build-binding.json").write_text(json.dumps(binding, sort_keys=True) + "\n")
+          PY
+          (cd "$RUNNER_TEMP/phone-api-fixture" && sha256sum api-build-binding.json android-r8-mapping.txt plugin-runtime-code.txt >> SHA256SUMS)
+
+      - name: Retain compile-only Android API fixture
+        if: github.event_name == 'workflow_dispatch' && github.ref_type == 'branch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-phone-api-fixture
+          path: ${{ runner.temp }}/phone-api-fixture/*
           if-no-files-found: error
           retention-days: 3
 

@@ -36,6 +36,8 @@ license = "Apache-2.0 OR MIT"
 repository = "https://github.com/tauri-apps/tauri"
 
 [features]
+# Android-only opt-in: exact-object asynchronous owned window cleanup.
+android-app-owned-window-destroy = ["wry/android-app-owned-window-destroy"]
 # Android-only opt-in: the host gates ALL initial constructors on real async success.
 android-app-verifies-webview-runtime = ["wry/android-app-create-webview-completion"]
 common-controls-v6 = [

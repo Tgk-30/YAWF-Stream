@@ -20,7 +20,7 @@
     "src/lib.rs"
   ],
   "upstreamTreeSha256": "249374224cd5e56572d1e803659d03afb1d76a87ad7728fa20dd1bc2f443ebbf",
-  "patchedTreeSha256": "ea0baf8ac8a8022971557c7f3f23a42c403212ebb1361aeec7f47e3b2077a99e",
+  "patchedTreeSha256": "801745cc37bc75365cabf7a0ba993d5a28455c95b47fa1c51db0b60d752db17e",
   "upstreamFiles": {
     ".cargo_vcs_info.json": "a2a1f560d41a23288626fe0d79d7c32bc9343c99b3f2f523bb9e7371f8363620",
     "Cargo.lock": "387046c40c46bd9eb32b806136b8a29c3615e946e6089caf9be2386166d5c2b0",
@@ -47,16 +47,16 @@
     "src/window/windows.rs": "87236e11e0e18c9a09a916072a5c6a599f0bda44d6416cbcf2ec7a17dd0f6c54"
   },
   "patchedFiles": {
-    "Cargo.toml": "90096e525892beadc472ad0455d681d34fcc33e84d2e2ccfd00b158c02ff29fe",
+    "Cargo.toml": "aa2ed11d025bbad55072b932463233f72085aa51dda2e341d5e16f8bd30e0b57",
     "Cargo.lock": "387046c40c46bd9eb32b806136b8a29c3615e946e6089caf9be2386166d5c2b0",
     "build.rs": "68b2727346e58a9963803a75ac29695b500aaa7d0673e18551465502b60cbf11",
     "README.md": "cf468efdcd6eb86ef6a2c0b1fbe6aca80f0df6a9d3016f77c0bfdb64dc4091c0",
     "LICENSE-APACHE-2.0": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
     ".cargo_vcs_info.json": "a2a1f560d41a23288626fe0d79d7c32bc9343c99b3f2f523bb9e7371f8363620",
-    "Cargo.toml.orig": "2c6e84691a90b5f8895ba34b30bd74db8b44caed1a71ef57924f29a6318a8c3c",
+    "Cargo.toml.orig": "5f17292f0126ad5a9b604036cb92877b9dedb10892bef53dc16d6330df2b6e6f",
     "LICENSE-MIT": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d",
     "src/util.rs": "209966a41556057e5f118189bf5c2037825848585171f66e370943be10ceceb0",
-    "src/lib.rs": "ea0ae4206442d4b2765594c5a6afd5a50f9181168cea0be0fe3ad86ac74db3fc",
+    "src/lib.rs": "bad86b6b4e23dbeaf22189ee0ddf78d4b98d9b8f4444cd2588a37da6a014461f",
     "src/undecorated_resizing.rs": "0405880958de0af6eb3260797059061aa934839c153095c9388c7dc4f107075d",
     "src/webview.rs": "e38ffe02336ee9bd558b444b6c6efa6a6a9fdfbaebfa8b441e925a37ae1828c8",
     "src/webview_permissions.rs": "84b1285e40854edb12286731cc2232955fd95ac3bc881f7d5ebb6376a3cab3f3",
@@ -70,5 +70,6 @@
     "src/window/mod.rs": "8f61d6436681791f011367948eef559192e8bee441446525c76c4917f15e5185",
     "src/window/windows.rs": "87236e11e0e18c9a09a916072a5c6a599f0bda44d6416cbcf2ec7a17dd0f6c54",
     "src/window/linux.rs": "8cae057b27bd9576aefada130cb68eb0e39ce0e73af3dad793bab7d03b269ce2"
-  }
+  },
+  "ownedDestroyContract": "Android opt-in only; exact-object bounded multi-owner journal, queued UI cleanup, nonce-fenced Tao completion. Default templates/rules remain upstream bytes."
 }

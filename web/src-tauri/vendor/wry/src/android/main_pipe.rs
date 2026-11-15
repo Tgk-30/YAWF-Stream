@@ -28,6 +28,11 @@ static CHANNEL: Lazy<(
 pub static MAIN_PIPE: Lazy<[OwnedFd; 2]> = Lazy::new(|| {
   let mut pipe: [RawFd; 2] = Default::default();
   unsafe { libc::pipe(pipe.as_mut_ptr()) };
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  unsafe {
+    let flags = libc::fcntl(pipe[1], libc::F_GETFL);
+    libc::fcntl(pipe[1], libc::F_SETFL, flags | libc::O_NONBLOCK);
+  }
   unsafe { pipe.map(|fd| OwnedFd::from_raw_fd(fd)) }
 });
 
@@ -36,6 +41,12 @@ pub struct ActivityProxy {
   pub activity: GlobalRef,
   pub window_manager: GlobalRef,
   pub webview: Option<GlobalRef>,
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  pub webview_id: Option<WebviewId>,
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  pub webview_activity: Option<GlobalRef>,
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  pub webview_generation: Option<u64>,
   pub java_vm: *mut c_void,
 }
 
@@ -47,6 +58,12 @@ impl ActivityProxy {
       activity,
       window_manager,
       webview: None,
+      #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+      webview_id: None,
+      #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+      webview_activity: None,
+      #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+      webview_generation: None,
       java_vm: vm.get_java_vm_pointer() as *mut _,
     }
   }
@@ -115,11 +132,41 @@ pub fn get_webview(activity_id: ActivityId) -> Option<GlobalRef> {
     .cloned()
 }
 
+#[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+#[derive(Clone)]
+struct OwnedWebView {
+  generation: u64,
+  activity: GlobalRef,
+  object: GlobalRef,
+  assigned: bool,
+}
+
+#[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+static PENDING_OWNED: Lazy<Mutex<BTreeMap<(ActivityId, WebviewId), Vec<OwnedWebView>>>> =
+  Lazy::new(|| Mutex::new(BTreeMap::new()));
+
 pub struct MainPipe<'a> {
   pub env: JNIEnv<'a>,
 }
 
 impl<'a> MainPipe<'a> {
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  pub(crate) fn try_send_owned(activity_id: ActivityId, message: WebViewMessage) -> bool {
+    let flags = unsafe { libc::fcntl(MAIN_PIPE[1].as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 || flags & libc::O_NONBLOCK == 0 {
+      return false;
+    }
+    if CHANNEL.0.try_send((activity_id, message)).is_err() {
+      return false;
+    }
+    // Nonblocking writer: EAGAIN means an existing readable wakeup already
+    // guarantees a drain. A failed wakeup never fabricates an acknowledgement.
+    let byte = [0u8];
+    let written = unsafe { libc::write(MAIN_PIPE[1].as_raw_fd(), byte.as_ptr().cast(), 1) };
+    written == 1
+      || (written < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN))
+  }
+
   pub(crate) fn send(activity_id: ActivityId, message: WebViewMessage) {
     const BYTE: [u8; 1] = [0];
     if CHANNEL.0.send((activity_id, message)).is_ok() {
@@ -136,7 +183,10 @@ impl<'a> MainPipe<'a> {
   pub fn recv(&mut self) -> JniResult<()> {
     let package = super::PACKAGE.get().unwrap();
     while let Ok((activity_id, message)) = CHANNEL.1.try_recv() {
-      #[cfg(all(target_os = "android", feature = "android-app-create-webview-completion"))]
+      #[cfg(all(
+        target_os = "android",
+        feature = "android-app-create-webview-completion"
+      ))]
       {
         let creating = matches!(&message, WebViewMessage::CreateWebView(_));
         if let Err(error) = self.handle_message(package, activity_id, message) {
@@ -150,10 +200,315 @@ impl<'a> MainPipe<'a> {
           }
         }
       }
-      #[cfg(not(all(target_os = "android", feature = "android-app-create-webview-completion")))]
+      #[cfg(not(all(
+        target_os = "android",
+        feature = "android-app-create-webview-completion"
+      )))]
       self.handle_message(package, activity_id, message)?;
     }
     Ok(())
+  }
+
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  fn on_owned_activity_destroy(
+    &mut self,
+    activity_id: ActivityId,
+    webview_id: &WebviewId,
+    is_changing_configurations: bool,
+    owner: &GlobalRef,
+  ) -> JniResult<()> {
+    let Some(proxy) = activity_proxy(activity_id) else {
+      return Ok(());
+    };
+    let current_owner = self
+      .env
+      .is_same_object(proxy.activity.as_obj(), owner.as_obj())?;
+    let generation = super::WEBVIEW_ATTRIBUTES
+      .lock()
+      .unwrap()
+      .get(&activity_id)
+      .filter(|attrs| attrs.id == *webview_id)
+      .map(|attrs| attrs.owned_generation);
+    if let Some(generation) = generation {
+      // Retire only physically acknowledged destroyed-Activity objects. A late
+      // old-owner callback can release old refs, never newer same-id metadata.
+      if !current_owner {
+        let Some(objects) = self.owned_candidates(activity_id, webview_id) else {
+          return Ok(());
+        };
+        let mut known_owner = false;
+        for object in objects {
+          if self
+            .env
+            .is_same_object(object.activity.as_obj(), owner.as_obj())?
+          {
+            known_owner = true;
+            break;
+          }
+        }
+        if !known_owner {
+          return Ok(());
+        }
+      }
+      self.retire_destroyed_owned(activity_id, webview_id, Some(owner))?;
+      if !current_owner || is_changing_configurations {
+        return Ok(());
+      }
+      if !self
+        .owned_candidates(activity_id, webview_id)
+        .is_some_and(|objects| objects.is_empty())
+      {
+        return Ok(());
+      }
+      let mut proxies = ACTIVITY_PROXY.lock().unwrap();
+      let Some(current) = proxies.get(&activity_id) else {
+        return Ok(());
+      };
+      if !self
+        .env
+        .is_same_object(current.activity.as_obj(), owner.as_obj())?
+      {
+        return Ok(());
+      }
+      if super::destroy_owned_handlers(activity_id, webview_id, generation) {
+        proxies.remove(&activity_id);
+      }
+    } else if current_owner && !is_changing_configurations && webview_id.is_empty() {
+      // Early Back before any WebView has no logical attributes/object to
+      // clean. Remove only this exact empty owner, never a later owner.
+      let pending = PENDING_OWNED.lock().unwrap();
+      if pending.keys().any(|(id, _)| *id == activity_id) {
+        return Ok(());
+      }
+      let attributes = super::WEBVIEW_ATTRIBUTES.lock().unwrap();
+      if attributes.contains_key(&activity_id) {
+        return Ok(());
+      }
+      let mut proxies = ACTIVITY_PROXY.lock().unwrap();
+      if let Some(current) = proxies.get(&activity_id) {
+        if self
+          .env
+          .is_same_object(current.activity.as_obj(), owner.as_obj())?
+          && current.webview.is_none()
+          && current.webview_id.is_none()
+          && current.webview_activity.is_none()
+          && current.webview_generation.is_none()
+        {
+          proxies.remove(&activity_id);
+        }
+      }
+    }
+    Ok(())
+  }
+
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  fn owned_candidates(
+    &self,
+    activity_id: ActivityId,
+    webview_id: &WebviewId,
+  ) -> Option<Vec<OwnedWebView>> {
+    let proxy = activity_proxy(activity_id)?;
+    let generation = {
+      let attributes = super::WEBVIEW_ATTRIBUTES.lock().unwrap();
+      let attrs = attributes.get(&activity_id)?;
+      if attrs.id != *webview_id {
+        return None;
+      }
+      attrs.owned_generation
+    };
+    let pending = PENDING_OWNED.lock().unwrap();
+    if pending
+      .keys()
+      .any(|(owner, id)| *owner == activity_id && id != webview_id)
+    {
+      return None;
+    }
+    let mut objects = pending
+      .get(&(activity_id, webview_id.clone()))
+      .cloned()
+      .unwrap_or_default();
+    match (
+      proxy.webview_id,
+      proxy.webview,
+      proxy.webview_activity,
+      proxy.webview_generation,
+    ) {
+      (Some(id), Some(object), Some(activity), Some(stored_generation))
+        if id == *webview_id && stored_generation == generation =>
+      {
+        objects.push(OwnedWebView {
+          generation,
+          activity,
+          object,
+          assigned: true,
+        });
+      }
+      (None, None, None, None) => (),
+      _ => return None,
+    }
+    if objects.iter().any(|object| object.generation != generation) {
+      return None;
+    }
+    Some(objects)
+  }
+
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  fn retire_destroyed_owned(
+    &mut self,
+    activity_id: ActivityId,
+    webview_id: &WebviewId,
+    only_owner: Option<&GlobalRef>,
+  ) -> JniResult<()> {
+    let objects = self
+      .owned_candidates(activity_id, webview_id)
+      .ok_or(jni::errors::Error::NullPtr("owned recreation conflict"))?;
+    for owned in objects {
+      if let Some(owner) = only_owner {
+        if !self
+          .env
+          .is_same_object(owned.activity.as_obj(), owner.as_obj())?
+        {
+          continue;
+        }
+      }
+      // Only a genuinely destroyed prior Activity can be physically retired
+      // during healthy recreation. A live owner is never destroyed by Create.
+      if !self
+        .env
+        .call_method(owned.activity.as_obj(), "isDestroyed", "()Z", &[])?
+        .z()?
+      {
+        continue;
+      }
+      if !self
+        .env
+        .call_method(
+          owned.activity.as_obj(),
+          "destroyOwnedWebView",
+          "(Landroid/webkit/WebView;Z)Z",
+          &[owned.object.as_obj().into(), owned.assigned.into()],
+        )?
+        .z()?
+      {
+        return Err(jni::errors::Error::NullPtr(
+          "owned recreation cleanup unconfirmed",
+        ));
+      }
+      let mut pending = PENDING_OWNED.lock().unwrap();
+      let key = (activity_id, webview_id.clone());
+      if let Some(objects) = pending.get_mut(&key) {
+        let mut position = None;
+        for (index, object) in objects.iter().enumerate() {
+          if self
+            .env
+            .is_same_object(object.object.as_obj(), owned.object.as_obj())?
+            && self
+              .env
+              .is_same_object(object.activity.as_obj(), owned.activity.as_obj())?
+          {
+            position = Some(index);
+            break;
+          }
+        }
+        if let Some(index) = position {
+          objects.remove(index);
+        }
+        if objects.is_empty() {
+          pending.remove(&key);
+        }
+      }
+      let mut proxies = ACTIVITY_PROXY.lock().unwrap();
+      if let Some(proxy) = proxies.get_mut(&activity_id) {
+        if proxy.webview_id.as_ref() == Some(webview_id)
+          && proxy
+            .webview
+            .as_ref()
+            .map(|v| self.env.is_same_object(v.as_obj(), owned.object.as_obj()))
+            .transpose()?
+            .unwrap_or(false)
+          && proxy
+            .webview_activity
+            .as_ref()
+            .map(|v| self.env.is_same_object(v.as_obj(), owned.activity.as_obj()))
+            .transpose()?
+            .unwrap_or(false)
+        {
+          proxy.webview = None;
+          proxy.webview_id = None;
+          proxy.webview_activity = None;
+          proxy.webview_generation = None;
+        }
+      }
+    }
+    Ok(())
+  }
+
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  fn destroy_owned(&mut self, activity_id: ActivityId, webview_id: &WebviewId) -> JniResult<bool> {
+    let generation = {
+      let attributes = super::WEBVIEW_ATTRIBUTES.lock().unwrap();
+      let Some(attrs) = attributes.get(&activity_id) else {
+        return Ok(false);
+      };
+      if attrs.id != *webview_id {
+        return Ok(false);
+      }
+      attrs.owned_generation
+    };
+    let Some(objects) = self.owned_candidates(activity_id, webview_id) else {
+      return Ok(false);
+    };
+    if objects.is_empty() {
+      return Ok(false);
+    }
+    for owned in &objects {
+      if !self
+        .env
+        .call_method(
+          owned.activity.as_obj(),
+          "destroyOwnedWebView",
+          "(Landroid/webkit/WebView;Z)Z",
+          &[owned.object.as_obj().into(), owned.assigned.into()],
+        )?
+        .z()?
+      {
+        return Ok(false);
+      }
+    }
+    // JNI/app callbacks cannot authorize removal of a foreign or newer owner.
+    let Some(current) = self.owned_candidates(activity_id, webview_id) else {
+      return Ok(false);
+    };
+    if current.len() != objects.len() {
+      return Ok(false);
+    }
+    for (current, owned) in current.iter().zip(&objects) {
+      if !self
+        .env
+        .is_same_object(current.object.as_obj(), owned.object.as_obj())?
+        || !self
+          .env
+          .is_same_object(current.activity.as_obj(), owned.activity.as_obj())?
+      {
+        return Ok(false);
+      }
+    }
+    let mut pending = PENDING_OWNED.lock().unwrap();
+    let mut proxies = ACTIVITY_PROXY.lock().unwrap();
+    let Some(proxy) = proxies.get_mut(&activity_id) else {
+      return Ok(false);
+    };
+    if !super::destroy_owned_handlers(activity_id, webview_id, generation) {
+      return Ok(false);
+    }
+    pending.remove(&(activity_id, webview_id.clone()));
+    if proxy.webview_id.as_ref() == Some(webview_id) {
+      proxy.webview_id = None;
+      proxy.webview = None;
+      proxy.webview_activity = None;
+      proxy.webview_generation = None;
+    }
+    Ok(true)
   }
 
   fn handle_message(
@@ -183,6 +538,8 @@ impl<'a> MainPipe<'a> {
           initialization_scripts,
           id,
           javascript_disabled,
+          #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+          owned_generation,
           ..
         } = attrs;
 
@@ -199,6 +556,41 @@ impl<'a> MainPipe<'a> {
             self.env.new_string(init_script.script)?,
           )?;
         }
+        #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+        let owned_id = id.clone();
+        #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+        {
+          let attributes = super::WEBVIEW_ATTRIBUTES.lock().unwrap();
+          if attributes
+            .get(&activity_id)
+            .map(|attrs| (&attrs.id, attrs.owned_generation))
+            != Some((&owned_id, owned_generation))
+          {
+            // A cloned, already-queued Create cannot resurrect a retired id.
+            return Ok(());
+          }
+        }
+        #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+        self.retire_destroyed_owned(activity_id, &owned_id, None)?;
+        #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+        {
+          let objects = self
+            .owned_candidates(activity_id, &owned_id)
+            .ok_or(jni::errors::Error::NullPtr("owned creation conflict"))?;
+          if objects.len() >= 8 {
+            return Err(jni::errors::Error::NullPtr("owned instance bound"));
+          }
+          for owned in objects {
+            if self
+              .env
+              .is_same_object(owned.activity.as_obj(), activity.as_obj())?
+            {
+              return Err(jni::errors::Error::NullPtr(
+                "owned current Activity already assigned",
+              ));
+            }
+          }
+        }
         let id = self.env.new_string(id)?;
         // Create webview
         let rust_webview_class =
@@ -212,6 +604,23 @@ impl<'a> MainPipe<'a> {
             (&id).into(),
           ],
         )?;
+        #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+        {
+          // Journal before setWebView/app hooks or any mount. A failed early
+          // GlobalRef cannot leave an assigned or mounted object.
+          let object = self.env.new_global_ref(&webview)?;
+          PENDING_OWNED
+            .lock()
+            .unwrap()
+            .entry((activity_id, owned_id.clone()))
+            .or_default()
+            .push(OwnedWebView {
+              generation: owned_generation,
+              activity: activity.clone(),
+              object,
+              assigned: false,
+            });
+        }
         // get settings
         let web_settings = self
           .env
@@ -250,6 +659,16 @@ impl<'a> MainPipe<'a> {
           )?;
         }
 
+        #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+        {
+          let mut pending = PENDING_OWNED.lock().unwrap();
+          let owned = pending
+            .get_mut(&(activity_id, owned_id.clone()))
+            .and_then(|objects| objects.last_mut())
+            .ok_or(jni::errors::Error::NullPtr("owned pending view"))?;
+          // The Java setter can throw after assigning mWebView.
+          owned.assigned = true;
+        }
         let webview_class_name = format!("{package}/RustWebView");
         self.env.call_method(
           &activity,
@@ -344,7 +763,10 @@ impl<'a> MainPipe<'a> {
           }) {
             #[cfg(feature = "tracing")]
             tracing::warn!("failed to run webview created hook: {_e}");
-            #[cfg(all(target_os = "android", feature = "android-app-create-webview-completion"))]
+            #[cfg(all(
+              target_os = "android",
+              feature = "android-app-create-webview-completion"
+            ))]
             {
               // A failed app/plugin hook is not a stored, usable WebView for
               // this opt-in host, even when it returned a non-JNI error.
@@ -356,15 +778,80 @@ impl<'a> MainPipe<'a> {
           }
         }
 
-        let webview = self.env.new_global_ref(webview)?;
+        #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+        {
+          let mut pending = PENDING_OWNED.lock().unwrap();
+          let key = (activity_id, owned_id.clone());
+          let mut proxies = ACTIVITY_PROXY.lock().unwrap();
+          let proxy = proxies
+            .get_mut(&activity_id)
+            .ok_or(jni::errors::Error::NullPtr("owned activity disappeared"))?;
+          let objects = pending
+            .get_mut(&key)
+            .ok_or(jni::errors::Error::NullPtr("owned journal disappeared"))?;
+          let next = objects
+            .last()
+            .ok_or(jni::errors::Error::NullPtr("owned journal empty"))?;
+          if !self.env.is_same_object(next.object.as_obj(), &webview)?
+            || !self
+              .env
+              .is_same_object(next.activity.as_obj(), activity.as_obj())?
+            || !self
+              .env
+              .is_same_object(proxy.activity.as_obj(), activity.as_obj())?
+            || (proxy.webview_id.is_some() && proxy.webview_id.as_ref() != Some(&owned_id))
+            || proxy.webview.is_some() != proxy.webview_id.is_some()
+            || proxy.webview.is_some() != proxy.webview_activity.is_some()
+            || proxy.webview.is_some() != proxy.webview_generation.is_some()
+            || proxy
+              .webview_generation
+              .is_some_and(|value| value != owned_generation)
+          {
+            return Err(jni::errors::Error::NullPtr("owned storage conflict"));
+          }
+          // All JNI checks precede storage. Preserve any live prior owner for
+          // exact cleanup, but retire destroyed owners before future allocation.
+          let next = objects.pop().unwrap();
+          if let (Some(object), Some(owner)) = (proxy.webview.take(), proxy.webview_activity.take())
+          {
+            objects.push(OwnedWebView {
+              generation: owned_generation,
+              activity: owner,
+              object,
+              assigned: true,
+            });
+          }
+          if objects.is_empty() {
+            pending.remove(&key);
+          }
+          proxy.webview_id = Some(owned_id);
+          proxy.webview_activity = Some(next.activity);
+          proxy.webview_generation = Some(next.generation);
+          proxy.webview = Some(next.object);
+        }
+        #[cfg(not(all(target_os = "android", feature = "android-app-owned-window-destroy")))]
+        {
+          let webview = self.env.new_global_ref(webview)?;
 
-        ACTIVITY_PROXY
-          .lock()
-          .unwrap()
-          .get_mut(&activity_id)
-          .unwrap()
-          .webview
-          .replace(webview);
+          ACTIVITY_PROXY
+            .lock()
+            .unwrap()
+            .get_mut(&activity_id)
+            .unwrap()
+            .webview
+            .replace(webview);
+        }
+      }
+      #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+      WebViewMessage::DestroyOwned {
+        webview_id,
+        callback,
+      } => {
+        let result = self.destroy_owned(activity_id, &webview_id);
+        if result.is_err() && self.env.exception_check()? {
+          self.env.exception_clear()?;
+        }
+        callback(result.unwrap_or(false));
       }
       WebViewMessage::Eval(script, callback) => {
         if let Some(webview) = get_webview(activity_id) {
@@ -538,12 +1025,28 @@ impl<'a> MainPipe<'a> {
         activity_id,
         webview_id,
         is_changing_configurations,
+        #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+        owned_activity,
       } => {
-        // keep our webview references (callbacks etc) alive if the activity is going to be recreated due to configuration changes
-        // e.g. rotation, multi-window mode change, etc
-        if !is_changing_configurations {
-          super::destroy_webview(activity_id, &webview_id);
-          remove_activity_proxy(activity_id);
+        #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+        {
+          let result = self.on_owned_activity_destroy(
+            activity_id,
+            &webview_id,
+            is_changing_configurations,
+            &owned_activity,
+          );
+          if result.is_err() && self.env.exception_check()? {
+            self.env.exception_clear()?;
+          }
+        }
+        #[cfg(not(all(target_os = "android", feature = "android-app-owned-window-destroy")))]
+        {
+          // Default Wry lifecycle behavior is unchanged.
+          if !is_changing_configurations {
+            super::destroy_webview(activity_id, &webview_id);
+            remove_activity_proxy(activity_id);
+          }
         }
       }
     }
@@ -631,6 +1134,11 @@ fn set_background_color<'a>(
 
 pub(crate) enum WebViewMessage {
   CreateWebView(CreateWebViewAttributes),
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  DestroyOwned {
+    webview_id: WebviewId,
+    callback: Box<dyn FnOnce(bool) + Send>,
+  },
   Eval(String, Option<EvalCallback>),
   SetBackgroundColor(RGBA),
   GetWebViewVersion(Sender<Result<String, Error>>),
@@ -649,12 +1157,16 @@ pub(crate) enum WebViewMessage {
     activity_id: ActivityId,
     webview_id: WebviewId,
     is_changing_configurations: bool,
+    #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+    owned_activity: GlobalRef,
   },
 }
 
 #[derive(Clone)]
 pub(crate) struct CreateWebViewAttributes {
   pub id: String,
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  pub owned_generation: u64,
   pub url: Option<String>,
   pub html: Option<String>,
   #[cfg(any(debug_assertions, feature = "devtools"))]

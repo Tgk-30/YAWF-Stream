@@ -307,6 +307,22 @@ pub unsafe fn onWebviewDestroy(mut env: JNIEnv, _: JClass, activity: JObject, we
     .z()
     .unwrap();
 
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  let owned_activity = match env.new_global_ref(&activity) {
+    Ok(owner) => owner,
+    Err(_) => return, // No exact owner proof, no cleanup or acknowledgement.
+  };
+  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]
+  super::MainPipe::try_send_owned(
+    activity_id,
+    super::WebViewMessage::OnDestroy {
+      activity_id,
+      webview_id,
+      is_changing_configurations,
+      owned_activity,
+    },
+  );
+  #[cfg(not(all(target_os = "android", feature = "android-app-owned-window-destroy")))]
   super::MainPipe::send(
     activity_id,
     super::WebViewMessage::OnDestroy {

@@ -6,12 +6,28 @@ const workflow = readFileSync(process.env.ANDROID_STARTUP_CI_WORKFLOW ?? new URL
 const title = 'Require Android startup construction and bootstrap behavior';
 const files = [
   'scripts/android_async_startup.test.mjs',
+  'scripts/android_fullscreen.test.mjs',
+  'scripts/android_gesture_insets.test.mjs',
+  'scripts/android_ime.test.mjs',
   'scripts/android_startup_runtime_vendor.test.mjs',
   'scripts/android_webview_startup_policy.test.mjs',
+  'scripts/patch_tauri_android.test.mjs',
+  'scripts/patch_tauri_android_cold_recovery.test.mjs',
+  'scripts/patch_tauri_android_webview_compat.test.mjs',
   'scripts/android_creation_completion.test.mjs',
   'scripts/android_startup_bootstrap.test.mjs',
   'scripts/android_startup_workflow.test.mjs',
+  'scripts/android_owned_window_destroy.test.mjs',
+  'scripts/android_owned_window_destroy_kotlin.test.mjs',
+  'scripts/android_owned_destroy_instrumentation_contract.test.mjs',
 ];
+const requiredFlags = [
+  'YAWF_REQUIRE_ANDROID_STARTUP_BEHAVIOR',
+  'YAWF_REQUIRE_ANDROID_FULLSCREEN_BEHAVIOR',
+  'YAWF_REQUIRE_ANDROID_GESTURE_BEHAVIOR',
+  'YAWF_REQUIRE_ANDROID_IME_BEHAVIOR',
+];
+
 function job(source) {
   const header = '\n  tauri-android:\n';
   assert.equal(source.split(header).length, 2, 'one actual Android compile job');
@@ -31,7 +47,10 @@ function validate(source) {
   assert.ok(prefetch >= 0 && rust > prefetch && kotlin > rust && startup > kotlin, 'prefetch then actual Rust/Kotlin compilation before startup host behavior');
   assert.doesNotMatch(body, /^    (?:if|continue-on-error):/m);
   assert.doesNotMatch(step, /^        (?:if|continue-on-error|working-directory):/m);
-  assert.match(step, /^          YAWF_REQUIRE_ANDROID_STARTUP_BEHAVIOR: ["']1["']$/m);
+  for (const flag of requiredFlags) {
+    assert.equal(step.split(`          ${flag}:`).length, 2, `one mandatory ${flag}`);
+    assert.match(step, new RegExp(`^          ${flag}: ["']1["']$`, 'm'));
+  }
   assert.match(step, /^          RUSTC: rustc$/m, 'Rust compiler comes from installed PATH, not a workstation');
   const run = step.split('        run: |\n');
   assert.equal(run.length, 2);
@@ -56,8 +75,11 @@ test('startup gate rejects a missing, wrong-job or prematurely ordered step', ()
 test('startup gate refuses optional toolchains, platform paths and missing behavior cases', () => {
   const original = gate(workflow);
   const mutations = [
-    original.replace('YAWF_REQUIRE_ANDROID_STARTUP_BEHAVIOR: "1"', 'YAWF_REQUIRE_ANDROID_STARTUP_BEHAVIOR: "0"'),
-    original.replace('          YAWF_REQUIRE_ANDROID_STARTUP_BEHAVIOR: "1"\n', ''),
+    ...requiredFlags.flatMap((flag) => [
+      original.replace(`${flag}: "1"`, `${flag}: "0"`),
+      original.replace(`          ${flag}: "1"\n`, ''),
+      original.replace(`          ${flag}: "1"\n`, `          ${flag}: "1"\n          ${flag}: "1"\n`),
+    ]),
     original.replace('RUSTC: rustc', 'RUSTC: /opt/homebrew/bin/rustc'),
     original.replace('        env:\n', '        continue-on-error: true\n        env:\n'),
     original.replace('        env:\n', '        if: false\n        env:\n'),
