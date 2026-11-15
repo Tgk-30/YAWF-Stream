@@ -22,8 +22,14 @@ def dex(name, definition):
  if definition:struct.pack_into('<IIIIIIII',b,classes,0,1,0xffffffff,0,0xffffffff,0,0,0)
  b[offset:]=data;b[12:32]=hashlib.sha1(b[32:]).digest();struct.pack_into('<I',b,8,zlib.adler32(b[12:])&0xffffffff);return bytes(b)
 
+def focus_snapshot():
+ return dict(attempted=False,available=False,focusCategory='unavailable',updaterDialogFocus='unavailable',rootCount=0,attachedRootCount=0,visibleRootCount=0,focusedRootCount=0,mainAttached=False,mainVisible=False,mainFocused=False,mainNotFocusable=False,mainNotTouchable=False)
+
+def focused_snapshot():
+ value=focus_snapshot();value.update(attempted=True,available=True,focusCategory='other-owned-root',updaterDialogFocus='yes',rootCount=2,attachedRootCount=2,visibleRootCount=2,focusedRootCount=1,mainAttached=True,mainVisible=True);return value
+
 def proof():
- value={key:True for key in m.BOOL_FIELDS};value.update(schemaVersion=1,scope='selected_first_plugin_load_failure_then_one_native_retry',phase='QUALIFIED_SELECTED_STARTUP_RETRY_ONLY',qualification=True,failureCode='',elapsedMs=10000,tapCount=1,targetActivityCreates=1,pluginLoadCount=2,retryDownCallElapsedMs=10,retryPressedObservationOutcome='pressed',retryAdmissionFirstBlockingReason='none',retryAdmissionLastBlockingReason='none',retryAdmissionElapsedMs=17,retryAdmissionSampleCount=2);return value
+ value={key:True for key in m.BOOL_FIELDS};value.update(schemaVersion=1,scope='selected_first_plugin_load_failure_then_one_native_retry',phase='QUALIFIED_SELECTED_STARTUP_RETRY_ONLY',qualification=True,failureCode='',elapsedMs=10000,tapCount=1,targetActivityCreates=1,pluginLoadCount=2,retryDownCallElapsedMs=10,retryPressedObservationOutcome='pressed',retryAdmissionFirstBlockingReason='none',retryAdmissionLastBlockingReason='none',retryAdmissionElapsedMs=17,retryAdmissionSampleCount=2,retryFocusSnapshot=focus_snapshot());return value
 
 def output(value=None):
  return '\n'.join(['INSTRUMENTATION_STATUS: class='+m.TEST_CLASS,'INSTRUMENTATION_STATUS: test='+m.METHOD,'INSTRUMENTATION_STATUS: numtests=1','INSTRUMENTATION_STATUS: owned_destroy_evidence='+json.dumps(value or proof()),'INSTRUMENTATION_STATUS_CODE: 0','INSTRUMENTATION_RESULT: stream=','OK (1 test)','INSTRUMENTATION_CODE: -1',''])
@@ -316,6 +322,64 @@ for before,after,probe in [
  try:probe(api)
  except AssertionError:pass
  else:raise AssertionError('admission schema mutant survived')
+`));
+
+test('optional focus snapshots preserve unavailable states and reject private or malformed values before retention',()=>run(String.raw`
+for snapshot in [focus_snapshot(),dict(focus_snapshot(),attempted=True),focused_snapshot(),dict(focused_snapshot(),updaterDialogFocus='unavailable'),dict(focused_snapshot(),focusCategory='target-main',updaterDialogFocus='no',mainFocused=True),dict(focused_snapshot(),focusCategory='none-owned',updaterDialogFocus='no',focusedRootCount=0),dict(focused_snapshot(),focusCategory='ambiguous',updaterDialogFocus='unavailable',rootCount=3,attachedRootCount=3,visibleRootCount=3,focusedRootCount=2)]:
+ value=proof();value['retryFocusSnapshot']=snapshot;assert m.evidence(output(value))==value
+ value.update(qualification=False,phase='ONE_VERIFIED_NATIVE_TAP',failureCode='ONE_VERIFIED_NATIVE_TAP_FAILED',tapCount=0)
+ try:m.evidence(output(value))
+ except m.Refusal as error:
+  assert str(error)=='MODULE_UNQUALIFIED'and error.module_evidence['retryFocusSnapshot']==snapshot
+ else:raise AssertionError('optional focus diagnostics qualified a negative run')
+for bad in [None,[],True,'PRIVATE_FOCUS',dict(focus_snapshot(),private='PRIVATE_FOCUS')]:
+ value=proof();value['retryFocusSnapshot']=bad
+ try:m.evidence(output(value))
+ except m.Refusal as error:assert str(error)=='FOCUS_SNAPSHOT_SCHEMA'and error.module_evidence is None
+ else:raise AssertionError('unknown focus snapshot retained')
+for key in m.FOCUS_SNAPSHOT_KEYS:
+ value=proof();value['retryFocusSnapshot'].pop(key);rejects(lambda:m.evidence(output(value)),'FOCUS_SNAPSHOT_SCHEMA')
+for key in m.FOCUS_MAIN_FIELDS|{'attempted','available'}:
+ for bad in [0,1,None,'PRIVATE_FOCUS',[],{}]:
+  value=proof();value['retryFocusSnapshot'][key]=bad
+  try:m.evidence(output(value))
+  except m.Refusal as error:assert str(error)=='FOCUS_SNAPSHOT_TYPE'and error.module_evidence is None
+  else:raise AssertionError('malformed focus boolean retained')
+for key in m.FOCUS_COUNT_FIELDS:
+ for bad in [-1,33,True,1.5,None,'PRIVATE_FOCUS',[],{}]:
+  value=proof();value['retryFocusSnapshot'][key]=bad
+  try:m.evidence(output(value))
+  except m.Refusal as error:assert str(error)=='FOCUS_SNAPSHOT_TYPE'and error.module_evidence is None
+  else:raise AssertionError('malformed focus count retained')
+for key in ['focusCategory','updaterDialogFocus']:
+ for bad in ['https://private.invalid/?token=PRIVATE_FOCUS',None,True,{},[]]:
+  value=proof();value['retryFocusSnapshot'][key]=bad
+  try:m.evidence(output(value))
+  except m.Refusal as error:assert str(error)=='FOCUS_SNAPSHOT_CATEGORY'and error.module_evidence is None and'PRIVATE_FOCUS'not in str(error)
+  else:raise AssertionError('private focus category retained')
+for snapshot in [dict(focus_snapshot(),mainNotFocusable=True),dict(focus_snapshot(),updaterDialogFocus='no'),dict(focused_snapshot(),attempted=False),dict(focused_snapshot(),focusedRootCount=0),dict(focused_snapshot(),visibleRootCount=3),dict(focused_snapshot(),mainAttached=False),dict(focused_snapshot(),mainFocused=True),dict(focused_snapshot(),focusCategory='target-main',mainFocused=True)]:
+ value=proof();value['retryFocusSnapshot']=snapshot;rejects(lambda:m.evidence(output(value)),'FOCUS_SNAPSHOT_STATE')
+`));
+
+test('actual focus schema rejects independent shape, privacy, count and unavailable-state mutants',()=>run(String.raw`
+original=pathlib.Path(m.__file__).read_text()
+def probe(api,snapshot,code):
+ value=proof();value['retryFocusSnapshot']=snapshot
+ try:api['evidence'](output(value))
+ except api['Refusal']as error:assert str(error)==code and error.module_evidence is None
+ else:raise AssertionError('focus diagnostic guard lost')
+for before,after,snapshot,code in [
+ ('type(value) is dict and set(value) == FOCUS_SNAPSHOT_KEYS','type(value) is dict',dict(focus_snapshot(),private='PRIVATE_FOCUS'),'FOCUS_SNAPSHOT_SCHEMA'),
+ ('value["updaterDialogFocus"] in {"yes", "no", "unavailable"}','True',dict(focused_snapshot(),updaterDialogFocus='PRIVATE_FOCUS'),'FOCUS_SNAPSHOT_CATEGORY'),
+ ('0 <= value[name] <= 32 for name in FOCUS_COUNT_FIELDS','0 <= value[name] for name in FOCUS_COUNT_FIELDS',dict(focused_snapshot(),rootCount=33,attachedRootCount=33,visibleRootCount=33),'FOCUS_SNAPSHOT_TYPE'),
+ ('not any(value[name] for name in FOCUS_MAIN_FIELDS | FOCUS_COUNT_FIELDS)','True',dict(focus_snapshot(),mainNotFocusable=True),'FOCUS_SNAPSHOT_STATE'),
+]:
+ probe(vars(m),snapshot,code);assert original.count(before)==1
+ api={'__name__':'owned_focus_schema_mutant','__file__':m.__file__}
+ exec(compile(original.replace(before,after,1),'<owned-focus-schema-mutant>','exec'),api)
+ try:probe(api,snapshot,code)
+ except AssertionError:pass
+ else:raise AssertionError('focus schema mutant survived')
 `));
 
 test('actual controller diagnostic guards reject individual semantic and privacy mutants',()=>run(String.raw`

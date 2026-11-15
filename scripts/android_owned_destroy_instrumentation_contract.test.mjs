@@ -252,8 +252,8 @@ test('admission keeps the original identity and bounded read-only samples before
   const section = (code, from, to) => code.slice(code.indexOf(from), code.indexOf(to));
   const admissionContract = (code) => {
     const wait = section(code, '    private TapPlan awaitStableTapPlan(', '    private static TapAdmissionSample admissionSample(');
-    const readSample = section(code, '    private static TapAdmissionSample readAdmissionSample(', '    private static TapAdmissionSample inspectAdmissionOnMain(');
-    const inspect = section(code, '    private static TapAdmissionSample inspectAdmissionOnMain(', '    private static boolean ownedFocusedActivityOnMain(');
+    const readSample = section(code, '    private TapAdmissionSample readAdmissionSample(', '    private TapAdmissionSample inspectAdmissionOnMain(');
+    const inspect = section(code, '    private TapAdmissionSample inspectAdmissionOnMain(', '    private void captureFocusSnapshotOnMain(');
     return code.includes('evidence.put("retryAdmissionAdmitted", retryAdmissionState != null && retryAdmissionState.admitted && !retryAdmissionState.refused);') &&
       code.includes('awaitStableTapPlan(activity, before.onlyRetryButton, fault, oldView)') && [
       'new TapAdmissionState(activity, originalButton, now,',
@@ -458,6 +458,173 @@ test('actual extracted admission policy rejects behavioral mutants without Andro
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('focus discriminator is one-shot, process-owned, bounded and reads only the admitted updater Dialog', async () => {
+  const source = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java');
+  const from = source.indexOf('    private void captureFocusSnapshotOnMain(');
+  const to = source.indexOf('    private static boolean ownedFocusedActivityOnMain(', from);
+  const capture = source.slice(from, to);
+  assert.ok(from > 0 && to > from);
+  assert.match(source, /if \(!activity\.hasWindowFocus\(\) \|\| !decor\.hasWindowFocus\(\)\) \{\s*captureFocusSnapshotOnMain\(activity, decor\);/);
+  assert.equal((source.match(/captureFocusSnapshotOnMain\(activity, decor\)/g) ?? []).length, 1);
+  const contract = (code) => [
+    'if (!retryFocusSnapshot.claim()) return;',
+    'if (Build.VERSION.SDK_INT < 29) return;',
+    'WindowInspector.getGlobalWindowViews()',
+    'windows.size() > FocusSnapshot.MAX_ROOTS',
+    'root.isAttachedToWindow()', 'root.isShown()', 'root.hasWindowFocus()',
+    'WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE', 'WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE',
+    'FocusSnapshot.classify(mainRoot, mainAttached,', 'retryFocusSnapshot.publish(snapshot);',
+    'OwnedDestroyInstrumentationRunner.TARGET_ACTIVITY.equals(activity.getClass().getName())',
+    'Class.forName("com.tgk30.debridstreamer.YawfAndroidUpdater", false, activity.getClassLoader())',
+    'readOwnedUpdaterDialog(activity, activity.getClass(), updaterClass, Dialog.class)',
+    'if (value == UNAVAILABLE_DIALOG) return "unavailable";',
+    'dialog.isShowing()', 'window.getDecorView()',
+    'classifyUpdaterDialog(true, window == null ? null : window.getDecorView(), snapshot.focusedRootCount, snapshot.focusedRoot)',
+  ].every((part) => code.includes(part)) &&
+    (code.match(/WindowInspector\.getGlobalWindowViews\(/g) ?? []).length === 1 &&
+    !/collect\(|getChild|sendPointerSync|performClick|dismiss\(|setFlags|addFlags|clearFlags|getText|getTitle|getUrl|ActivityManager|requestFocus|newWakeLock|\.attach\(/.test(code);
+  assert.equal(contract(capture), true);
+  for (const required of [
+    'if (!retryFocusSnapshot.claim()) return;', 'if (Build.VERSION.SDK_INT < 29) return;',
+    'windows.size() > FocusSnapshot.MAX_ROOTS',
+    'Class.forName("com.tgk30.debridstreamer.YawfAndroidUpdater", false, activity.getClassLoader())',
+    'if (value == UNAVAILABLE_DIALOG) return "unavailable";',
+  ]) {
+    assert.equal(capture.split(required).length, 2);
+    assert.equal(contract(capture.replace(required, 'REMOVED_REQUIRED_FOCUS_GUARD')), false);
+  }
+  assert.match(source, /evidence\.put\("retryFocusSnapshot", new JSONObject\(retryFocusSnapshot\.snapshot\(\)\.wireValues\(\)\)\)/);
+});
+
+test('actual focus classification and typed-owner reflection reject independent behavioral mutants', async () => {
+  const source = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java');
+  const begin = '    // BEGIN PURE FOCUS SNAPSHOT POLICY\n';
+  const end = '    // END PURE FOCUS SNAPSHOT POLICY\n';
+  assert.equal(source.split(begin).length, 2);
+  assert.equal(source.split(end).length, 2);
+  const policy = source.slice(source.indexOf(begin) + begin.length, source.indexOf(end));
+  assert.doesNotMatch(policy, /android\.|getDeclaredField\(|getName\(|getText\(|getTitle\(/);
+  assert.equal((policy.match(/\.get\(activity\)/g) ?? []).length, 1);
+  assert.equal((policy.match(/dialogField\.get\(/g) ?? []).length, 1);
+  const pins = await readFile(new URL('./prepare_android_owned_fault_alias.py', import.meta.url), 'utf8');
+  const sourceSha256 = createHash('sha256').update(source).digest('hex');
+  assert.ok(pins.includes('"app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java": "' + sourceSha256 + '"'));
+  const checks = String.raw`
+        static void check(boolean value, String code) { if (!value) throw new AssertionError(code); }
+        static class DialogValue { }
+        static final class ChildDialog extends DialogValue { }
+        static class UpdaterValue { private ChildDialog renamed = new ChildDialog(); private String ignored = "PRIVATE_FOCUS"; }
+        static final class ChildUpdater extends UpdaterValue { }
+        static final class ActivityValue { private UpdaterValue renamed = new UpdaterValue(); private Object unrelated = new Object(); }
+        static final class DuplicateOwner { private UpdaterValue first = new UpdaterValue(), second = new UpdaterValue(); }
+        static final class StaticOwner { private static UpdaterValue only = new UpdaterValue(); }
+        static final class DuplicateDialogs { private DialogValue first = new DialogValue(), second = new DialogValue(); }
+        static final class DuplicateDialogOwner { private DuplicateDialogs only = new DuplicateDialogs(); }
+        static FocusSnapshot roots(Object main, Object other) {
+            return FocusSnapshot.classify(main, true, true, false, false, false, new FocusRoot[] {
+                new FocusRoot(main, true, true, false), new FocusRoot(other, true, true, true) });
+        }
+        static void exercise(String name) {
+            Object main = new Object(), other = new Object();
+            if (name.equals("roots")) {
+                FocusSnapshot value = roots(main, other);
+                check(value.available && value.focusCategory.equals("other-owned-root") && value.focusedRoot == other, "exact focused root identity");
+                check(value.rootCount == 2 && value.attachedRootCount == 2 && value.visibleRootCount == 2 && value.focusedRootCount == 1, "bounded root facts");
+                FocusSnapshot own = FocusSnapshot.classify(main, true, true, true, true, false, new FocusRoot[] { new FocusRoot(main, true, true, true) });
+                check(own.focusCategory.equals("target-main") && own.mainNotFocusable && !own.mainNotTouchable, "main identity and flags");
+                FocusSnapshot none = FocusSnapshot.classify(main, true, true, false, false, true, new FocusRoot[] { new FocusRoot(main, true, true, false) });
+                check(none.focusCategory.equals("none-owned") && none.mainNotTouchable, "no owned focus is not main focus");
+                FocusSnapshot both = FocusSnapshot.classify(main, true, true, true, false, false, new FocusRoot[] { new FocusRoot(main, true, true, true), new FocusRoot(other, true, true, true) });
+                check(both.focusCategory.equals("ambiguous") && both.focusedRoot == null, "multiple focus cannot pick a root");
+                java.util.Map<String,Object> wire = value.wireValues();
+                check(wire.size() == 13 && !wire.containsValue(other) && !wire.toString().contains("PRIVATE_FOCUS"), "no identities or private fields on wire");
+            } else if (name.equals("bounds")) {
+                FocusRoot[] many = new FocusRoot[33];
+                for (int i = 0; i < many.length; i++) many[i] = new FocusRoot(i == 0 ? main : new Object(), true, true, false);
+                check(!FocusSnapshot.classify(main, true, true, false, false, false, many).available, "root cap is not truncated success");
+                check(!FocusSnapshot.classify(main, true, true, false, false, false, new FocusRoot[] { new FocusRoot(main, true, true, false), new FocusRoot(main, true, true, false) }).available, "duplicate identities refuse");
+                check(!FocusSnapshot.classify(main, true, true, false, false, false, new FocusRoot[0]).available, "attached main must be in complete snapshot");
+            } else if (name.equals("once")) {
+                FocusSnapshotCapture capture = new FocusSnapshotCapture();
+                check(!capture.snapshot().attempted && !capture.snapshot().available, "not attempted is unavailable");
+                check(capture.claim() && capture.snapshot().attempted && !capture.snapshot().available, "claim records attempted before observation");
+                FocusSnapshot first = roots(main, other); capture.publish(first);
+                check(!capture.claim(), "no repeated snapshot");
+                capture.publish(FocusSnapshot.unavailable(true));
+                check(capture.snapshot() == first, "later publisher cannot replace first snapshot");
+            } else if (name.equals("reflection")) {
+                ActivityValue activity = new ActivityValue();
+                check(readOwnedUpdaterDialog(activity, ActivityValue.class, UpdaterValue.class, DialogValue.class) == activity.renamed.renamed, "unique exact owner and assignable Dialog field");
+                check(readOwnedUpdaterDialog(activity, Object.class, UpdaterValue.class, DialogValue.class) == UNAVAILABLE_DIALOG, "wrong Activity class refuses");
+                check(readOwnedUpdaterDialog(new DuplicateOwner(), DuplicateOwner.class, UpdaterValue.class, DialogValue.class) == UNAVAILABLE_DIALOG, "ambiguous updater owner refuses");
+                check(readOwnedUpdaterDialog(new StaticOwner(), StaticOwner.class, UpdaterValue.class, DialogValue.class) == UNAVAILABLE_DIALOG, "static owner is not admitted Activity ownership");
+                check(readOwnedUpdaterDialog(new DuplicateDialogOwner(), DuplicateDialogOwner.class, DuplicateDialogs.class, DialogValue.class) == UNAVAILABLE_DIALOG, "ambiguous Dialog field refuses");
+                activity.renamed = null;
+                check(readOwnedUpdaterDialog(activity, ActivityValue.class, UpdaterValue.class, DialogValue.class) == UNAVAILABLE_DIALOG, "missing updater refuses");
+                activity.renamed = new ChildUpdater();
+                check(readOwnedUpdaterDialog(activity, ActivityValue.class, UpdaterValue.class, DialogValue.class) == UNAVAILABLE_DIALOG, "subclass is not exact admitted updater");
+            } else if (name.equals("dialog")) {
+                check(classifyUpdaterDialog(true, other, 1, other).equals("yes"), "showing exact focused Dialog");
+                check(classifyUpdaterDialog(true, other, 1, main).equals("no"), "showing different Dialog is not focused owner");
+                check(classifyUpdaterDialog(false, other, 1, other).equals("no"), "not showing is not focused owner");
+                check(classifyUpdaterDialog(true, null, 1, other).equals("unavailable"), "missing Dialog window is unavailable");
+                check(classifyUpdaterDialog(true, other, 2, other).equals("unavailable"), "ambiguous focus is unavailable");
+                check(classifyUpdaterDialog(true, other, 0, null).equals("no"), "no focused root cannot prove ownership");
+            } else throw new AssertionError("unknown fixture case");
+        }
+  `;
+  const mutations = [
+    ['root-cap', 'bounds', 'roots.length > MAX_ROOTS', 'false'],
+    ['duplicate-root', 'bounds', 'seen.put(root.identity, Boolean.TRUE) != null', '(seen.put(root.identity, Boolean.TRUE) != null && false)'],
+    ['root-identity', 'roots', 'value.focusedRoot == mainRoot ? "target-main"', 'true ? "target-main"'],
+    ['one-shot', 'once', 'if (claimed) return false;', 'if (false) return false;'],
+    ['ambiguous-owner', 'reflection', 'ownerField != null || java.lang.reflect.Modifier.isStatic(field.getModifiers())', 'java.lang.reflect.Modifier.isStatic(field.getModifiers())'],
+    ['static-owner', 'reflection', 'java.lang.reflect.Modifier.isStatic(field.getModifiers())', 'false'],
+    ['exact-owner', 'reflection', 'updater.getClass() != updaterClass', 'false'],
+    ['dialog-identity', 'dialog', 'dialogRoot == focusedRoot', 'true'],
+    ['private-wire', 'roots', 'values.put("rootCount", rootCount);', 'values.put("private", focusedRoot); values.put("rootCount", rootCount);'],
+  ];
+  const wrappers = [policy, ...mutations.map(([, , from, to]) => {
+    assert.equal(policy.split(from).length, 2, 'exact focus mutation needle');
+    return policy.replace(from, to);
+  })];
+  const generated = 'public final class FocusPolicyFixture {\n' + wrappers.map((code, index) =>
+    'private static final class Policy' + index + ' {\n' + code + '\n' + checks + '\n}').join('\n') +
+    '\npublic static void main(String[] args) { switch (Integer.parseInt(args[0])) {\n' + wrappers.map((_, index) =>
+      'case ' + index + ': Policy' + index + '.exercise(args[1]); break;').join('\n') +
+    '\ndefault: throw new AssertionError("unknown policy"); } System.out.print("PASS"); }\n}';
+  assert.equal(generated.split(policy).length, 2);
+  const temporaryRoot = process.env.RUNNER_TEMP || process.env.TMPDIR;
+  assert.ok(temporaryRoot && isAbsolute(temporaryRoot), 'owned absolute temporary directory required');
+  const directory = mkdtempSync(join(temporaryRoot, 'owned-focus-policy-'));
+  const javac = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin/javac') : 'javac';
+  const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin/java') : 'java';
+  const invoke = (command, args) => spawnSync(command, args, {
+    encoding: 'utf8', timeout: 20_000, maxBuffer: 1024 * 1024, killSignal: 'SIGKILL',
+    cwd: directory, env: { ...process.env, TMPDIR: directory },
+  });
+  const requireProcess = (result, status) => {
+    assert.equal(result.error, undefined); assert.equal(result.signal, null);
+    assert.equal(result.status, status, result.stdout + result.stderr);
+  };
+  try {
+    const file = join(directory, 'FocusPolicyFixture.java'); writeFileSync(file, generated);
+    requireProcess(invoke(javac, ['--release', '17', '-d', directory, file]), 0);
+    for (const name of ['roots', 'bounds', 'once', 'reflection', 'dialog']) {
+      const result = invoke(java, ['-Xmx64m', '-cp', directory, 'FocusPolicyFixture', '0', name]);
+      requireProcess(result, 0); assert.equal(result.stdout, 'PASS');
+    }
+    for (const [index, [label, name]] of mutations.entries()) {
+      const positive = invoke(java, ['-Xmx64m', '-cp', directory, 'FocusPolicyFixture', '0', name]);
+      requireProcess(positive, 0); assert.equal(positive.stdout, 'PASS');
+      const negative = invoke(java, ['-Xmx64m', '-cp', directory, 'FocusPolicyFixture', String(index + 1), name]);
+      requireProcess(negative, 1); assert.match(negative.stderr, /java\.lang\.AssertionError:/, label);
+      assert.doesNotMatch(negative.stderr, /ExceptionInInitializerError|NoClassDefFoundError|OutOfMemoryError/);
+    }
+    console.log('Focus snapshot source SHA-256 ' + sourceSha256 + '; extracted SHA-256 ' + createHash('sha256').update(policy).digest('hex'));
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('reported artifact is fixed-schema, redacted, and scoped to this selected retry only', async () => {

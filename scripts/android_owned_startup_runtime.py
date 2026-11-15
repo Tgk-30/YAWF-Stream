@@ -54,11 +54,16 @@ ADMISSION_REASONS = {"not-started", "none", "owner", "liveness", "identity", "fa
                      "unstable-geometry", "observation-timeout", "observation-error", "deadline", "sample-limit", "sample-interval"}
 ADMISSION_REFUSALS = {"not-started", "owner", "liveness", "identity", "fault", "cleanup",
                       "observation-timeout", "observation-error", "deadline", "sample-limit", "sample-interval"}
+FOCUS_MAIN_FIELDS = {"mainAttached", "mainVisible", "mainFocused", "mainNotFocusable", "mainNotTouchable"}
+FOCUS_COUNT_FIELDS = {"rootCount", "attachedRootCount", "visibleRootCount", "focusedRootCount"}
+FOCUS_CATEGORIES = {"target-main", "other-owned-root", "none-owned", "ambiguous", "unavailable"}
+FOCUS_SNAPSHOT_KEYS = FOCUS_MAIN_FIELDS | FOCUS_COUNT_FIELDS | {"attempted", "available", "focusCategory", "updaterDialogFocus"}
 EVIDENCE_KEYS = set(BOOL_FIELDS) | {
     "schemaVersion", "scope", "phase", "qualification", "failureCode", "elapsedMs",
     "tapCount", "targetActivityCreates", "pluginLoadCount", "retryDownCallElapsedMs",
     "retryPressedObservationOutcome",
     "retryAdmissionFirstBlockingReason", "retryAdmissionLastBlockingReason", "retryAdmissionElapsedMs", "retryAdmissionSampleCount",
+    "retryFocusSnapshot",
 }
 
 
@@ -110,6 +115,29 @@ def strict_json(text):
         raise Refusal("MALFORMED_JSON") from error
 
 
+def validate_focus_snapshot(value):
+    require(type(value) is dict and set(value) == FOCUS_SNAPSHOT_KEYS, "FOCUS_SNAPSHOT_SCHEMA")
+    require(all(type(value[name]) is bool for name in FOCUS_MAIN_FIELDS | {"attempted", "available"}), "FOCUS_SNAPSHOT_TYPE")
+    require(all(type(value[name]) is int and 0 <= value[name] <= 32 for name in FOCUS_COUNT_FIELDS), "FOCUS_SNAPSHOT_TYPE")
+    require(type(value["focusCategory"]) is str and value["focusCategory"] in FOCUS_CATEGORIES, "FOCUS_SNAPSHOT_CATEGORY")
+    require(type(value["updaterDialogFocus"]) is str and value["updaterDialogFocus"] in {"yes", "no", "unavailable"}, "FOCUS_SNAPSHOT_CATEGORY")
+    if not value["available"]:
+        require(value["focusCategory"] == "unavailable" and value["updaterDialogFocus"] == "unavailable" and
+                not any(value[name] for name in FOCUS_MAIN_FIELDS | FOCUS_COUNT_FIELDS), "FOCUS_SNAPSHOT_STATE")
+        return
+    require(value["attempted"] and value["focusCategory"] != "unavailable", "FOCUS_SNAPSHOT_STATE")
+    require(value["visibleRootCount"] <= value["attachedRootCount"] <= value["rootCount"] and
+            value["focusedRootCount"] <= value["attachedRootCount"], "FOCUS_SNAPSHOT_STATE")
+    require((not value["mainVisible"] and not value["mainFocused"]) or value["mainAttached"], "FOCUS_SNAPSHOT_STATE")
+    require(not value["mainAttached"] or value["attachedRootCount"] > 0, "FOCUS_SNAPSHOT_STATE")
+    category = value["focusCategory"]
+    require((category == "none-owned" and value["focusedRootCount"] == 0 and not value["mainFocused"]) or
+            (category == "ambiguous" and value["focusedRootCount"] > 1) or
+            (category in {"target-main", "other-owned-root"} and value["focusedRootCount"] == 1 and
+             value["mainFocused"] == (category == "target-main")), "FOCUS_SNAPSHOT_STATE")
+    require(value["updaterDialogFocus"] != "yes" or category == "other-owned-root", "FOCUS_SNAPSHOT_STATE")
+
+
 def evidence(output):
     """Parse the module's actual Bundle key, not a fabricated OWNED_STARTUP prefix."""
     key = "INSTRUMENTATION_STATUS: owned_destroy_evidence="
@@ -133,6 +161,7 @@ def evidence(output):
         require(value[name] in ADMISSION_REASONS, "EVIDENCE_ADMISSION_REASON")
     for name, cap in (("retryAdmissionElapsedMs", 2000), ("retryAdmissionSampleCount", 128)):
         require(type(value[name]) is int and 0 <= value[name] <= cap, "EVIDENCE_TYPE")
+    validate_focus_snapshot(value["retryFocusSnapshot"])
     safe = dict(value)
     safe["phase"] = value["phase"] if value["phase"] in PHASES else "UNRECOGNIZED_MODULE_PHASE"
     safe["failureCode"] = value["failureCode"] if value["failureCode"] in FAILURE_CODES else "UNRECOGNIZED_MODULE_FAILURE"

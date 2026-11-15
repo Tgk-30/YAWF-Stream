@@ -1,11 +1,13 @@
 package com.yawf.ownedstartup;
 
 import android.app.Activity;
+import android.app.Dialog;
 import android.app.Instrumentation;
 import android.app.KeyguardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Rect;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
 import android.os.SystemClock;
@@ -14,6 +16,9 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowManager;
+import android.view.inspector.WindowInspector;
 import android.webkit.WebView;
 import android.widget.Button;
 
@@ -67,6 +72,7 @@ public final class OwnedDestroyRetryTest {
     private Long retryDownCallElapsedMs;
     private PressedObservationOutcome retryPressedObservationOutcome = PressedObservationOutcome.NOT_ATTEMPTED;
     private TapAdmissionState retryAdmissionState;
+    private final FocusSnapshotCapture retryFocusSnapshot = new FocusSnapshotCapture();
     private boolean sameActivityAfterRetry;
     private boolean wryOwnsNewWebView;
     private boolean activityReferencesNewWebView;
@@ -397,7 +403,7 @@ public final class OwnedDestroyRetryTest {
                 SystemClock.elapsedRealtime());
     }
 
-    private static TapAdmissionSample readAdmissionSample(Activity activity, Button button, FaultOncePlugin fault,
+    private TapAdmissionSample readAdmissionSample(Activity activity, Button button, FaultOncePlugin fault,
             WebView oldView, long deadline) {
         TapAdmissionSample closed = admissionSample(activity, button, TapAdmissionReason.OBSERVATION_TIMEOUT, null);
         AtomicReference<TapAdmissionSample> result = new AtomicReference<>();
@@ -432,7 +438,7 @@ public final class OwnedDestroyRetryTest {
         return admissionSample(activity, button, TapAdmissionReason.OBSERVATION_ERROR, null);
     }
 
-    private static TapAdmissionSample inspectAdmissionOnMain(Activity activity, Button button, FaultOncePlugin fault, WebView oldView) {
+    private TapAdmissionSample inspectAdmissionOnMain(Activity activity, Button button, FaultOncePlugin fault, WebView oldView) {
         OwnedDestroyInstrumentationRunner runner = OwnedDestroyInstrumentationRunner.currentRunner();
         Activity owner = runner.targetActivity();
         if (owner != activity || runner.targetActivityCreateCount() != 1 || runner.targetPid() != android.os.Process.myPid() ||
@@ -458,6 +464,7 @@ public final class OwnedDestroyRetryTest {
             return admissionSample(owner, button, TapAdmissionReason.CLEANUP, null);
         }
         if (!activity.hasWindowFocus() || !decor.hasWindowFocus()) {
+            captureFocusSnapshotOnMain(activity, decor);
             PowerManager power = (PowerManager) activity.getSystemService(Context.POWER_SERVICE);
             KeyguardManager keyguard = (KeyguardManager) activity.getSystemService(Context.KEYGUARD_SERVICE);
             if (power == null || keyguard == null) return admissionSample(owner, button, TapAdmissionReason.OBSERVATION_ERROR, null);
@@ -483,6 +490,54 @@ public final class OwnedDestroyRetryTest {
             return admissionSample(owner, button, TapAdmissionReason.INTERSECTION, null);
         }
         return admissionSample(owner, button, TapAdmissionReason.OBSERVATION_ERROR, null);
+    }
+
+    private void captureFocusSnapshotOnMain(Activity activity, View decor) {
+        if (!retryFocusSnapshot.claim()) return;
+        try {
+            if (Build.VERSION.SDK_INT < 29) return;
+            List<View> windows = WindowInspector.getGlobalWindowViews();
+            if (windows.size() > FocusSnapshot.MAX_ROOTS) return;
+            View mainRoot = decor.getRootView();
+            FocusRoot[] roots = new FocusRoot[windows.size()];
+            for (int index = 0; index < windows.size(); index++) {
+                View root = windows.get(index);
+                if (root == null) return;
+                boolean attached = root.isAttachedToWindow();
+                roots[index] = new FocusRoot(root, attached,
+                        attached && root.isShown() && root.getWindowVisibility() == View.VISIBLE,
+                        attached && root.hasWindowFocus());
+            }
+            boolean mainAttached = mainRoot.isAttachedToWindow();
+            int flags = activity.getWindow().getAttributes().flags;
+            FocusSnapshot snapshot = FocusSnapshot.classify(mainRoot, mainAttached,
+                    mainAttached && mainRoot.isShown() && mainRoot.getWindowVisibility() == View.VISIBLE,
+                    mainAttached && mainRoot.hasWindowFocus(),
+                    (flags & WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) != 0,
+                    (flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0, roots);
+            if (snapshot.available) {
+                snapshot.updaterDialogFocus = updaterDialogFocusOnMain(activity, snapshot);
+            }
+            retryFocusSnapshot.publish(snapshot);
+        } catch (Throwable ignored) {
+            // This optional snapshot cannot change admission or expose exception text.
+        }
+    }
+
+    private static String updaterDialogFocusOnMain(Activity activity, FocusSnapshot snapshot) {
+        try {
+            if (!OwnedDestroyInstrumentationRunner.TARGET_ACTIVITY.equals(activity.getClass().getName())) return "unavailable";
+            Class<?> updaterClass = Class.forName("com.tgk30.debridstreamer.YawfAndroidUpdater", false, activity.getClassLoader());
+            Object value = readOwnedUpdaterDialog(activity, activity.getClass(), updaterClass, Dialog.class);
+            if (value == UNAVAILABLE_DIALOG) return "unavailable";
+            if (value == null) return "no";
+            Dialog dialog = (Dialog) value;
+            if (!dialog.isShowing()) return classifyUpdaterDialog(false, null, snapshot.focusedRootCount, snapshot.focusedRoot);
+            Window window = dialog.getWindow();
+            return classifyUpdaterDialog(true, window == null ? null : window.getDecorView(), snapshot.focusedRootCount, snapshot.focusedRoot);
+        } catch (Throwable ignored) {
+            return "unavailable";
+        }
     }
 
     private static boolean ownedFocusedActivityOnMain(Activity activity) {
@@ -708,6 +763,7 @@ public final class OwnedDestroyRetryTest {
         evidence.put("retryAdmissionLastBlockingReason", retryAdmissionState == null ? "not-started" : retryAdmissionState.lastBlocking.wireValue);
         evidence.put("retryAdmissionElapsedMs", retryAdmissionState == null ? 0L : retryAdmissionState.elapsedMs);
         evidence.put("retryAdmissionSampleCount", retryAdmissionState == null ? 0 : retryAdmissionState.sampleCount);
+        evidence.put("retryFocusSnapshot", new JSONObject(retryFocusSnapshot.snapshot().wireValues()));
         evidence.put("oldWebViewDetached", first != null && viewDetachedOnMain(first));
         evidence.put("newWebViewDistinctAttached", first != null && second != null && first != second &&
                 viewAttachedOnMain(second));
@@ -740,6 +796,127 @@ public final class OwnedDestroyRetryTest {
             this.onlyRetryButton = onlyRetryButton;
         }
     }
+
+    // BEGIN PURE FOCUS SNAPSHOT POLICY
+    private static final Object UNAVAILABLE_DIALOG = new Object();
+
+    private static String classifyUpdaterDialog(boolean showing, Object dialogRoot, int focusedCount, Object focusedRoot) {
+        if (!showing) return "no";
+        if (dialogRoot == null || focusedCount > 1) return "unavailable";
+        return focusedCount == 1 && dialogRoot == focusedRoot ? "yes" : "no";
+    }
+
+    private static Object readOwnedUpdaterDialog(Object activity, Class<?> activityClass, Class<?> updaterClass, Class<?> dialogClass) {
+        try {
+            if (activity == null || activity.getClass() != activityClass) return UNAVAILABLE_DIALOG;
+            java.lang.reflect.Field ownerField = null;
+            for (java.lang.reflect.Field field : activityClass.getDeclaredFields()) {
+                if (field.getType() == updaterClass) {
+                    if (ownerField != null || java.lang.reflect.Modifier.isStatic(field.getModifiers())) return UNAVAILABLE_DIALOG;
+                    ownerField = field;
+                }
+            }
+            if (ownerField == null) return UNAVAILABLE_DIALOG;
+            ownerField.setAccessible(true);
+            Object updater = ownerField.get(activity);
+            if (updater == null || updater.getClass() != updaterClass) return UNAVAILABLE_DIALOG;
+            java.lang.reflect.Field dialogField = null;
+            for (java.lang.reflect.Field field : updaterClass.getDeclaredFields()) {
+                if (dialogClass.isAssignableFrom(field.getType())) {
+                    if (dialogField != null) return UNAVAILABLE_DIALOG;
+                    dialogField = field;
+                }
+            }
+            if (dialogField == null) return UNAVAILABLE_DIALOG;
+            dialogField.setAccessible(true);
+            return dialogField.get(java.lang.reflect.Modifier.isStatic(dialogField.getModifiers()) ? null : updater);
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError ignored) {
+            return UNAVAILABLE_DIALOG;
+        }
+    }
+
+    private static final class FocusRoot {
+        final Object identity;
+        final boolean attached;
+        final boolean visible;
+        final boolean focused;
+        FocusRoot(Object identity, boolean attached, boolean visible, boolean focused) {
+            this.identity = identity; this.attached = attached; this.visible = visible; this.focused = focused;
+        }
+    }
+
+    private static final class FocusSnapshot {
+        static final int MAX_ROOTS = 32;
+        final boolean attempted;
+        boolean available;
+        String focusCategory = "unavailable";
+        String updaterDialogFocus = "unavailable";
+        int rootCount;
+        int attachedRootCount;
+        int visibleRootCount;
+        int focusedRootCount;
+        boolean mainAttached;
+        boolean mainVisible;
+        boolean mainFocused;
+        boolean mainNotFocusable;
+        boolean mainNotTouchable;
+        Object focusedRoot;
+
+        private FocusSnapshot(boolean attempted) { this.attempted = attempted; }
+        static FocusSnapshot unavailable(boolean attempted) { return new FocusSnapshot(attempted); }
+
+        static FocusSnapshot classify(Object mainRoot, boolean attached, boolean visible, boolean focused,
+                boolean notFocusable, boolean notTouchable, FocusRoot[] roots) {
+            if (mainRoot == null || roots == null || roots.length > MAX_ROOTS) return unavailable(true);
+            FocusSnapshot value = new FocusSnapshot(true);
+            java.util.IdentityHashMap<Object, Boolean> seen = new java.util.IdentityHashMap<>();
+            for (FocusRoot root : roots) {
+                if (root == null || root.identity == null || seen.put(root.identity, Boolean.TRUE) != null) return unavailable(true);
+                value.rootCount++;
+                if (root.attached) {
+                    value.attachedRootCount++;
+                    if (root.visible) value.visibleRootCount++;
+                    if (root.focused) { value.focusedRootCount++; value.focusedRoot = root.identity; }
+                }
+            }
+            if (attached && !seen.containsKey(mainRoot)) return unavailable(true);
+            value.available = true;
+            value.mainAttached = attached; value.mainVisible = attached && visible; value.mainFocused = attached && focused;
+            value.mainNotFocusable = notFocusable; value.mainNotTouchable = notTouchable;
+            value.focusCategory = value.focusedRootCount == 0 ? "none-owned"
+                    : value.focusedRootCount > 1 ? "ambiguous"
+                    : value.focusedRoot == mainRoot ? "target-main" : "other-owned-root";
+            if (value.focusedRootCount != 1) value.focusedRoot = null;
+            return value;
+        }
+
+        java.util.Map<String, Object> wireValues() {
+            java.util.Map<String, Object> values = new java.util.LinkedHashMap<>();
+            values.put("attempted", attempted); values.put("available", available);
+            values.put("focusCategory", focusCategory); values.put("updaterDialogFocus", updaterDialogFocus);
+            values.put("rootCount", rootCount); values.put("attachedRootCount", attachedRootCount);
+            values.put("visibleRootCount", visibleRootCount); values.put("focusedRootCount", focusedRootCount);
+            values.put("mainAttached", mainAttached); values.put("mainVisible", mainVisible); values.put("mainFocused", mainFocused);
+            values.put("mainNotFocusable", mainNotFocusable); values.put("mainNotTouchable", mainNotTouchable);
+            return values;
+        }
+    }
+
+    private static final class FocusSnapshotCapture {
+        private boolean claimed;
+        private boolean published;
+        private FocusSnapshot value = FocusSnapshot.unavailable(false);
+        synchronized boolean claim() {
+            if (claimed) return false;
+            claimed = true; value = FocusSnapshot.unavailable(true); return true;
+        }
+        synchronized void publish(FocusSnapshot snapshot) {
+            if (!claimed || published) return;
+            value = snapshot; published = true;
+        }
+        synchronized FocusSnapshot snapshot() { return value; }
+    }
+    // END PURE FOCUS SNAPSHOT POLICY
 
     // BEGIN PURE TAP ADMISSION POLICY
     private enum TapAdmissionReason {
