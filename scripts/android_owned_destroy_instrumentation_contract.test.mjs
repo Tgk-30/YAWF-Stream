@@ -70,6 +70,7 @@ test('fault is one-shot, first-map-order guarded, and retry is one physical tap 
   const plugin = await read('app/src/androidTest/java/com/yawf/ownedstartup/FaultOncePlugin.java');
   const runner = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyInstrumentationRunner.java');
   const testSource = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java');
+  assert.match(testSource, /^import android\.app\.Instrumentation;$/m);
   const firstOrderContract = (source) => /if \(!isFirstPluginInLiveManagerMap\(\)\)/.test(source) &&
     /plugins\.entrySet\(\)\.stream\(\)\.findFirst\(\)/.test(source) &&
     /FAULT_PLUGIN_NAME\.equals\(entry\.getKey\(\)\)/.test(source) &&
