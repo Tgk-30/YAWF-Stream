@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { classifyFixtureBootstrapLog, classifyResponse, collectFixtureDiagnostic, evaluateProgress, sanitizeFixtureDiagnostic, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
+import { buildFixtureMediaPlan } from './foreground_fixture_media_plan.mjs';
 const baseline = { time: 10, frames: 300, paused: false, seeking: false, rate: 1, hidden: false, error: null, source: 'one', wall: 1000, presented: { frames: 300 } };
 test('verified Node xz archive has its extraction prerequisite in the image bootstrap', () => {
   const dockerfile = readFileSync(new URL('./foreground-playback/Dockerfile', import.meta.url), 'utf8');
@@ -28,9 +29,82 @@ test('seek, pause, visibility loss and source replacement do not pass', () => {
 test('old short fixture remains default while long and transcode require explicit opt in', () => {
   const s = readFileSync(new URL('./android_external_player_server_fixture.mts', import.meta.url), 'utf8');
   assert.match(s, /let foregroundLong = false/);
-  assert.match(s, /fixtureCLI\.foregroundLong \? 600 : 36/);
+  assert.match(s, /buildFixtureMediaPlan\(\{ foregroundLong: fixtureCLI\.foregroundLong, videoFilter,/);
   assert.match(s, /enableTranscode: fixtureCLI\.foregroundLong/);
   assert.match(s, /length: 12/);
+});
+
+const mediaOptions = { foregroundLong: false, videoFilter: 'owned-overlay', moviePath: '/owned/media/synthetic.mp4',
+  segmentPattern: '/owned/media/segment%03d.ts', playlistPath: '/owned/media/index.m3u8' };
+function requireFixtureMediaPlan(factory) {
+  const legacyMp4 = [
+    '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30:duration=36',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=36',
+    '-vf', mediaOptions.videoFilter, '-t', '36', '-c:v', 'libx264', '-preset', 'veryfast', '-pix_fmt', 'yuv420p',
+    '-g', '90', '-keyint_min', '90', '-sc_threshold', '0', '-force_key_frames', 'expr:gte(t,n_forced*3)',
+    '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', mediaOptions.moviePath,
+  ];
+  const legacyHls = [
+    '-i', mediaOptions.moviePath, '-map', '0:v:0', '-map', '0:a:0', '-c', 'copy', '-f', 'hls',
+    '-hls_time', '3', '-hls_list_size', '0', '-hls_playlist_type', 'vod', '-hls_flags', 'independent_segments',
+    '-hls_segment_type', 'mpegts', '-start_number', '0', '-hls_segment_filename', mediaOptions.segmentPattern, mediaOptions.playlistPath,
+  ];
+  const short = factory(mediaOptions), long = factory({ ...mediaOptions, foregroundLong: true });
+  assert.deepEqual(short.map(({ kind, stage }) => [kind, stage]), [
+    ['ffmpeg', 'mp4-generation'], ['ffmpeg', 'static-hls-generation'], ['probe', 'media-probe'], ['layout', 'media-output-check'],
+  ]);
+  assert.deepEqual(short[0].args, legacyMp4, 'the default MP4 uses exactly the old 36-second arguments');
+  assert.deepEqual(short[1].args, legacyHls, 'static HLS uses the complete old 36-second MP4, never a truncation');
+  assert.deepEqual(long.slice(0, 4), short, 'both modes finish the exact legacy construction and strict checks first');
+  assert.deepEqual(long.slice(4).map(({ kind, stage }) => [kind, stage]), [
+    ['ffmpeg', 'long-mp4-generation'], ['probe', 'long-media-probe'],
+  ]);
+  const replacement = legacyMp4.map((arg) => arg.replace('duration=36', 'duration=600'));
+  replacement[replacement.indexOf('-t') + 1] = '600';
+  replacement.splice(replacement.indexOf('-c:v'), 0, '-b:v', '700k', '-maxrate', '900k', '-bufsize', '1400k');
+  replacement.unshift('-y');
+  assert.deepEqual(long[4].args, replacement, 'only the final owned MP4 is replaced, at bounded bitrate, before its final probe');
+  assert.equal(long.filter((step) => step.kind === 'ffmpeg' && step.args.includes('copy')).length, 1);
+  assert.equal(long[1].args.includes('-t'), false);
+}
+
+test('actual media plan preserves legacy 36-second static HLS before the opt-in long replacement and re-probe', () => {
+  requireFixtureMediaPlan(buildFixtureMediaPlan);
+  const source = readFileSync(new URL('./android_external_player_server_fixture.mts', import.meta.url), 'utf8');
+  const generation = source.slice(source.indexOf('function generateFixtureMedia('), source.indexOf('function assertStaticMediaLayout('));
+  assert.match(source, /import \{ buildFixtureMediaPlan \} from "\.\/foreground_fixture_media_plan\.mjs"/);
+  assert.match(generation, /for \(const step of plan\) \{\s*markForegroundStage\(step\.stage\)/);
+  assert.match(generation, /case "ffmpeg": runFfmpeg\(step\.label, step\.args\); break;/);
+  assert.match(generation, /case "probe": writeMediaProbe\(\); break;/);
+  assert.match(generation, /case "layout": assertStaticMediaLayout\(\); break;/);
+  const layout = source.slice(source.indexOf('function assertStaticMediaLayout('), source.indexOf('function boundedPort('));
+  assert.match(layout, /length: 12/);
+  assert.match(layout, /JSON\.stringify\(actualSegments\) !== JSON\.stringify\(expectedSegments\)/);
+  assert.match(layout, /JSON\.stringify\(manifestSegments\) !== JSON\.stringify\(expectedSegments\)/);
+  assert.doesNotMatch(layout, /foregroundLong/);
+  const main = source.slice(source.indexOf('async function main('));
+  assert.ok(main.indexOf('generateFixtureMedia();') < main.indexOf('createServer(serveMedia)'));
+});
+
+test('actual media-plan semantic mutants fail without executing ffmpeg or creating media', async () => {
+  const original = readFileSync(new URL('./foreground_fixture_media_plan.mjs', import.meta.url), 'utf8');
+  const mutations = [
+    ['mp4(36, false)', 'mp4(600, false)'],
+    ['plan.push(mp4(600, true));', 'plan.unshift(mp4(600, true));'],
+    ["'-i', moviePath, '-map', '0:v:0'", "'-i', moviePath, '-t', '36', '-map', '0:v:0'"],
+    ["...(replace ? ['-y'] : [])", '...[]'],
+    ["plan.push({ kind: 'probe', stage: 'long-media-probe' });", ''],
+    ["['-b:v', '700k', '-maxrate', '900k', '-bufsize', '1400k']", '[]'],
+  ];
+  for (const [from, to] of mutations) {
+    requireFixtureMediaPlan(buildFixtureMediaPlan);
+    assert.equal(original.split(from).length, 2);
+    const mutant = await import(`data:text/javascript;base64,${Buffer.from(original.replace(from, to)).toString('base64')}`);
+    let rejected = false;
+    try { requireFixtureMediaPlan(mutant.buildFixtureMediaPlan); }
+    catch (error) { assert.equal(error.code, 'ERR_ASSERTION'); rejected = true; }
+    assert.equal(rejected, true, 'construction semantics must reject each individual mutant');
+  }
 });
 
 const fixtureStatus = { schemaVersion: 1, stage: 'mp4-generation', status: 'refused', failureCode: 'ffmpeg-exit', childExitCode: 1 };
@@ -45,7 +119,9 @@ test('long-mode diagnostics use fixed stages and owned guard codes without chang
   assert.doesNotMatch(writer, /message|stack|stdout|stderr|headers|cookies/);
   assert.match(fixture, /if \(fixtureCLI\.foregroundLong\) \{[\s\S]*?process\.on\("uncaughtExceptionMonitor", recordForegroundRefusal\)/);
   assert.doesNotMatch(fixture, /process\.on\("uncaughtException",/);
-  for (const stage of new Set([...fixture.matchAll(/markForegroundStage\("([a-z-]+)"\)/g)].map((match) => match[1]))) {
+  const stages = new Set([...fixture.matchAll(/markForegroundStage\("([a-z-]+)"\)/g)].map((match) => match[1]));
+  for (const step of buildFixtureMediaPlan({ ...mediaOptions, foregroundLong: true })) stages.add(step.stage);
+  for (const stage of stages) {
     assert.ok(sanitizeFixtureDiagnostic({ ...fixtureStatus, stage, status: stage === 'ready' ? 'ready' : 'running', failureCode: null, childExitCode: null }), stage);
   }
   const failureType = fixture.match(/type ForegroundFixtureFailure =([\s\S]*?);/)?.[1];
@@ -53,8 +129,8 @@ test('long-mode diagnostics use fixed stages and owned guard codes without chang
   for (const [, failureCode] of failureType.matchAll(/"([a-z-]+)"/g)) {
     assert.ok(sanitizeFixtureDiagnostic({ ...fixtureStatus, failureCode, childExitCode: null }), failureCode);
   }
-  for (const stage of ['mp4-generation', 'static-hls-generation', 'media-probe', 'input-check', 'server-build', 'seed-owner', 'smoke-bootstrap', 'smoke-proxy-full', 'ready']) {
-    assert.ok(fixture.includes(`markForegroundStage("${stage}")`), stage);
+  for (const stage of ['mp4-generation', 'static-hls-generation', 'media-probe', 'long-mp4-generation', 'long-media-probe', 'input-check', 'server-build', 'seed-owner', 'smoke-bootstrap', 'smoke-proxy-full', 'ready']) {
+    assert.ok(stages.has(stage), stage);
   }
   const retained = driver.indexOf('evidence.fixtureDiagnostic = collectFixtureDiagnostic(fixtureDir, fixtureLog, proc?.exitCode)');
   assert.ok(retained > 0 && retained < driver.indexOf('rmSync(fixtureDir, { recursive: true, force: true })'));

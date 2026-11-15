@@ -8,6 +8,7 @@ on:
       - scripts/android_external_player_server_fixture.mts
       - scripts/foreground_playback_gate.mjs
       - scripts/foreground_playback_gate.test.mjs
+      - scripts/foreground_fixture_media_plan.mjs
       - scripts/foreground-playback/**
   workflow_dispatch:
     inputs:

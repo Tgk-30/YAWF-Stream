@@ -17,6 +17,7 @@ import {
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { buildFixtureMediaPlan } from "./foreground_fixture_media_plan.mjs";
 
 interface FixtureCLI {
   repo: string;
@@ -92,6 +93,7 @@ if (readdirSync(ARTIFACT_DIR).length !== 0) {
 
 type ForegroundFixtureStage =
   "input-check" | "media-preflight" | "mp4-generation" | "static-hls-generation" | "media-probe" | "media-output-check" |
+  "long-mp4-generation" | "long-media-probe" |
   "runtime-init" | "media-listen" | "server-build" | "seed-owner" | "seed-credentials" | "seed-settings" | "seed-watchlist" |
   "smoke-media" | "smoke-addon" | "smoke-outbound" | "smoke-login" | "smoke-bootstrap" | "smoke-watchlist" |
   "smoke-discover" | "smoke-detail" | "smoke-streams" | "smoke-resolve" | "smoke-proxy-full" | "smoke-proxy-range" |
@@ -226,7 +228,6 @@ function runFfmpeg(label: string, args: string[]): void {
 }
 
 function writeMediaProbe(): void {
-  markForegroundStage("media-probe");
   const result = spawnSync("ffprobe", [
     "-v", "error",
     "-show_entries",
@@ -297,45 +298,20 @@ function generateFixtureMedia(): void {
     "x=(w-text_w)/2",
     "y=h-text_h-80",
   ].join(":");
-  markForegroundStage("mp4-generation");
-  runFfmpeg("Synthetic MP4 generation", [
-    "-f", "lavfi", "-i", `testsrc2=size=1280x720:rate=30:duration=${fixtureCLI.foregroundLong ? 600 : 36}`,
-    "-f", "lavfi", "-i", `sine=frequency=440:sample_rate=48000:duration=${fixtureCLI.foregroundLong ? 600 : 36}`,
-    "-vf", videoFilter,
-    "-t", fixtureCLI.foregroundLong ? "600" : "36",
-    ...(fixtureCLI.foregroundLong ? ["-b:v", "700k", "-maxrate", "900k", "-bufsize", "1400k"] : []),
-    "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-pix_fmt", "yuv420p",
-    "-g", "90",
-    "-keyint_min", "90",
-    "-sc_threshold", "0",
-    "-force_key_frames", "expr:gte(t,n_forced*3)",
-    "-c:a", "aac",
-    "-b:a", "128k",
-    "-movflags", "+faststart",
-    MOVIE_PATH,
-  ]);
-  markForegroundStage("static-hls-generation");
-  runFfmpeg("Synthetic HLS generation", [
-    "-i", MOVIE_PATH,
-    ...(fixtureCLI.foregroundLong ? ["-t", "36"] : []),
-    "-map", "0:v:0",
-    "-map", "0:a:0",
-    "-c", "copy",
-    "-f", "hls",
-    "-hls_time", "3",
-    "-hls_list_size", "0",
-    "-hls_playlist_type", "vod",
-    "-hls_flags", "independent_segments",
-    "-hls_segment_type", "mpegts",
-    "-start_number", "0",
-    "-hls_segment_filename", join(MEDIA_DIR, "segment%03d.ts"),
-    join(MEDIA_DIR, "index.m3u8"),
-  ]);
-  writeMediaProbe();
+  const plan = buildFixtureMediaPlan({ foregroundLong: fixtureCLI.foregroundLong, videoFilter,
+    moviePath: MOVIE_PATH, segmentPattern: join(MEDIA_DIR, "segment%03d.ts"), playlistPath: join(MEDIA_DIR, "index.m3u8") });
+  for (const step of plan) {
+    markForegroundStage(step.stage);
+    switch (step.kind) {
+      case "ffmpeg": runFfmpeg(step.label, step.args); break;
+      case "probe": writeMediaProbe(); break;
+      case "layout": assertStaticMediaLayout(); break;
+      default: throw fixtureRefusal("input-invalid", "Unknown fixture media plan step.");
+    }
+  }
+}
 
-  markForegroundStage("media-output-check");
+function assertStaticMediaLayout(): void {
   const expectedSegments = Array.from({ length: 12 }, (_, index) =>
     `segment${String(index).padStart(3, "0")}.ts`);
   const actualSegments = readdirSync(MEDIA_DIR)

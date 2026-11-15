@@ -72,6 +72,7 @@ const FIXTURE_STATUS_LIMIT = 2048;
 const FIXTURE_PRIVATE_LOG_LIMIT = 64 * 1024;
 const FIXTURE_STAGES = new Set([
   'input-check', 'media-preflight', 'mp4-generation', 'static-hls-generation', 'media-probe', 'media-output-check',
+  'long-mp4-generation', 'long-media-probe',
   'runtime-init', 'media-listen', 'server-build', 'seed-owner', 'seed-credentials', 'seed-settings', 'seed-watchlist',
   'smoke-media', 'smoke-addon', 'smoke-outbound', 'smoke-login', 'smoke-bootstrap', 'smoke-watchlist',
   'smoke-discover', 'smoke-detail', 'smoke-streams', 'smoke-resolve', 'smoke-proxy-full', 'smoke-proxy-range',
