@@ -28,8 +28,11 @@ def focus_snapshot():
 def focused_snapshot():
  value=focus_snapshot();value.update(attempted=True,available=True,focusCategory='other-owned-root',updaterDialogFocus='yes',rootCount=2,attachedRootCount=2,visibleRootCount=2,focusedRootCount=1,mainAttached=True,mainVisible=True);return value
 
+def tap_timing():
+ return dict(tapTimeoutMs=100,minimumHoldMs=117,longPressTimeoutMs=400,deadlineOffsetMs=183,actualHoldMs=130,enqueuedOffsetMs=10,enteredOffsetMs=11,completedOffsetMs=12,sampleCount=1)
+
 def proof():
- value={key:True for key in m.BOOL_FIELDS};value.update(schemaVersion=1,scope='selected_first_plugin_load_failure_then_one_native_retry',phase='QUALIFIED_SELECTED_STARTUP_RETRY_ONLY',qualification=True,failureCode='',elapsedMs=10000,tapCount=1,targetActivityCreates=1,pluginLoadCount=2,retryDownCallElapsedMs=10,retryPressedObservationOutcome='pressed',retryAdmissionFirstBlockingReason='none',retryAdmissionLastBlockingReason='none',retryAdmissionElapsedMs=17,retryAdmissionSampleCount=2,retryFocusSnapshot=focus_snapshot());return value
+ value={key:True for key in m.BOOL_FIELDS};value.update(schemaVersion=1,scope='selected_first_plugin_load_failure_then_one_native_retry',phase='QUALIFIED_SELECTED_STARTUP_RETRY_ONLY',qualification=True,failureCode='',elapsedMs=10000,tapCount=1,targetActivityCreates=1,pluginLoadCount=2,retryDownCallElapsedMs=10,retryPressedObservationOutcome='pressed',retryAdmissionFirstBlockingReason='none',retryAdmissionLastBlockingReason='none',retryAdmissionElapsedMs=17,retryAdmissionSampleCount=2,retryFocusSnapshot=focus_snapshot(),retryTapTiming=tap_timing());return value
 
 def output(value=None):
  return '\n'.join(['INSTRUMENTATION_STATUS: class='+m.TEST_CLASS,'INSTRUMENTATION_STATUS: test='+m.METHOD,'INSTRUMENTATION_STATUS: numtests=1','INSTRUMENTATION_STATUS: owned_destroy_evidence='+json.dumps(value or proof()),'INSTRUMENTATION_STATUS_CODE: 0','INSTRUMENTATION_RESULT: stream=','OK (1 test)','INSTRUMENTATION_CODE: -1',''])
@@ -227,6 +230,68 @@ rejects(lambda:m.evidence(output(value)),'MODULE_INPUT_FACTS')
 for elapsed in [0,10]:
  value=proof();value['retryDownCallElapsedMs']=elapsed
  assert m.evidence(output(value))==value
+`));
+
+test('tap timing schema retains bounded unknowns and refuses malformed or inconsistent observations',()=>run(String.raw`
+assert m.evidence(output())==proof()
+configured=proof();configured['retryTapTiming'].update(tapTimeoutMs=120,minimumHoldMs=137,longPressTimeoutMs=500,actualHoldMs=160)
+assert m.evidence(output(configured))==configured
+pending={name:None for name in m.TAP_TIMING_FIELDS};pending['sampleCount']=0
+for timing in [pending,dict(tap_timing(),enteredOffsetMs=None,completedOffsetMs=None,sampleCount=0),dict(tap_timing(),completedOffsetMs=None),dict(tap_timing(),completedOffsetMs=190)]:
+ value=proof();value.update(qualification=False,retryTapTiming=timing,retryDownPressed=False,retryPressedObservationOutcome='observation-timeout')
+ try:m.evidence(output(value))
+ except m.Refusal as error:
+  assert str(error)=='MODULE_UNQUALIFIED'and error.module_evidence['retryTapTiming']==timing
+ else:raise AssertionError('partial timing became qualification')
+value=proof();value.pop('retryTapTiming');rejects(lambda:m.evidence(output(value)),'EVIDENCE_SCHEMA')
+for timing in [None,[],dict(tap_timing(),private='PRIVATE_TIMING'),{key:val for key,val in tap_timing().items()if key!='sampleCount'}]:
+ value=proof();value['retryTapTiming']=timing
+ try:m.evidence(output(value))
+ except m.Refusal as error:assert str(error)=='TAP_TIMING_SCHEMA'and error.module_evidence is None
+ else:raise AssertionError('unknown timing schema retained')
+for field in m.TAP_TIMING_FIELDS|{'sampleCount'}:
+ for bad in [True,False,-1,150001,1.5,'https://private.invalid/?token=PRIVATE_TIMING',[],{}]:
+  value=proof();value['retryTapTiming'][field]=bad
+  try:m.evidence(output(value))
+  except m.Refusal as error:assert str(error)=='TAP_TIMING_TYPE'and error.module_evidence is None and 'PRIVATE_TIMING'not in str(error)
+  else:raise AssertionError('malformed timing retained')
+for changes in [dict(minimumHoldMs=116),dict(deadlineOffsetMs=200),dict(tapTimeoutMs=None),dict(enqueuedOffsetMs=184),dict(enteredOffsetMs=9),dict(completedOffsetMs=10),dict(sampleCount=0),dict(enteredOffsetMs=None)]:
+ value=proof();value['retryTapTiming'].update(changes)
+ try:m.evidence(output(value))
+ except m.Refusal as error:assert str(error)=='TAP_TIMING_STATE'and error.module_evidence is None
+ else:raise AssertionError('inconsistent timing retained')
+for timing in [pending,dict(tap_timing(),actualHoldMs=None),dict(tap_timing(),actualHoldMs=116),dict(tap_timing(),actualHoldMs=201),dict(tap_timing(),longPressTimeoutMs=150,deadlineOffsetMs=132,actualHoldMs=150),dict(tap_timing(),enqueuedOffsetMs=14,enteredOffsetMs=15,completedOffsetMs=16),dict(tap_timing(),completedOffsetMs=184),dict(tap_timing(),completedOffsetMs=131)]:
+ value=proof();value['retryTapTiming']=timing
+ rejects(lambda:m.evidence(output(value)),'MODULE_TAP_TIMING')
+`));
+
+test('tap timing guards reject individual privacy and qualification mutants after original positives',()=>run(String.raw`
+original=pathlib.Path(m.__file__).read_text()
+def probe(api,timing,code):
+ value=proof();value['retryTapTiming']=timing
+ try:api['evidence'](output(value))
+ except api['Refusal']as error:
+  assert str(error)==code
+  if code.startswith('TAP_'):assert error.module_evidence is None
+ else:raise AssertionError('timing guard lost')
+mutants=[
+ ('set(value) == TAP_TIMING_FIELDS | {"sampleCount"}','True',dict(tap_timing(),private='PRIVATE_TIMING'),'TAP_TIMING_SCHEMA'),
+ ('type(value[name]) is int and 0 <= value[name] <= 150000','type(value[name]) is int and 0 <= value[name]',dict(tap_timing(),actualHoldMs=150001),'TAP_TIMING_TYPE'),
+ ('0 <= value["sampleCount"] <= 12','0 <= value["sampleCount"]',dict(tap_timing(),sampleCount=13),'TAP_TIMING_TYPE'),
+ ('deadline == min(200, long_press - 1) - 17','True',dict(tap_timing(),deadlineOffsetMs=200),'TAP_TIMING_STATE'),
+ ('enqueued <= entered <= deadline','entered <= deadline',dict(tap_timing(),enteredOffsetMs=9),'TAP_TIMING_STATE'),
+ ('timing["minimumHoldMs"] <= timing["actualHoldMs"] <= 200','timing["minimumHoldMs"] <= timing["actualHoldMs"]',dict(tap_timing(),actualHoldMs=201),'MODULE_TAP_TIMING'),
+ ('timing["enqueuedOffsetMs"] + timing["minimumHoldMs"] <= timing["actualHoldMs"]','True',dict(tap_timing(),enqueuedOffsetMs=14,enteredOffsetMs=15,completedOffsetMs=16),'MODULE_TAP_TIMING'),
+ ('timing["completedOffsetMs"] <= timing["deadlineOffsetMs"]','True',dict(tap_timing(),actualHoldMs=190,completedOffsetMs=184),'MODULE_TAP_TIMING'),
+ ('timing["completedOffsetMs"] <= timing["actualHoldMs"]','True',dict(tap_timing(),completedOffsetMs=131),'MODULE_TAP_TIMING'),
+]
+for before,after,timing,code in mutants:
+ probe(vars(m),timing,code);assert original.count(before)==1
+ api={'__name__':'owned_tap_timing_mutant','__file__':m.__file__}
+ exec(compile(original.replace(before,after,1),'<owned-tap-timing-mutant>','exec'),api)
+ try:probe(api,timing,code)
+ except AssertionError:pass
+ else:raise AssertionError('timing guard mutant survived')
 `));
 
 test('admission history and bounds are mandatory, private unknown facts are refused before retention',()=>run(String.raw`

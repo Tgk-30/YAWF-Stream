@@ -150,7 +150,8 @@ test('one native gesture uses clipped screen coordinates, a real bounded hold an
     'buttonScreenLocation[0] + button.getWidth(), buttonScreenLocation[1] + button.getHeight()',
     'screenBounds.intersect(buttonScreenBounds)',
     'this.screenBounds = new Rect(screenBounds)',
-    'ViewConfiguration.getTapTimeout() + TAP_FRAME_MS',
+    'long tapTimeoutMillis = ViewConfiguration.getTapTimeout();',
+    'long holdMillis = tapTimeoutMillis + TAP_FRAME_MS;',
     'ViewConfiguration.getLongPressTimeout()',
     'TAP_HOLD_MAX_MS = 200L',
     'SystemClock.sleep(holdMillis);',
@@ -160,7 +161,8 @@ test('one native gesture uses clipped screen coordinates, a real bounded hold an
     '\n                instrumentation.sendPointerSync(up);\n',
     'heldMillis >= holdMillis && heldMillis <= TAP_HOLD_MAX_MS && heldMillis < longPressMillis',
     'SystemClock.uptimeMillis() + holdMillis <= observationDeadline',
-    'retryPressedObservationOutcome = retryPressedOnMain(tap, observationDeadline);',
+    'observer = new PressedObserver(tap, retryTapObservation);',
+    'retryPressedObservationOutcome = observer.awaitResult();',
     'retryDownPressed = retryPressedObservationOutcome == PressedObservationOutcome.PRESSED;',
     'currentBounds == null || !currentBounds.equals(tap.screenBounds)',
     ': tap.button.isPressed() ? PressedObservationOutcome.PRESSED : PressedObservationOutcome.UNPRESSED',
@@ -178,13 +180,16 @@ test('one native gesture uses clipped screen coordinates, a real bounded hold an
     (code.match(/MotionEvent\.ACTION_UP/g) ?? []).length === 1 &&
     (code.match(/\.sendPointerSync\(/g) ?? []).length === 2 &&
     (code.match(/sendExactlyOneTap\(instrumentation, tap\)/g) ?? []).length === 1 &&
-    /retryDownPressed = retryPressedObservationOutcome == PressedObservationOutcome\.PRESSED;\s*\} else \{\s*retryPressedObservationOutcome = PressedObservationOutcome\.BUDGET_SKIPPED;\s*\}\s*\} finally \{\s*long upTime = SystemClock\.uptimeMillis\(\);[\s\S]*?instrumentation\.sendPointerSync\(up\)/.test(code) &&
+    /observer\.start\(\);\s*SystemClock\.sleep\(holdMillis\);\s*retryPressedObservationOutcome = observer\.awaitResult\(\);/.test(code) &&
+    /retryDownPressed = retryPressedObservationOutcome == PressedObservationOutcome\.PRESSED;\s*\} else \{\s*retryPressedObservationOutcome = PressedObservationOutcome\.BUDGET_SKIPPED;\s*\}\s*\} finally \{\s*if \(observer != null\) observer\.close\(\);\s*long upTime = SystemClock\.uptimeMillis\(\);[\s\S]*?instrumentation\.sendPointerSync\(up\)/.test(code) &&
     !/performClick|callOnClick|dispatchTouchEvent|UiAutomation|UiDevice|ACTION_MOVE|ACTION_CANCEL|setPressed\(/.test(code);
   assert.equal(nativeTapContract(source), true);
   for (const [from, to] of [
     ['screenBounds.offset(rootScreenOffset[0], rootScreenOffset[1]);', ''],
     ['screenBounds.intersect(buttonScreenBounds)', 'true'],
     ['SystemClock.sleep(holdMillis);', ''],
+    ['observer.start();\n                SystemClock.sleep(holdMillis);', 'SystemClock.sleep(holdMillis);\n                observer.start();'],
+    ['if (observer != null) observer.close();', ''],
     ['SystemClock.uptimeMillis() + holdMillis <= observationDeadline', 'true'],
     ['MotionEvent.obtain(downTime, upTime, MotionEvent.ACTION_UP, x, y, 0)',
       'MotionEvent.obtain(downTime, downTime + 80L, MotionEvent.ACTION_UP, x, y, 0)'],
@@ -220,13 +225,23 @@ test('input diagnostics distinguish pending and negative observations without ch
     'retryDownCallElapsedMs = Math.min(TOTAL_DEADLINE_MS,',
     'Math.max(0L, SystemClock.uptimeMillis() - downCallStartedAt)',
     'retryPressedObservationOutcome = PressedObservationOutcome.BUDGET_SKIPPED;',
-    'AtomicReference<PressedObservationOutcome> result = new AtomicReference<>();',
+    'private TapObservation retryTapObservation;',
+    'new TapObservation(downTime, tapTimeoutMillis, holdMillis, longPressMillis, observationDeadline)',
     'return value == null ? PressedObservationOutcome.OBSERVATION_TIMEOUT : value;',
     'currentBounds == null || !currentBounds.equals(tap.screenBounds)',
     'tap.button.isPressed() ? PressedObservationOutcome.PRESSED : PressedObservationOutcome.UNPRESSED',
-    'result.set(PressedObservationOutcome.OBSERVATION_ERROR)',
+    'observation.completeSample(SystemClock.uptimeMillis(), PressedObservationOutcome.OBSERVATION_ERROR)',
+    'observation.beginSample(SystemClock.uptimeMillis())',
+    'observation.completeSample(SystemClock.uptimeMillis(), value)',
+    'observation.enqueue(SystemClock.uptimeMillis()) && main.post(read)',
+    'main.postDelayed(this, TAP_FRAME_MS)',
+    'boolean completed = remaining > 0 && observed.await(remaining, TimeUnit.MILLISECONDS);',
+    'return observation.finish(SystemClock.uptimeMillis(), completed);',
+    'observation.close();',
+    'main.removeCallbacks(read)',
     'evidence.put("retryDownCallElapsedMs", retryDownCallElapsedMs == null ? JSONObject.NULL : retryDownCallElapsedMs);',
     'evidence.put("retryPressedObservationOutcome", retryPressedObservationOutcome.wireValue);',
+    'evidence.put("retryTapTiming", new JSONObject(TapObservation.wireValues(retryTapObservation)));',
   ].every((required) => code.includes(required)) &&
     /try \{\s*instrumentation\.sendPointerSync\(down\);\s*\} finally \{[\s\S]*?retryDownCallElapsedMs = Math\.min/.test(code);
   assert.equal(diagnosticContract(source), true);
@@ -241,10 +256,171 @@ test('input diagnostics distinguish pending and negative observations without ch
     ['retryPressedObservationOutcome = PressedObservationOutcome.BUDGET_SKIPPED;',
       'retryPressedObservationOutcome = PressedObservationOutcome.UNPRESSED;'],
     ['retryDownCallElapsedMs = Math.min(TOTAL_DEADLINE_MS,', 'retryDownCallElapsedMs = Math.max(TOTAL_DEADLINE_MS,'],
+    ['observation.beginSample(SystemClock.uptimeMillis())', 'true'],
+    ['observation.completeSample(SystemClock.uptimeMillis(), value)', 'false'],
+    ['return observation.finish(SystemClock.uptimeMillis(), completed);', 'return PressedObservationOutcome.PRESSED;'],
+    ['main.postDelayed(this, TAP_FRAME_MS)', 'main.postDelayed(this, 1L)'],
   ]) {
     assert.ok(source.includes(from));
     assert.equal(diagnosticContract(source.replace(from, to)), false);
   }
+});
+
+test('actual concurrent pressed-observation policy rejects timing and late-publication mutants', async () => {
+  const source = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java');
+  const begin = '    // BEGIN PURE TAP OBSERVATION POLICY\n';
+  const end = '    // END PURE TAP OBSERVATION POLICY\n';
+  assert.equal(source.split(begin).length, 2);
+  assert.equal(source.split(end).length, 2);
+  const policy = source.slice(source.indexOf(begin) + begin.length, source.indexOf(end));
+  assert.doesNotMatch(policy, /android\.|SystemClock|\b(?:Activity|Button|Rect|Instrumentation)\b/);
+  const binding = (code) => [
+    'new TapObservation(downTime, tapTimeoutMillis, holdMillis, longPressMillis, observationDeadline)',
+    'long observationDeadline = downTime + Math.min(TAP_HOLD_MAX_MS, longPressMillis - 1L) - TAP_FRAME_MS;',
+    'observation.enqueue(SystemClock.uptimeMillis()) && main.post(read)',
+    'observation.beginSample(SystemClock.uptimeMillis())',
+    'observation.completeSample(SystemClock.uptimeMillis(), value)',
+    'return observation.finish(SystemClock.uptimeMillis(), completed);',
+    'retryTapObservation.recordUp(upTime);',
+  ].every((part) => code.includes(part)) &&
+    /observer\.start\(\);\s*SystemClock\.sleep\(holdMillis\);\s*retryPressedObservationOutcome = observer\.awaitResult\(\);/.test(code);
+  assert.equal(binding(source), true);
+  for (const [from, to] of [
+    ['observer.start();\n                SystemClock.sleep(holdMillis);', 'SystemClock.sleep(holdMillis);\n                observer.start();'],
+    ['SystemClock.sleep(holdMillis);', 'SystemClock.sleep(holdMillis + 17L);'],
+    ['observation.completeSample(SystemClock.uptimeMillis(), value)', 'observation.completeSample(SystemClock.uptimeMillis(), PressedObservationOutcome.PRESSED)'],
+    ['return observation.finish(SystemClock.uptimeMillis(), completed);', 'return PressedObservationOutcome.PRESSED;'],
+  ]) {
+    assert.equal(source.split(from).length, 2);
+    assert.equal(binding(source.replace(from, to)), false);
+  }
+  const checks = String.raw`
+        static void check(boolean value, String code) { if (!value) throw new AssertionError(code); }
+        static TapObservation timing() { return new TapObservation(1000, 100, 117, 400, 1183); }
+        static void positive(TapObservation state) {
+            check(state.enqueue(1064), "DOWN returned after 64 ms");
+            check(state.beginSample(1068), "normal UI queue enters during the full hold sleep");
+            check(!state.completeSample(1069, PressedObservationOutcome.PRESSED), "positive ends observation only");
+        }
+        static void exercise(String name) {
+            TapObservation state = timing();
+            if (name.equals("during-hold")) {
+                positive(state);
+                check(state.finish(1181, true) == PressedObservationOutcome.PRESSED, "64 plus unchanged full 117 ms sleep qualifies timely real proof");
+                state.recordUp(1181);
+                java.util.Map<String, Object> values = TapObservation.wireValues(state);
+                check(values.get("enqueuedOffsetMs").equals(64L) && values.get("enteredOffsetMs").equals(68L) &&
+                    values.get("completedOffsetMs").equals(69L) && values.get("actualHoldMs").equals(181L), "actual relative timings");
+                check(values.get("tapTimeoutMs").equals(100L) && values.get("minimumHoldMs").equals(117L), "configured not guessed");
+            } else if (name.equals("configured-timeout")) {
+                state = new TapObservation(1000, 120, 137, 500, 1183);
+                check(state.enqueue(1020) && state.beginSample(1024), "nondefault configuration");
+                check(!state.completeSample(1025, PressedObservationOutcome.PRESSED), "real positive");
+                check(state.finish(1157, true) == PressedObservationOutcome.PRESSED, "unchanged configured hold");
+                state.recordUp(1157);
+                java.util.Map<String, Object> values = TapObservation.wireValues(state);
+                check(values.get("tapTimeoutMs").equals(120L) && values.get("minimumHoldMs").equals(137L) &&
+                    values.get("longPressTimeoutMs").equals(500L) && values.get("actualHoldMs").equals(157L), "no guessed 100 ms timing");
+            } else if (name.equals("old-double-delay")) {
+                check(state.enqueue(1181), "old full sleep before enqueue left only 2 ms");
+                check(!state.beginSample(1185), "same healthy 4 ms scheduling cannot meet old deadline");
+                check(state.finish(1185, false) == PressedObservationOutcome.OBSERVATION_TIMEOUT, "old trace never becomes unpressed or qualified");
+            } else if (name.equals("late-caller")) {
+                positive(state);
+                check(state.finish(1184, true) == PressedObservationOutcome.OBSERVATION_TIMEOUT, "caller must still meet original deadline");
+            } else if (name.equals("missing-latch")) {
+                positive(state);
+                check(state.finish(1181, false) == PressedObservationOutcome.OBSERVATION_TIMEOUT, "incomplete callback is not proof");
+            } else if (name.equals("late-completion")) {
+                check(state.enqueue(1064) && state.beginSample(1180), "entered within deadline");
+                check(!state.completeSample(1184, PressedObservationOutcome.PRESSED) && state.result == null, "late traversal cannot publish positive");
+                check(state.finish(1184, true) == PressedObservationOutcome.OBSERVATION_TIMEOUT, "late completion remains pending");
+            } else if (name.equals("closed-publication")) {
+                check(state.enqueue(1064) && state.beginSample(1068), "in-flight read");
+                state.close();
+                check(!state.completeSample(1069, PressedObservationOutcome.PRESSED), "closed observer does not reschedule");
+                check(state.result == null && TapObservation.wireValues(state).get("completedOffsetMs") == null, "closed result and timing frozen");
+            } else if (name.equals("closed-read")) {
+                check(state.enqueue(1064), "enqueued"); state.close();
+                check(!state.beginSample(1068) && TapObservation.wireValues(state).get("sampleCount").equals(0), "late callback cannot read after UP fence");
+            } else if (name.equals("interval")) {
+                check(state.enqueue(1064) && state.beginSample(1064), "first sample");
+                check(state.completeSample(1064, PressedObservationOutcome.UNPRESSED), "unpressed may be read again within same gesture");
+                check(!state.beginSample(1080) && state.beginSample(1081), "17 ms minimum interval");
+                check(!state.completeSample(1082, PressedObservationOutcome.PRESSED), "later true pressed");
+                check(state.finish(1181, true) == PressedObservationOutcome.PRESSED, "no extra gesture");
+            } else if (name.equals("sample-cap")) {
+                state = new TapObservation(1000, 100, 117, 400, 1500);
+                check(state.enqueue(1000), "enqueued");
+                for (int index = 0; index < 12; index++) {
+                    check(state.beginSample(1000 + index * 17), "bounded sample");
+                    check(state.completeSample(1000 + index * 17, PressedObservationOutcome.UNPRESSED) == (index < 11), "at most 12 reads even under larger fixture deadline");
+                }
+                check(state.finish(1200, true) == PressedObservationOutcome.UNPRESSED, "real negative remains negative");
+            } else if (name.equals("terminal-negative")) {
+                check(state.enqueue(1064) && state.beginSample(1068), "first sample");
+                check(!state.completeSample(1069, PressedObservationOutcome.STATE_MISMATCH), "identity or geometry mismatch is terminal");
+                check(state.finish(1181, true) == PressedObservationOutcome.STATE_MISMATCH, "negative cannot qualify");
+            } else if (name.equals("empty")) {
+                check(state.finish(1181, true) == PressedObservationOutcome.OBSERVATION_TIMEOUT, "missing value is unknown not unpressed");
+                check(TapObservation.wireValues(null).get("tapTimeoutMs") == null, "unattempted config unknown");
+                state.recordUp(999999);
+                check(TapObservation.wireValues(state).get("actualHoldMs").equals(150000L), "bounded public timing");
+            } else throw new AssertionError("unknown fixture case");
+        }
+  `;
+  const mutations = [
+    ['configured-timeout', 'configured-timeout', 'Math.min(150_000L, tapTimeoutMillis)', '100L'],
+    ['original-deadline', 'old-double-delay', 'now <= deadlineUptime', 'true'],
+    ['late-caller', 'late-caller', '!callbackCompleted || !inTime(now)', '!callbackCompleted'],
+    ['missing-latch', 'missing-latch', '!callbackCompleted || !inTime(now)', '!inTime(now)'],
+    ['late-completion', 'late-completion', '!inTime(now) || now < lastSampleAt', 'now < lastSampleAt'],
+    ['late-publication', 'closed-publication', 'closed || !inSample', '!inSample'],
+    ['late-read', 'closed-read', 'closed || enqueued == null', 'enqueued == null'],
+    ['sample-interval', 'interval', 'now - lastSampleAt < INTERVAL_MS', 'false'],
+    ['sample-cap', 'sample-cap', 'value == PressedObservationOutcome.UNPRESSED && samples < MAX_SAMPLES', 'value == PressedObservationOutcome.UNPRESSED'],
+    ['negative-proof', 'terminal-negative', 'result = value; return false;', 'result = PressedObservationOutcome.PRESSED; return false;'],
+    ['unknown-proof', 'empty', 'value == null ? PressedObservationOutcome.OBSERVATION_TIMEOUT : value', 'value == null ? PressedObservationOutcome.UNPRESSED : value'],
+  ];
+  const wrappers = [policy, ...mutations.map(([, , from, to]) => {
+    assert.equal(policy.split(from).length, 2, `exact mutation needle: ${from}`);
+    return policy.replace(from, to);
+  })];
+  const generated = `public final class TapObservationFixture {\n${wrappers.map((code, index) =>
+    `private static final class Policy${index} {\n${code}\n${checks}\n}`).join('\n')}\n` +
+    `public static void main(String[] args) { switch (Integer.parseInt(args[0])) {\n${wrappers.map((_, index) =>
+      `case ${index}: Policy${index}.exercise(args[1]); break;`).join('\n')}\ndefault: throw new AssertionError("unknown policy"); } System.out.print("PASS"); }\n}`;
+  const temporaryRoot = process.env.RUNNER_TEMP || process.env.TMPDIR;
+  assert.ok(temporaryRoot && isAbsolute(temporaryRoot), 'an owned absolute test temporary directory is required');
+  const directory = mkdtempSync(join(temporaryRoot, 'owned-tap-observation-'));
+  const javac = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin/javac') : 'javac';
+  const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin/java') : 'java';
+  const invoke = (command, args) => spawnSync(command, args, {
+    encoding: 'utf8', timeout: 20_000, maxBuffer: 1024 * 1024, killSignal: 'SIGKILL',
+    cwd: directory, env: { ...process.env, TMPDIR: directory },
+  });
+  const requireProcess = (result, status) => {
+    assert.equal(result.error, undefined, 'fixture process must not time out or fail to spawn');
+    assert.equal(result.signal, null, 'fixture process must not crash');
+    assert.equal(result.status, status, result.stdout + result.stderr);
+  };
+  try {
+    const file = join(directory, 'TapObservationFixture.java');
+    writeFileSync(file, generated);
+    requireProcess(invoke(javac, ['--release', '17', '-d', directory, file]), 0);
+    for (const name of ['during-hold', 'configured-timeout', 'old-double-delay', 'late-caller', 'missing-latch', 'late-completion', 'closed-publication', 'closed-read', 'interval', 'sample-cap', 'terminal-negative', 'empty']) {
+      const positive = invoke(java, ['-Xmx64m', '-cp', directory, 'TapObservationFixture', '0', name]);
+      requireProcess(positive, 0); assert.equal(positive.stdout, 'PASS');
+    }
+    for (const [index, [label, name]] of mutations.entries()) {
+      const positive = invoke(java, ['-Xmx64m', '-cp', directory, 'TapObservationFixture', '0', name]);
+      requireProcess(positive, 0); assert.equal(positive.stdout, 'PASS');
+      const negative = invoke(java, ['-Xmx64m', '-cp', directory, 'TapObservationFixture', String(index + 1), name]);
+      requireProcess(negative, 1);
+      assert.match(negative.stderr, /java\.lang\.AssertionError:/, label);
+      assert.doesNotMatch(negative.stderr, /(?:NoClassDefFoundError|ExceptionInInitializerError|StackOverflowError)/, label);
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('admission keeps the original identity and bounded read-only samples before one gesture', async () => {

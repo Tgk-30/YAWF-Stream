@@ -49,6 +49,8 @@ PHASES = {"NOT_STARTED", "PREFLIGHT", "LAUNCH_ONCE", "PRE_RETRY_ASSERTIONS",
 FAILURE_CODES = {""} | {phase + "_FAILED" for phase in PHASES}
 PRESSED_OBSERVATION_OUTCOMES = {"not-attempted", "budget-skipped", "observation-timeout",
                                 "state-mismatch", "unpressed", "pressed", "observation-error"}
+TAP_TIMING_FIELDS = {"tapTimeoutMs", "minimumHoldMs", "longPressTimeoutMs", "deadlineOffsetMs",
+                     "actualHoldMs", "enqueuedOffsetMs", "enteredOffsetMs", "completedOffsetMs"}
 ADMISSION_REASONS = {"not-started", "none", "owner", "liveness", "identity", "fault", "cleanup", "focus", "screen-asleep", "keyguard-locked",
                      "attachment", "interaction", "listener", "dimensions", "root", "visible-bounds", "intersection",
                      "unstable-geometry", "observation-timeout", "observation-error", "deadline", "sample-limit", "sample-interval"}
@@ -63,7 +65,7 @@ EVIDENCE_KEYS = set(BOOL_FIELDS) | {
     "tapCount", "targetActivityCreates", "pluginLoadCount", "retryDownCallElapsedMs",
     "retryPressedObservationOutcome",
     "retryAdmissionFirstBlockingReason", "retryAdmissionLastBlockingReason", "retryAdmissionElapsedMs", "retryAdmissionSampleCount",
-    "retryFocusSnapshot",
+    "retryFocusSnapshot", "retryTapTiming",
 }
 
 
@@ -138,6 +140,25 @@ def validate_focus_snapshot(value):
     require(value["updaterDialogFocus"] != "yes" or category == "other-owned-root", "FOCUS_SNAPSHOT_STATE")
 
 
+def validate_tap_timing(value):
+    require(type(value) is dict and set(value) == TAP_TIMING_FIELDS | {"sampleCount"}, "TAP_TIMING_SCHEMA")
+    require(all(value[name] is None or (type(value[name]) is int and 0 <= value[name] <= 150000)
+                for name in TAP_TIMING_FIELDS), "TAP_TIMING_TYPE")
+    require(type(value["sampleCount"]) is int and 0 <= value["sampleCount"] <= 12, "TAP_TIMING_TYPE")
+    if value["tapTimeoutMs"] is None:
+        require(all(value[name] is None for name in TAP_TIMING_FIELDS) and value["sampleCount"] == 0, "TAP_TIMING_STATE")
+        return
+    hold, long_press, deadline = (value[name] for name in ("minimumHoldMs", "longPressTimeoutMs", "deadlineOffsetMs"))
+    require(all(type(item) is int for item in (hold, long_press, deadline)), "TAP_TIMING_STATE")
+    require(hold == value["tapTimeoutMs"] + 17 and hold > 0 and hold + 17 <= 200 and
+            hold + 17 < long_press and deadline == min(200, long_press - 1) - 17, "TAP_TIMING_STATE")
+    enqueued, entered, completed = (value[name] for name in ("enqueuedOffsetMs", "enteredOffsetMs", "completedOffsetMs"))
+    require((value["sampleCount"] == 0) == (entered is None), "TAP_TIMING_STATE")
+    require(enqueued is None or enqueued <= deadline, "TAP_TIMING_STATE")
+    require(entered is None or (enqueued is not None and enqueued <= entered <= deadline), "TAP_TIMING_STATE")
+    require(completed is None or (entered is not None and entered <= completed), "TAP_TIMING_STATE")
+
+
 def evidence(output):
     """Parse the module's actual Bundle key, not a fabricated OWNED_STARTUP prefix."""
     key = "INSTRUMENTATION_STATUS: owned_destroy_evidence="
@@ -162,6 +183,7 @@ def evidence(output):
     for name, cap in (("retryAdmissionElapsedMs", 2000), ("retryAdmissionSampleCount", 128)):
         require(type(value[name]) is int and 0 <= value[name] <= cap, "EVIDENCE_TYPE")
     validate_focus_snapshot(value["retryFocusSnapshot"])
+    validate_tap_timing(value["retryTapTiming"])
     safe = dict(value)
     safe["phase"] = value["phase"] if value["phase"] in PHASES else "UNRECOGNIZED_MODULE_PHASE"
     safe["failureCode"] = value["failureCode"] if value["failureCode"] in FAILURE_CODES else "UNRECOGNIZED_MODULE_FAILURE"
@@ -177,6 +199,14 @@ def evidence(output):
             all(value[name] for name in BOOL_FIELDS), "MODULE_FACTS")
     qualify(value["retryPressedObservationOutcome"] == "pressed" and value["retryDownPressed"] is True and
             type(value["retryDownCallElapsedMs"]) is int, "MODULE_INPUT_FACTS")
+    timing = value["retryTapTiming"]
+    qualify(all(type(timing[name]) is int for name in TAP_TIMING_FIELDS) and
+            1 <= timing["sampleCount"] <= 12 and
+            timing["minimumHoldMs"] <= timing["actualHoldMs"] <= 200 and
+            timing["actualHoldMs"] < timing["longPressTimeoutMs"] and
+            timing["enqueuedOffsetMs"] + timing["minimumHoldMs"] <= timing["actualHoldMs"] and
+            timing["completedOffsetMs"] <= timing["deadlineOffsetMs"] and
+            timing["completedOffsetMs"] <= timing["actualHoldMs"], "MODULE_TAP_TIMING")
     qualify(value["retryAdmissionSampleCount"] >= 2 and 17 <= value["retryAdmissionElapsedMs"] < 2000 and
             not any(value[name] in ADMISSION_REFUSALS for name in
                     ("retryAdmissionFirstBlockingReason", "retryAdmissionLastBlockingReason")), "MODULE_ADMISSION_FACTS")

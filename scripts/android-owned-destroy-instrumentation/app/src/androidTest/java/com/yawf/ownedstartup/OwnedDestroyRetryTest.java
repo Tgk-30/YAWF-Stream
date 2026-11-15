@@ -71,6 +71,7 @@ public final class OwnedDestroyRetryTest {
     private boolean retryOriginalButtonDetachedAfterUp;
     private Long retryDownCallElapsedMs;
     private PressedObservationOutcome retryPressedObservationOutcome = PressedObservationOutcome.NOT_ATTEMPTED;
+    private TapObservation retryTapObservation;
     private TapAdmissionState retryAdmissionState;
     private final FocusSnapshotCapture retryFocusSnapshot = new FocusSnapshotCapture();
     private boolean sameActivityAfterRetry;
@@ -575,7 +576,8 @@ public final class OwnedDestroyRetryTest {
     }
 
     private void sendExactlyOneTap(Instrumentation instrumentation, TapPlan tap) {
-        long holdMillis = ViewConfiguration.getTapTimeout() + TAP_FRAME_MS;
+        long tapTimeoutMillis = ViewConfiguration.getTapTimeout();
+        long holdMillis = tapTimeoutMillis + TAP_FRAME_MS;
         long longPressMillis = ViewConfiguration.getLongPressTimeout();
         require(holdMillis > 0 && holdMillis + TAP_FRAME_MS <= TAP_HOLD_MAX_MS &&
                 holdMillis + TAP_FRAME_MS < longPressMillis,
@@ -587,6 +589,8 @@ public final class OwnedDestroyRetryTest {
         down.setSource(InputDevice.SOURCE_TOUCHSCREEN);
         boolean heldWithinBounds = false;
         long observationDeadline = downTime + Math.min(TAP_HOLD_MAX_MS, longPressMillis - 1L) - TAP_FRAME_MS;
+        retryTapObservation = new TapObservation(downTime, tapTimeoutMillis, holdMillis, longPressMillis, observationDeadline);
+        PressedObserver observer = null;
         tapCount = 1;
         try {
             long downCallStartedAt = SystemClock.uptimeMillis();
@@ -598,15 +602,19 @@ public final class OwnedDestroyRetryTest {
                         Math.max(0L, SystemClock.uptimeMillis() - downCallStartedAt));
             }
             if (SystemClock.uptimeMillis() + holdMillis <= observationDeadline) {
+                observer = new PressedObserver(tap, retryTapObservation);
+                observer.start();
                 SystemClock.sleep(holdMillis);
-                retryPressedObservationOutcome = retryPressedOnMain(tap, observationDeadline);
+                retryPressedObservationOutcome = observer.awaitResult();
                 retryDownPressed = retryPressedObservationOutcome == PressedObservationOutcome.PRESSED;
             } else {
                 retryPressedObservationOutcome = PressedObservationOutcome.BUDGET_SKIPPED;
             }
         } finally {
+            if (observer != null) observer.close();
             long upTime = SystemClock.uptimeMillis();
             long heldMillis = upTime - downTime;
+            retryTapObservation.recordUp(upTime);
             heldWithinBounds = heldMillis >= holdMillis && heldMillis <= TAP_HOLD_MAX_MS && heldMillis < longPressMillis;
             MotionEvent up = null;
             try {
@@ -651,34 +659,63 @@ public final class OwnedDestroyRetryTest {
         return false;
     }
 
-    private static PressedObservationOutcome retryPressedOnMain(TapPlan tap, long deadlineUptime) {
-        AtomicReference<PressedObservationOutcome> result = new AtomicReference<>();
-        CountDownLatch observed = new CountDownLatch(1);
-        try {
-            tap.activity.runOnUiThread(() -> {
-                try {
-                    if (SystemClock.uptimeMillis() <= deadlineUptime) {
+    private static final class PressedObserver {
+        private final TapObservation observation;
+        private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
+        private final CountDownLatch observed = new CountDownLatch(1);
+        private final Runnable read;
+
+        PressedObserver(TapPlan tap, TapObservation observation) {
+            this.observation = observation;
+            read = new Runnable() {
+                @Override public void run() {
+                    if (!observation.beginSample(SystemClock.uptimeMillis())) { observed.countDown(); return; }
+                    boolean again;
+                    try {
                         Rect currentBounds = verifiedRetryScreenBoundsOnMain(tap.activity, tap.button);
                         PressedObservationOutcome value = currentBounds == null || !currentBounds.equals(tap.screenBounds)
                                 ? PressedObservationOutcome.STATE_MISMATCH
                                 : tap.button.isPressed() ? PressedObservationOutcome.PRESSED : PressedObservationOutcome.UNPRESSED;
-                        if (SystemClock.uptimeMillis() <= deadlineUptime) result.set(value);
+                        again = observation.completeSample(SystemClock.uptimeMillis(), value);
+                    } catch (Throwable ignored) {
+                        again = observation.completeSample(SystemClock.uptimeMillis(), PressedObservationOutcome.OBSERVATION_ERROR);
                     }
-                } catch (Throwable ignored) {
-                    if (SystemClock.uptimeMillis() <= deadlineUptime) result.set(PressedObservationOutcome.OBSERVATION_ERROR);
-                } finally {
+                    if (again) {
+                        try {
+                            if (main.postDelayed(this, TAP_FRAME_MS)) return;
+                        } catch (RuntimeException ignored) { }
+                        observation.error(SystemClock.uptimeMillis());
+                    }
                     observed.countDown();
                 }
-            });
-            long remaining = deadlineUptime - SystemClock.uptimeMillis();
-            if (remaining <= 0 || !observed.await(remaining, TimeUnit.MILLISECONDS) ||
-                    SystemClock.uptimeMillis() > deadlineUptime) return PressedObservationOutcome.OBSERVATION_TIMEOUT;
-            PressedObservationOutcome value = result.get();
-            return value == null ? PressedObservationOutcome.OBSERVATION_TIMEOUT : value;
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
-        } catch (RuntimeException | LinkageError ignored) { }
-        return PressedObservationOutcome.OBSERVATION_ERROR;
+            };
+        }
+
+        void start() {
+            try {
+                if (observation.enqueue(SystemClock.uptimeMillis()) && main.post(read)) return;
+            } catch (RuntimeException ignored) { }
+            observation.error(SystemClock.uptimeMillis());
+            observed.countDown();
+        }
+
+        PressedObservationOutcome awaitResult() {
+            try {
+                long remaining = observation.deadlineUptime - SystemClock.uptimeMillis();
+                boolean completed = remaining > 0 && observed.await(remaining, TimeUnit.MILLISECONDS);
+                return observation.finish(SystemClock.uptimeMillis(), completed);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+                return PressedObservationOutcome.OBSERVATION_ERROR;
+            } finally {
+                close();
+            }
+        }
+
+        void close() {
+            observation.close();
+            try { main.removeCallbacks(read); } catch (RuntimeException | LinkageError ignored) { }
+        }
     }
 
     private boolean awaitOriginalButtonDetachedAfterUp(TapPlan tap) {
@@ -758,6 +795,7 @@ public final class OwnedDestroyRetryTest {
         evidence.put("retryOriginalButtonDetachedAfterUp", retryOriginalButtonDetachedAfterUp);
         evidence.put("retryDownCallElapsedMs", retryDownCallElapsedMs == null ? JSONObject.NULL : retryDownCallElapsedMs);
         evidence.put("retryPressedObservationOutcome", retryPressedObservationOutcome.wireValue);
+        evidence.put("retryTapTiming", new JSONObject(TapObservation.wireValues(retryTapObservation)));
         evidence.put("retryAdmissionAdmitted", retryAdmissionState != null && retryAdmissionState.admitted && !retryAdmissionState.refused);
         evidence.put("retryAdmissionFirstBlockingReason", retryAdmissionState == null ? "not-started" : retryAdmissionState.firstBlocking.wireValue);
         evidence.put("retryAdmissionLastBlockingReason", retryAdmissionState == null ? "not-started" : retryAdmissionState.lastBlocking.wireValue);
@@ -1020,6 +1058,7 @@ public final class OwnedDestroyRetryTest {
     }
     // END PURE TAP ADMISSION POLICY
 
+    // BEGIN PURE TAP OBSERVATION POLICY
     private enum PressedObservationOutcome {
         NOT_ATTEMPTED("not-attempted"),
         BUDGET_SKIPPED("budget-skipped"),
@@ -1032,6 +1071,71 @@ public final class OwnedDestroyRetryTest {
         final String wireValue;
         PressedObservationOutcome(String wireValue) { this.wireValue = wireValue; }
     }
+
+    private static final class TapObservation {
+        private static final long INTERVAL_MS = 17L;
+        private static final int MAX_SAMPLES = 12;
+        final long downTime, tapTimeoutMillis, holdMillis, longPressMillis, deadlineUptime;
+        private Long enqueued, entered, completed, actualHold;
+        private long lastSampleAt;
+        private int samples;
+        private boolean closed, inSample;
+        private PressedObservationOutcome result;
+
+        TapObservation(long downTime, long tapTimeoutMillis, long holdMillis, long longPressMillis, long deadlineUptime) {
+            this.downTime = downTime; this.tapTimeoutMillis = tapTimeoutMillis; this.holdMillis = holdMillis;
+            this.longPressMillis = longPressMillis; this.deadlineUptime = deadlineUptime;
+        }
+
+        private long offset(long now) { return Math.min(150_000L, Math.max(0L, now - downTime)); }
+        private boolean inTime(long now) { return now >= downTime && now <= deadlineUptime; }
+        synchronized boolean enqueue(long now) {
+            if (closed || enqueued != null || !inTime(now)) return false;
+            enqueued = offset(now); return true;
+        }
+        synchronized boolean beginSample(long now) {
+            if (closed || enqueued == null || result != null || inSample || !inTime(now) || samples >= MAX_SAMPLES ||
+                    (samples > 0 && now - lastSampleAt < INTERVAL_MS)) return false;
+            if (entered == null) entered = offset(now);
+            lastSampleAt = now; samples++; inSample = true; return true;
+        }
+        synchronized boolean completeSample(long now, PressedObservationOutcome value) {
+            if (closed || !inSample) return false;
+            inSample = false; completed = offset(now);
+            if (!inTime(now) || now < lastSampleAt) return false;
+            if (value == PressedObservationOutcome.UNPRESSED && samples < MAX_SAMPLES && now + INTERVAL_MS <= deadlineUptime) return true;
+            result = value; return false;
+        }
+        synchronized void error(long now) {
+            if (!closed && inTime(now)) result = PressedObservationOutcome.OBSERVATION_ERROR;
+        }
+        synchronized PressedObservationOutcome finish(long now, boolean callbackCompleted) {
+            closed = true;
+            if (!callbackCompleted || !inTime(now)) return PressedObservationOutcome.OBSERVATION_TIMEOUT;
+            PressedObservationOutcome value = result;
+            return value == null ? PressedObservationOutcome.OBSERVATION_TIMEOUT : value;
+        }
+        synchronized void close() { closed = true; }
+        synchronized void recordUp(long now) { actualHold = offset(now); }
+        static java.util.Map<String, Object> wireValues(TapObservation observation) {
+            if (observation != null) return observation.snapshot();
+            java.util.Map<String, Object> values = new java.util.LinkedHashMap<>();
+            for (String key : new String[] { "tapTimeoutMs", "minimumHoldMs", "longPressTimeoutMs", "deadlineOffsetMs",
+                    "actualHoldMs", "enqueuedOffsetMs", "enteredOffsetMs", "completedOffsetMs" }) values.put(key, null);
+            values.put("sampleCount", 0); return values;
+        }
+        private synchronized java.util.Map<String, Object> snapshot() {
+            java.util.Map<String, Object> values = wireValues(null);
+            values.put("tapTimeoutMs", Math.min(150_000L, tapTimeoutMillis));
+            values.put("minimumHoldMs", holdMillis);
+            values.put("longPressTimeoutMs", Math.min(150_000L, longPressMillis));
+            values.put("deadlineOffsetMs", deadlineUptime - downTime);
+            values.put("actualHoldMs", actualHold); values.put("enqueuedOffsetMs", enqueued);
+            values.put("enteredOffsetMs", entered); values.put("completedOffsetMs", completed);
+            values.put("sampleCount", samples); return values;
+        }
+    }
+    // END PURE TAP OBSERVATION POLICY
 
     private static final class TapPlan {
         final Activity activity;
