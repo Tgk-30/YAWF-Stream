@@ -38,6 +38,7 @@ BOOL_FIELDS = (
     "targetPackageMatched", "targetPidMatched", "firstPluginVerified", "faultInjectedOnce",
     "oldDetachedBeforeTap", "wryClearedBeforeTap", "helperAcceptedClearedBeforeTap",
     "noDecorWebViewBeforeTap", "uniqueShownEnabledRetryBeforeTap", "oldWebViewDetached",
+    "retryDownPressed", "retryOriginalButtonDetachedAfterUp",
     "newWebViewDistinctAttached", "sameActivityAfterRetry", "wryOwnsNewWebView",
     "activityReferencesNewWebView", "soleDecorWebViewAfterRetry", "retryUiGoneAfterRetry",
     "retryUiGone", "pluginHandleLoaded",

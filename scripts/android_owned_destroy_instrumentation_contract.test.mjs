@@ -131,6 +131,80 @@ test('launch uses the public synchronous Instrumentation API exactly once', asyn
   assert.equal(launchContract(testSource.replace('.startActivitySync(launch)', '.startActivity(launch)')), false);
 });
 
+test('one native gesture uses clipped screen coordinates, a real bounded hold and positive original-button input proof', async () => {
+  const source = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java');
+  const controller = await readFile(new URL('./android_owned_startup_runtime.py', import.meta.url), 'utf8');
+  const nativeTapContract = (code) => [
+    'runner.targetActivity() == activity && runner.targetActivityCreateCount() == 1',
+    'runner.targetPid() == android.os.Process.myPid()',
+    '!activity.isFinishing() && !activity.isDestroyed() && activity.hasWindowFocus()',
+    'matches.get(0) != button',
+    '!button.hasOnClickListeners()',
+    'root.getLocationOnScreen(rootScreenOffset);',
+    'screenBounds.offset(rootScreenOffset[0], rootScreenOffset[1]);',
+    'button.getLocationOnScreen(buttonScreenLocation);',
+    'buttonScreenLocation[0] + button.getWidth(), buttonScreenLocation[1] + button.getHeight()',
+    'screenBounds.intersect(buttonScreenBounds)',
+    'this.screenBounds = new Rect(screenBounds)',
+    'ViewConfiguration.getTapTimeout() + TAP_FRAME_MS',
+    'ViewConfiguration.getLongPressTimeout()',
+    'TAP_HOLD_MAX_MS = 200L',
+    'SystemClock.sleep(holdMillis);',
+    'long downTime = SystemClock.uptimeMillis();',
+    'long upTime = SystemClock.uptimeMillis();',
+    'MotionEvent.obtain(downTime, upTime, MotionEvent.ACTION_UP, x, y, 0)',
+    '\n                instrumentation.sendPointerSync(up);\n',
+    'heldMillis >= holdMillis && heldMillis <= TAP_HOLD_MAX_MS && heldMillis < longPressMillis',
+    'SystemClock.uptimeMillis() + holdMillis <= observationDeadline',
+    'retryDownPressed = retryPressedOnMain(tap, observationDeadline);',
+    'currentBounds.equals(tap.screenBounds) && tap.button.isPressed()',
+    'observed.await(remaining, TimeUnit.MILLISECONDS)',
+    'if (SystemClock.uptimeMillis() <= deadlineUptime) result.set(value);',
+    'RETRY_BUTTON_DETACH_DEADLINE_MS = 2_000L',
+    'ownedFocusedActivityOnMain(tap.activity) && !tap.button.isAttachedToWindow()',
+    'retryOriginalButtonDetachedAfterUp = awaitOriginalButtonDetachedAfterUp(tap);',
+    'require(retryDownPressed, "RETRY_DOWN_NOT_OBSERVED_PRESSED");',
+    'require(retryOriginalButtonDetachedAfterUp, "RETRY_ORIGINAL_BUTTON_NOT_DETACHED_AFTER_UP");',
+    'evidence.put("retryDownPressed", retryDownPressed);',
+    'evidence.put("retryOriginalButtonDetachedAfterUp", retryOriginalButtonDetachedAfterUp);',
+  ].every((required) => code.includes(required)) &&
+    (code.match(/MotionEvent\.ACTION_DOWN/g) ?? []).length === 1 &&
+    (code.match(/MotionEvent\.ACTION_UP/g) ?? []).length === 1 &&
+    (code.match(/\.sendPointerSync\(/g) ?? []).length === 2 &&
+    (code.match(/sendExactlyOneTap\(instrumentation, tap\)/g) ?? []).length === 1 &&
+    /retryDownPressed = retryPressedOnMain\(tap, observationDeadline\);\s*\}\s*\} finally \{\s*long upTime = SystemClock\.uptimeMillis\(\);[\s\S]*?instrumentation\.sendPointerSync\(up\)/.test(code) &&
+    !/performClick|callOnClick|dispatchTouchEvent|UiAutomation|UiDevice|ACTION_MOVE|ACTION_CANCEL|setPressed\(/.test(code);
+  assert.equal(nativeTapContract(source), true);
+  for (const [from, to] of [
+    ['screenBounds.offset(rootScreenOffset[0], rootScreenOffset[1]);', ''],
+    ['screenBounds.intersect(buttonScreenBounds)', 'true'],
+    ['SystemClock.sleep(holdMillis);', ''],
+    ['SystemClock.uptimeMillis() + holdMillis <= observationDeadline', 'true'],
+    ['MotionEvent.obtain(downTime, upTime, MotionEvent.ACTION_UP, x, y, 0)',
+      'MotionEvent.obtain(downTime, downTime + 80L, MotionEvent.ACTION_UP, x, y, 0)'],
+    ['retryDownPressed = retryPressedOnMain(tap, observationDeadline);', 'retryDownPressed = true;'],
+    ['ownedFocusedActivityOnMain(tap.activity) && !tap.button.isAttachedToWindow()', 'true'],
+    ['require(retryDownPressed, "RETRY_DOWN_NOT_OBSERVED_PRESSED");', ''],
+    ['require(retryOriginalButtonDetachedAfterUp, "RETRY_ORIGINAL_BUTTON_NOT_DETACHED_AFTER_UP");', ''],
+    ['                instrumentation.sendPointerSync(up);', '                if (false) instrumentation.sendPointerSync(up);'],
+    ['instrumentation.sendPointerSync(down);', 'instrumentation.sendPointerSync(down); instrumentation.sendPointerSync(down);'],
+  ]) {
+    assert.ok(source.includes(from));
+    assert.equal(nativeTapContract(source.replace(from, to)), false);
+  }
+  const inputEvidenceContract = (code) => {
+    const fields = code.match(/BOOL_FIELDS = \(([\s\S]*?)\n\)/)?.[1] ?? '';
+    return fields.includes('"retryDownPressed"') && fields.includes('"retryOriginalButtonDetachedAfterUp"') &&
+      code.includes('EVIDENCE_KEYS = set(BOOL_FIELDS)') &&
+      code.includes('all(type(value[name]) is bool for name in BOOL_FIELDS)') &&
+      code.includes('all(value[name] for name in BOOL_FIELDS)');
+  };
+  assert.equal(inputEvidenceContract(controller), true);
+  for (const field of ['retryDownPressed', 'retryOriginalButtonDetachedAfterUp']) {
+    assert.equal(inputEvidenceContract(controller.replace(`"${field}"`, '')), false);
+  }
+});
+
 test('reported artifact is fixed-schema, redacted, and scoped to this selected retry only', async () => {
   const testSource = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java');
   const readme = await read('README.md');

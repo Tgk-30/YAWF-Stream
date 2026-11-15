@@ -30,7 +30,7 @@ MODULE_FILES = {
     "app/src/androidTest/AndroidManifest.xml": "bb1c618c5a517eba63d8c2355b1470a355b2baca85e393695b2e05dcc96001d3",
     "app/src/androidTest/java/com/yawf/ownedstartup/FaultOncePlugin.java": "14c3fb04da8343d19b4392b8b3c6eb31cf4cdfcea33776ba10ce36cdf18f1369",
     "app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyInstrumentationRunner.java": "a643859077b023a8a967327a134702a3394976b1e9fb5c485e835e7870ee0d6c",
-    "app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java": "e0eb2c01190d95b47b681a377aaa04f432a84c8291998fd4f332be029f87ab90",
+    "app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java": "08e979c29a6520f2118c26180ad15ca1db6fd70c06565dc4eda27373468c87bb",
     "app/src/main/AndroidManifest.xml": "301a12775b404acb424205c2289dbb25b15924e83ba54911a4739dd1d7238105",
     "build.gradle.kts": "08ebf0c379db7cd09ef90385dd9397e249498ce070c1b594a9735ab88ba7707f",
     "gradle.properties": "fb298af7d84d0e20523e7172625a8d975a11efa043c573ca97f8997a0e84fb5f",

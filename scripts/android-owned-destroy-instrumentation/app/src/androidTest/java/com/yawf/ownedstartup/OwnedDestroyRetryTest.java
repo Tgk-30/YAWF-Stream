@@ -10,6 +10,7 @@ import android.os.SystemClock;
 import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.webkit.WebView;
 import android.widget.Button;
@@ -29,6 +30,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 
@@ -39,6 +42,9 @@ public final class OwnedDestroyRetryTest {
     private static final long RETRY_DEADLINE_MS = 90_000L;
     private static final long POLL_MS = 100L;
     private static final long TAP_PLAN_MAX_AGE_MS = 2_000L;
+    private static final long TAP_FRAME_MS = 17L;
+    private static final long TAP_HOLD_MAX_MS = 200L;
+    private static final long RETRY_BUTTON_DETACH_DEADLINE_MS = 2_000L;
     private static final String HELPER_CLASS = "com.tgk30.debridstreamer.YawfWebViewStartup";
     private static final String RETRY_LABEL = "Retry startup";
 
@@ -54,6 +60,8 @@ public final class OwnedDestroyRetryTest {
     private boolean oldDetachedBeforeTap;
     private boolean noDecorWebViewBeforeTap;
     private boolean uniqueRetryButtonBeforeTap;
+    private boolean retryDownPressed;
+    private boolean retryOriginalButtonDetachedAfterUp;
     private boolean sameActivityAfterRetry;
     private boolean wryOwnsNewWebView;
     private boolean activityReferencesNewWebView;
@@ -117,7 +125,6 @@ public final class OwnedDestroyRetryTest {
         TapPlan tap = buildTapPlanOnMain(activity);
         require(SystemClock.elapsedRealtime() - tap.capturedAt <= TAP_PLAN_MAX_AGE_MS, "RETRY_TAP_PLAN_EXPIRED");
         require(tapCount == 0, "RETRY_TAP_ALREADY_USED");
-        tapCount = 1;
         sendExactlyOneTap(instrumentation, tap);
 
         phase = "WAITING_FOR_SAME_ACTIVITY_RETRY";
@@ -359,40 +366,146 @@ public final class OwnedDestroyRetryTest {
     private static TapPlan buildTapPlanOnMain(Activity activity) {
         AtomicReference<TapPlan> result = new AtomicReference<>();
         OwnedDestroyInstrumentationRunner.currentRunner().runOnMainSync(() -> {
-            View decor = activity.getWindow().getDecorView();
-            List<WebView> webViews = new ArrayList<>();
-            List<Button> matches = new ArrayList<>();
-            collect(decor, webViews, matches);
-            Button only = matches.size() == 1 ? matches.get(0) : null;
-            if (webViews.size() != 0 || only == null || !only.isShown() || !only.isEnabled() ||
-                    !only.isClickable() || !only.isAttachedToWindow()) {
-                throw new IllegalStateException("RETRY_TAP_TARGET_NOT_UNIQUE_AND_VERIFIED");
+            try {
+                View decor = activity.getWindow().getDecorView();
+                List<WebView> webViews = new ArrayList<>();
+                List<Button> matches = new ArrayList<>();
+                collect(decor, webViews, matches);
+                if (webViews.size() != 0 || matches.size() != 1) return;
+                Button button = matches.get(0);
+                Rect screenBounds = verifiedRetryScreenBoundsOnMain(activity, button);
+                if (screenBounds != null) {
+                    result.set(new TapPlan(activity, button, screenBounds, SystemClock.elapsedRealtime()));
+                }
+            } catch (Throwable ignored) {
+                // A failed observation must not throw on the target UI thread.
             }
-            Button button = only;
-            Rect bounds = new Rect();
-            if (!button.getGlobalVisibleRect(bounds) || bounds.isEmpty()) throw new IllegalStateException("RETRY_TAP_BOUNDS_INVALID");
-            result.set(new TapPlan(button, bounds, SystemClock.elapsedRealtime()));
         });
         TapPlan plan = result.get();
         if (plan == null) throw new IllegalStateException("RETRY_TAP_PLAN_MISSING");
         return plan;
     }
 
-    private static void sendExactlyOneTap(Instrumentation instrumentation, TapPlan tap) {
+    private static boolean ownedFocusedActivityOnMain(Activity activity) {
+        OwnedDestroyInstrumentationRunner runner = OwnedDestroyInstrumentationRunner.currentRunner();
+        return runner.targetActivity() == activity && runner.targetActivityCreateCount() == 1 &&
+                runner.targetPid() == android.os.Process.myPid() &&
+                OwnedDestroyInstrumentationRunner.TARGET_PACKAGE.equals(activity.getPackageName()) &&
+                OwnedDestroyInstrumentationRunner.TARGET_ACTIVITY.equals(activity.getClass().getName()) &&
+                !activity.isFinishing() && !activity.isDestroyed() && activity.hasWindowFocus();
+    }
+
+    private static Rect verifiedRetryScreenBoundsOnMain(Activity activity, Button button) {
+        if (!ownedFocusedActivityOnMain(activity)) return null;
+        View decor = activity.getWindow().getDecorView();
+        List<WebView> webViews = new ArrayList<>();
+        List<Button> matches = new ArrayList<>();
+        collect(decor, webViews, matches);
+        if (webViews.size() != 0 || matches.size() != 1 || matches.get(0) != button ||
+                !decor.isAttachedToWindow() || !decor.hasWindowFocus() || !button.isAttachedToWindow() ||
+                !button.isShown() || !button.isEnabled() || !button.isClickable() || !button.hasOnClickListeners() ||
+                button.getWidth() <= 0 || button.getHeight() <= 0) return null;
+        View root = button.getRootView();
+        if (root != decor.getRootView()) return null;
+        Rect screenBounds = new Rect();
+        if (!button.getGlobalVisibleRect(screenBounds) || screenBounds.isEmpty()) return null;
+        int[] rootScreenOffset = new int[2];
+        root.getLocationOnScreen(rootScreenOffset);
+        screenBounds.offset(rootScreenOffset[0], rootScreenOffset[1]);
+        int[] buttonScreenLocation = new int[2];
+        button.getLocationOnScreen(buttonScreenLocation);
+        Rect buttonScreenBounds = new Rect(buttonScreenLocation[0], buttonScreenLocation[1],
+                buttonScreenLocation[0] + button.getWidth(), buttonScreenLocation[1] + button.getHeight());
+        if (!screenBounds.intersect(buttonScreenBounds) || screenBounds.isEmpty()) return null;
+        return screenBounds;
+    }
+
+    private void sendExactlyOneTap(Instrumentation instrumentation, TapPlan tap) {
+        long holdMillis = ViewConfiguration.getTapTimeout() + TAP_FRAME_MS;
+        long longPressMillis = ViewConfiguration.getLongPressTimeout();
+        require(holdMillis > 0 && holdMillis + TAP_FRAME_MS <= TAP_HOLD_MAX_MS &&
+                holdMillis + TAP_FRAME_MS < longPressMillis,
+                "RETRY_TAP_HOLD_CONFIGURATION_UNSAFE");
         long downTime = SystemClock.uptimeMillis();
-        float x = tap.bounds.centerX();
-        float y = tap.bounds.centerY();
+        float x = tap.screenBounds.exactCenterX();
+        float y = tap.screenBounds.exactCenterY();
         MotionEvent down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0);
         down.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-        MotionEvent up = MotionEvent.obtain(downTime, downTime + 80L, MotionEvent.ACTION_UP, x, y, 0);
-        up.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        boolean heldWithinBounds = false;
+        long observationDeadline = downTime + Math.min(TAP_HOLD_MAX_MS, longPressMillis - 1L) - TAP_FRAME_MS;
+        tapCount = 1;
         try {
             instrumentation.sendPointerSync(down);
-            instrumentation.sendPointerSync(up);
+            if (SystemClock.uptimeMillis() + holdMillis <= observationDeadline) {
+                SystemClock.sleep(holdMillis);
+                retryDownPressed = retryPressedOnMain(tap, observationDeadline);
+            }
         } finally {
-            down.recycle();
-            up.recycle();
+            long upTime = SystemClock.uptimeMillis();
+            long heldMillis = upTime - downTime;
+            heldWithinBounds = heldMillis >= holdMillis && heldMillis <= TAP_HOLD_MAX_MS && heldMillis < longPressMillis;
+            MotionEvent up = null;
+            try {
+                up = MotionEvent.obtain(downTime, upTime, MotionEvent.ACTION_UP, x, y, 0);
+                up.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+                instrumentation.sendPointerSync(up);
+            } finally {
+                down.recycle();
+                if (up != null) up.recycle();
+            }
         }
+        retryOriginalButtonDetachedAfterUp = awaitOriginalButtonDetachedAfterUp(tap);
+        require(heldWithinBounds, "RETRY_TAP_HOLD_OUT_OF_BOUNDS");
+        require(retryDownPressed, "RETRY_DOWN_NOT_OBSERVED_PRESSED");
+        require(retryOriginalButtonDetachedAfterUp, "RETRY_ORIGINAL_BUTTON_NOT_DETACHED_AFTER_UP");
+    }
+
+    private static boolean observeOnMainWithin(Activity activity, long deadlineUptime, Condition condition) {
+        AtomicReference<Boolean> result = new AtomicReference<>(false);
+        CountDownLatch observed = new CountDownLatch(1);
+        try {
+            activity.runOnUiThread(() -> {
+                try {
+                    if (SystemClock.uptimeMillis() <= deadlineUptime) {
+                        boolean value = condition.ready();
+                        if (SystemClock.uptimeMillis() <= deadlineUptime) result.set(value);
+                    }
+                } catch (Throwable ignored) {
+                    // A failed or late observation is not positive input proof.
+                } finally {
+                    observed.countDown();
+                }
+            });
+            long remaining = deadlineUptime - SystemClock.uptimeMillis();
+            return remaining > 0 && observed.await(remaining, TimeUnit.MILLISECONDS) &&
+                    SystemClock.uptimeMillis() <= deadlineUptime && result.get();
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (RuntimeException | LinkageError ignored) { }
+        return false;
+    }
+
+    private static boolean retryPressedOnMain(TapPlan tap, long deadlineUptime) {
+        return observeOnMainWithin(tap.activity, deadlineUptime, () -> {
+            Rect currentBounds = verifiedRetryScreenBoundsOnMain(tap.activity, tap.button);
+            return currentBounds != null && currentBounds.equals(tap.screenBounds) && tap.button.isPressed();
+        });
+    }
+
+    private boolean awaitOriginalButtonDetachedAfterUp(TapPlan tap) {
+        long deadline = Math.min(startedAt + TOTAL_DEADLINE_MS,
+                SystemClock.elapsedRealtime() + RETRY_BUTTON_DETACH_DEADLINE_MS);
+        while (SystemClock.elapsedRealtime() < deadline) {
+            long observationDeadline = SystemClock.uptimeMillis() + deadline - SystemClock.elapsedRealtime();
+            boolean detached = observeOnMainWithin(tap.activity, observationDeadline, () ->
+                    ownedFocusedActivityOnMain(tap.activity) && !tap.button.isAttachedToWindow());
+            long remaining = deadline - SystemClock.elapsedRealtime();
+            if (remaining < 0) return false;
+            if (detached) return true;
+            if (remaining == 0) return false;
+            SystemClock.sleep(Math.min(TAP_FRAME_MS, remaining));
+        }
+        return false;
     }
 
     private static Activity requireTargetActivity(OwnedDestroyInstrumentationRunner instrumentation) {
@@ -452,6 +565,8 @@ public final class OwnedDestroyRetryTest {
         evidence.put("helperAcceptedClearedBeforeTap", helperClearedBeforeTap);
         evidence.put("noDecorWebViewBeforeTap", noDecorWebViewBeforeTap);
         evidence.put("uniqueShownEnabledRetryBeforeTap", uniqueRetryButtonBeforeTap);
+        evidence.put("retryDownPressed", retryDownPressed);
+        evidence.put("retryOriginalButtonDetachedAfterUp", retryOriginalButtonDetachedAfterUp);
         evidence.put("oldWebViewDetached", first != null && viewDetachedOnMain(first));
         evidence.put("newWebViewDistinctAttached", first != null && second != null && first != second &&
                 viewAttachedOnMain(second));
@@ -484,11 +599,13 @@ public final class OwnedDestroyRetryTest {
     }
 
     private static final class TapPlan {
+        final Activity activity;
         final Button button;
-        final Rect bounds;
+        final Rect screenBounds;
         final long capturedAt;
-        TapPlan(Button button, Rect bounds, long capturedAt) {
-            this.button = button; this.bounds = bounds; this.capturedAt = capturedAt;
+        TapPlan(Activity activity, Button button, Rect screenBounds, long capturedAt) {
+            this.activity = activity; this.button = button;
+            this.screenBounds = new Rect(screenBounds); this.capturedAt = capturedAt;
         }
     }
 

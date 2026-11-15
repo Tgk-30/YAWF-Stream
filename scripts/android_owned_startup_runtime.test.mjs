@@ -159,6 +159,31 @@ try:
 finally:f.close()
 `));
 
+test('pressed and original-button detachment are mandatory typed facts and partial negatives stay unqualified',()=>run(String.raw`
+fields=('retryDownPressed','retryOriginalButtonDetachedAfterUp')
+assert all(field in m.BOOL_FIELDS for field in fields)
+for field in fields:
+ value=proof();value[field]=False;rejects(lambda:m.evidence(output(value)),'MODULE_FACTS')
+ for malformed in ['missing','wrong-type']:
+  value=proof()
+  if malformed=='missing':value.pop(field)
+  else:value[field]='https://private.invalid/input?token=PRIVATE_INPUT'
+  try:m.evidence(output(value))
+  except m.Refusal as error:
+   assert str(error)==('EVIDENCE_SCHEMA'if malformed=='missing'else'EVIDENCE_TYPE')
+   assert error.module_evidence is None and 'PRIVATE_INPUT'not in str(error)
+  else:raise AssertionError('unobserved input fact accepted')
+for pressed,detached in [(False,False),(True,False),(False,True),(True,True)]:
+ value=proof();value.update(qualification=False,phase='ONE_VERIFIED_NATIVE_TAP',failureCode='ONE_VERIFIED_NATIVE_TAP_FAILED',pluginLoadCount=1,elapsedMs=1500,retryDownPressed=pressed,retryOriginalButtonDetachedAfterUp=detached)
+ try:m.evidence(output(value))
+ except m.Refusal as error:
+  assert str(error)=='MODULE_UNQUALIFIED'
+  assert error.module_evidence['qualification']is False
+  assert error.module_evidence[fields[0]]is pressed and error.module_evidence[fields[1]]is detached
+  assert error.module_evidence['phase']=='ONE_VERIFIED_NATIVE_TAP'
+ else:raise AssertionError('partial input facts became startup qualification')
+`));
+
 test('only one complete exact-schema final evidence plus genuine JUnit completion qualifies',()=>run(String.raw`
 assert m.evidence(output())==proof()
 xml='<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="'+m.TEST_PACKAGE+'"><instrumentation android:name="'+m.RUNNER+'" android:targetPackage="'+m.TARGET+'"/></manifest>'
