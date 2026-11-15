@@ -136,6 +136,29 @@ def evidence(output):
     return value
 
 
+def instrumentation_signals(stdout, stderr):
+    """Fixed diagnostic facts only, never messages, stack frames or qualification.
+
+    Scan the bounded one-shot instrumentation output even if its evidence Bundle
+    is missing. Untrusted text can set a fact but cannot supply a receipt value.
+    """
+    text = stdout.decode("utf-8", errors="replace") + "\n" + stderr.decode("utf-8", errors="replace")
+    exceptions = ("NoClassDefFoundError", "ClassNotFoundException", "UnsatisfiedLinkError",
+                  "VerifyError", "SecurityException", "IllegalStateException", "RuntimeException")
+    facts = {name: re.search(r"(?<![A-Za-z0-9_$])" + name + r"(?![A-Za-z0-9_$])", text) is not None
+             for name in exceptions}
+    facts.update(
+        instrumentationRunFailed=any(mark in text for mark in
+                                     ("INSTRUMENTATION_FAILED", "INSTRUMENTATION_ABORTED", "Instrumentation run failed")),
+        processCrashed=any(mark in text for mark in ("Process crashed.", "Process crashed", "process crashed")),
+        junitStarted=re.search(r"(?m)^INSTRUMENTATION_STATUS: class=" + re.escape(TEST_CLASS) + r"\r?$", text) is not None and
+                     re.search(r"(?m)^INSTRUMENTATION_STATUS_CODE: 1\r?$", text) is not None,
+        ownedTestClassMentioned=re.search(r"(?<![A-Za-z0-9_.$])" + re.escape(TEST_CLASS) + r"(?![A-Za-z0-9_$])", text) is not None,
+        ownedRunnerClassMentioned=re.search(r"(?<![A-Za-z0-9_.$])" + re.escape(RUNNER) + r"(?![A-Za-z0-9_$])", text) is not None,
+    )
+    return facts
+
+
 def dex_class_counts(data):
     """Bounded standard DEX035..040 header/index/class-definition visitor.
 
@@ -305,6 +328,7 @@ class Controller:
         self.a, self.sys = args, system or System()
         self.started = self.sys.clock(); self.commands = []; self.admission = None
         self.next_inventory = 0; self.directory = None; self.evidence_owned = False; self.fingerprints = {}
+        self.instrumentation_signals = None
 
     def under(self, value, parent, exists=True):
         path = Path(value)
@@ -436,12 +460,16 @@ class Controller:
             require(self.text(self.adb + ["shell", "pm", "list", "packages", package]).strip() == "", "PACKAGE_NOT_FRESH")
         for path, extra in ((self.target, []), (self.test, ["-t"])):
             require(install_succeeded(self.text(self.adb + ["install", *extra, "--no-streaming", "--no-incremental", str(path)], 45)), "INSTALL_FAILED")
-        output = self.text(self.adb + ["shell", "am", "instrument", "-w", "-r", "-e", "class", TEST_CLASS + "#" + METHOD, TEST_PACKAGE + "/" + RUNNER], self.a.timeout)
+        code, stdout, stderr = self.command(self.adb + ["shell", "am", "instrument", "-w", "-r", "-e", "class", TEST_CLASS + "#" + METHOD, TEST_PACKAGE + "/" + RUNNER], self.a.timeout)
+        self.instrumentation_signals = instrumentation_signals(stdout, stderr)
+        require(code == 0, "TOOL_REFUSAL")
+        output = stdout.decode("utf-8", errors="strict")
         proof = evidence(output); self.check()
         require(self.sys.free(self.temp) >= RESERVE, "FINAL_RESERVE")
         result = {"qualification": True, "scope": SCOPE, "sourceRevision": self.admission["sourceRevision"],
                   "controllerSha256": digest(Path(__file__).read_bytes()), "targetApk": target, "testApk": test,
                   "testDex": dex, "evidence": proof, "commands": self.commands,
+                  "instrumentationSignals": self.instrumentation_signals,
                   "rootLifecycleCleanupRequired": True, "screenshotsOrGlobalLogcatCollected": False}
         (self.directory / "OWNED_STARTUP.json").write_text(json.dumps(result, sort_keys=True) + "\n")
         return result
@@ -471,6 +499,8 @@ def main():
             result["moduleEvidence"] = error.module_evidence
         if controller is not None:
             result["commands"] = controller.commands
+            if controller.instrumentation_signals is not None:
+                result["instrumentationSignals"] = controller.instrumentation_signals
             if controller.evidence_owned and controller.directory is not None and controller.directory.is_dir():
                 (controller.directory / "OWNED_STARTUP.json").write_text(json.dumps(result, sort_keys=True) + "\n")
         print(json.dumps({key: value for key, value in result.items() if key != "commands"}))

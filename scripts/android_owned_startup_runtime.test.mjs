@@ -31,7 +31,7 @@ def output(value=None):
 class Fake(m.System):
  platform='linux'
  def __init__(self,root,admission):
-  self.environ={'RUNNER_TEMP':str(root),'GITHUB_ACTIONS':'true','PATH':'/public/tools'};self.admission=admission;self.calls=[];self.bad_cert=False;self.bad_package=False;self.debug=False;self.wrong_runner=False;self.extra=False;self.changed=False;self.changed_command=False;self.timeout=False;self.empty_target_version=False;self.unqualified=False;self.wrong_avd=False
+  self.environ={'RUNNER_TEMP':str(root),'GITHUB_ACTIONS':'true','PATH':'/public/tools'};self.admission=admission;self.calls=[];self.bad_cert=False;self.bad_package=False;self.debug=False;self.wrong_runner=False;self.extra=False;self.changed=False;self.changed_command=False;self.timeout=False;self.empty_target_version=False;self.unqualified=False;self.wrong_avd=False;self.instrument_output=None;self.instrument_stderr=b'';self.instrument_exit=0
  def process(self,pid):
   item=next(x for x in [self.admission['emulator'],self.admission['adbServer']]if x['pid']==pid);return item['startTicks']+int(self.changed),[x.encode()for x in item['cmdline']]+([b'foreign']if self.changed_command else [])
  def port_owned(self,pid,port):return pid==2345 and port==5142
@@ -49,6 +49,7 @@ class Fake(m.System):
    elif command[0]=='install':text='Performing Push Install\nSuccess\n'
    elif command[:3]==['shell','am','instrument']:
     if self.timeout:raise m.Refusal('HARD_SUBPROCESS_TIMEOUT')
+    if self.instrument_output is not None:return self.instrument_exit,self.instrument_output,self.instrument_stderr
     if self.unqualified:
      value=proof();value.update(qualification=False,phase='LAUNCH_ONCE',failureCode='LAUNCH_ONCE_FAILED');text=output(value)
     else:text=output()
@@ -205,4 +206,35 @@ try:
   rejects(lambda:system.run(['fake-adb'],0.5,1024,lambda:None,{}),'HARD_SUBPROCESS_TIMEOUT')
  assert signals==[(child.pid,m.signal.SIGTERM)]
 finally:os.close(child.w1);os.close(child.w2)
+`));
+
+
+test('fixed instrumentation signals survive missing evidence without retaining arbitrary output',()=>run(String.raw`
+private='https://private.invalid/path?token=private-value /private/owner/file PRIVATE_MESSAGE'
+expected={'NoClassDefFoundError','ClassNotFoundException','UnsatisfiedLinkError','VerifyError','SecurityException','IllegalStateException','RuntimeException','instrumentationRunFailed','processCrashed','junitStarted','ownedTestClassMentioned','ownedRunnerClassMentioned'}
+text=('java.lang.NoClassDefFoundError: '+private+'\n'+m.TEST_CLASS+'\n'+m.RUNNER+'\nInstrumentation run failed\nProcess crashed.\nINSTRUMENTATION_STATUS: class='+m.TEST_CLASS+'\nINSTRUMENTATION_STATUS_CODE: 1\n').encode()
+facts=m.instrumentation_signals(text,b'java.lang.SecurityException: '+private.encode())
+assert set(facts)==expected and all(type(x)is bool for x in facts.values())
+assert facts['NoClassDefFoundError']and facts['SecurityException']and facts['instrumentationRunFailed']and facts['processCrashed']and facts['junitStarted']and facts['ownedTestClassMentioned']and facts['ownedRunnerClassMentioned']
+assert not facts['ClassNotFoundException'];assert m.instrumentation_signals(b'NotNoClassDefFoundErrorSuffix',b'')['NoClassDefFoundError']is False
+for name in expected & set(['ClassNotFoundException','UnsatisfiedLinkError','VerifyError','IllegalStateException','RuntimeException']):
+ assert m.instrumentation_signals(('java.lang.'+name+': '+private).encode(),b'')[name]is True
+for exit_code,wanted in [(0,'EVIDENCE_COUNT'),(1,'TOOL_REFUSAL')]:
+ f=Fixture()
+ try:
+  f.fake.instrument_output=text;f.fake.instrument_stderr=b'java.lang.SecurityException: '+private.encode();f.fake.instrument_exit=exit_code
+  argv=['controller']
+  for key,value in vars(f.args).items():argv+=['--'+key.replace('_','-'),str(value)]
+  with mock.patch.object(m,'System',return_value=f.fake),mock.patch.object(sys,'argv',argv),mock.patch('sys.stdout',new_callable=io.StringIO)as captured:
+   assert m.main()==1
+  saved=json.loads((pathlib.Path(f.args.evidence_dir)/'OWNED_STARTUP.json').read_text())
+  assert saved['qualification']is False and saved['code']==wanted;assert saved['instrumentationSignals']==facts;assert 'moduleEvidence'not in saved
+  serialized=json.dumps(saved)+captured.getvalue();assert all(secret not in serialized for secret in ['private.invalid','private-value','/private/owner','PRIVATE_MESSAGE','java.lang.NoClassDefFoundError:'])
+  assert len([c for c in f.fake.calls if 'instrument'in c])==1
+ finally:f.close()
+# Unknown exceptions, arbitrary frame names and invalid Unicode cannot become values.
+unknown=m.instrumentation_signals(('com.private.SecretException: '+private+'\n at com.private.Owner.secretMethod(Owner.java:1)').encode()+b'\xff',b'')
+assert set(unknown)==expected and not any(unknown.values());assert private not in json.dumps(unknown)
+# Diagnostics never replace the exact evidence or JUnit qualification gate.
+rejects(lambda:m.evidence(text.decode()),'EVIDENCE_COUNT')
 `));
