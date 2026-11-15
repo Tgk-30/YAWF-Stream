@@ -191,6 +191,18 @@ async function handleRequest(request) {
   const proxied = new Request(target.toString(), requestInit);
   const response = await fetch(proxied);
   const headers = new Headers(response.headers);
+  const location = headers.get("Location");
+  if (location !== null && [301, 302, 303, 307, 308].includes(response.status)) {
+    try {
+      const canonical = new URL(location, target);
+      if (canonical.origin === origin.origin && !canonical.username && !canonical.password) {
+        const mounted = canonical.pathname === PREFIX || canonical.pathname.startsWith(PREFIX + "/");
+        headers.set("Location", (mounted ? canonical.pathname : PREFIX + canonical.pathname) + canonical.search + canonical.hash);
+      }
+    } catch {
+      // Preserve malformed or noncanonical upstream locations without guessing.
+    }
+  }
   headers.set("X-YAWF-Stream-Site", "cloudflare-pages");
   if (response.ok && (request.method === "GET" || request.method === "HEAD")) {
     if (incoming.pathname.startsWith("/assets/")) {
