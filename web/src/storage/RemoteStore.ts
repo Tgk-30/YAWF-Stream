@@ -24,8 +24,6 @@ import type {
 } from "./types";
 import { notifyUnauthorized, readCsrfToken } from "../lib/serverSession";
 
-const PROGRESS_HISTORY_TIMEOUT_MS = 10_000;
-
 type JsonObject = Record<string, unknown>;
 
 const SECRET_MARKER = "secret:";
@@ -381,34 +379,10 @@ export class RemoteStore implements Store, SecretStore {
     entry: WatchHistoryUpsert,
     signal: AbortSignal,
   ): Promise<WatchHistoryRecord> {
-    if (signal.aborted) {
-      throw new DOMException("Progress write cancelled", "AbortError");
-    }
-    const controller = new AbortController();
-    const abort = () => controller.abort();
-    signal.addEventListener("abort", abort, { once: true });
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    let rejectCancelled: ((reason: Error) => void) | undefined;
-    const cancelled = new Promise<never>((_, reject) => {
-      rejectCancelled = reject;
-    });
-    const onAbort = () => rejectCancelled?.(
-      new DOMException("Progress write cancelled", "AbortError"),
+    const { withProgressWriteTimeout } = await import("../store/progressWriteQueue");
+    return withProgressWriteTimeout(signal, (writeSignal) =>
+      this.writeHistory(entry, writeSignal),
     );
-    signal.addEventListener("abort", onAbort, { once: true });
-    const expired = new Promise<never>((_, reject) => {
-      timeout = setTimeout(() => {
-        controller.abort();
-        reject(new Error("Progress write timed out."));
-      }, PROGRESS_HISTORY_TIMEOUT_MS);
-    });
-    try {
-      return await Promise.race([this.writeHistory(entry, controller.signal), expired, cancelled]);
-    } finally {
-      if (timeout != null) clearTimeout(timeout);
-      signal.removeEventListener("abort", abort);
-      signal.removeEventListener("abort", onAbort);
-    }
   }
 
   private async writeHistory(

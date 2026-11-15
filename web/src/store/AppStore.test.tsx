@@ -70,6 +70,11 @@ const loadHistory = vi.fn<() => Promise<MediaPreview[]>>();
 const loadContinueWatching = vi.fn<() => Promise<unknown[]>>();
 const recordHistory = vi.fn<(item: MediaPreview, opts?: unknown) => Promise<MediaPreview[]>>();
 const storeRecordHistory = vi.fn<(entry: unknown) => Promise<unknown>>();
+const mockProgressQueueImport = vi.hoisted(() => ({
+  holdNext: false,
+  wait: null as Promise<void> | null,
+  release: (() => {}) as () => void,
+}));
 const toggleWatchlistStore = vi.fn<(item: MediaPreview) => Promise<MediaPreview[]>>();
 const removeFromWatchlistStore = vi.fn<(id: string) => Promise<MediaPreview[]>>();
 
@@ -143,6 +148,14 @@ vi.mock("../storage/RemoteStore", () => {
     resetProfileCache = vi.fn();
   }
   return { RemoteStore: FakeRemoteStore };
+});
+
+vi.mock("./progressWriteQueue", async (importOriginal) => {
+  if (mockProgressQueueImport.holdNext) {
+    mockProgressQueueImport.holdNext = false;
+    await mockProgressQueueImport.wait;
+  }
+  return importOriginal();
 });
 
 // Scheduler: a fake we can assert start/stop/kick on. The spies live on a
@@ -1315,19 +1328,65 @@ describe("importToWatchlist", () => {
 });
 
 describe("recordResume", () => {
+  it("drops late old-generation staging after transition timeout but admits the new generation", async () => {
+    let release!: () => void;
+    mockProgressQueueImport.holdNext = true;
+    mockProgressQueueImport.wait = new Promise<void>((resolve) => { release = resolve; });
+    mockProgressQueueImport.release = release;
+    let cookie = "old-profile";
+    const writes: Array<{ mediaId: string; cookie: string }> = [];
+    storeRecordHistory.mockImplementation((unknownEntry: unknown) => {
+      const entry = unknownEntry as { mediaId: string };
+      writes.push({ mediaId: entry.mediaId, cookie });
+      return Promise.resolve({});
+    });
+    try {
+      const { result } = await renderStore();
+      act(() => result.current.recordResume(media("old-staged"), 8, 100));
+      vi.useFakeTimers();
+      const transition = result.current.runProfileTransition(async (markProfileChanged) => {
+        cookie = "new-profile";
+        markProfileChanged();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(12_001);
+        await transition;
+      });
+      expect(writes).toEqual([]);
+
+      act(() => {
+        result.current.recordResume(media("new-staged"), 10, 100);
+        result.current.recordResume(media("new-staged"), 16, 100);
+      });
+      release();
+      await waitFor(() => expect(writes).toEqual([
+        { mediaId: "new-staged", cookie: "new-profile" },
+        { mediaId: "new-staged", cookie: "new-profile" },
+      ]));
+      expect(storeRecordHistory.mock.calls.map(([entry]) =>
+        (entry as { progressSeconds: number }).progressSeconds,
+      )).toEqual([10, 16]);
+    } finally {
+      release();
+      vi.useRealTimers();
+      mockProgressQueueImport.holdNext = false;
+      mockProgressQueueImport.wait = null;
+    }
+  });
+
   it("records progress and marks completed at >=95% watched", async () => {
     const { result } = await renderStore();
     const item = media("r1");
 
     act(() => result.current.recordResume(item, 95, 100));
-    expect(storeRecordHistory).toHaveBeenCalledWith({
+    await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledWith({
       mediaId: item.id,
       preview: item,
       progressSeconds: 95,
       durationSeconds: 100,
       completed: true,
       episodeId: null,
-    });
+    }));
   });
 
   it("forwards a series episode id (and defaults to null when omitted)", async () => {
@@ -1335,14 +1394,14 @@ describe("recordResume", () => {
     const item = media("r5");
 
     act(() => result.current.recordResume(item, 42, 100, "s2e5"));
-    expect(storeRecordHistory).toHaveBeenCalledWith({
+    await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledWith({
       mediaId: item.id,
       preview: item,
       progressSeconds: 42,
       durationSeconds: 100,
       completed: false,
       episodeId: "s2e5",
-    });
+    }));
   });
 
   it("does NOT mark completed below 95%, and treats null/zero duration as incomplete", async () => {
@@ -1494,6 +1553,20 @@ describe("recordResume", () => {
       subtitlePosition: 70,
     });
     expect(loadContinueWatching).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves first and latest resume reports while the queue chunk initializes", async () => {
+    const { result } = await renderStore();
+    act(() => {
+      result.current.recordResume(media("lazy-first-latest"), 5, 100);
+      result.current.recordResume(media("lazy-first-latest"), 25, 100);
+    });
+    await act(async () => {
+      await result.current.refreshContinueWatching();
+    });
+    expect(storeRecordHistory.mock.calls.map(([entry]) =>
+      (entry as { progressSeconds: number }).progressSeconds,
+    )).toEqual([5, 25]);
   });
 
   it("drains active and pending old-profile writes before a cookie-changing transition", async () => {
@@ -2196,6 +2269,7 @@ describe("reloadProfileData", () => {
     const { result } = await renderStore();
 
     act(() => result.current.recordResume(media("remote-active"), 18, 100));
+    await waitFor(() => expect(requestSignal).toBeDefined());
     expect(requestSignal?.aborted).toBe(false);
     await act(async () => {
       await result.current.reloadProfileData();
@@ -2224,6 +2298,7 @@ describe("reloadProfileData", () => {
     getStore.mockReturnValue(remote as never);
     const { result } = await renderStore();
     act(() => result.current.recordResume(media("slow-profile-progress"), 19, 100));
+    await waitFor(() => expect(requestSignal).toBeDefined());
     vi.useFakeTimers();
     let switched = false;
     const transition = result.current.runProfileTransition(async (markProfileChanged) => {

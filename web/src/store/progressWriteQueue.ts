@@ -10,6 +10,42 @@ export interface ProgressWriteJob {
 }
 
 const MAX_PENDING_PROGRESS_WRITES = 64;
+export const PROGRESS_HISTORY_TIMEOUT_MS = 10_000;
+
+/** Timeout/abort wrapper kept in the lazily loaded progress-only chunk. */
+export async function withProgressWriteTimeout<T>(
+  signal: AbortSignal,
+  write: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  if (signal.aborted) {
+    throw new DOMException("Progress write cancelled", "AbortError");
+  }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal.addEventListener("abort", abort, { once: true });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let rejectCancelled: ((reason: Error) => void) | undefined;
+  const cancelled = new Promise<never>((_, reject) => {
+    rejectCancelled = reject;
+  });
+  const onAbort = () => rejectCancelled?.(
+    new DOMException("Progress write cancelled", "AbortError"),
+  );
+  signal.addEventListener("abort", onAbort, { once: true });
+  const expired = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      controller.abort();
+      reject(new Error("Progress write timed out."));
+    }, PROGRESS_HISTORY_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([write(controller.signal), expired, cancelled]);
+  } finally {
+    if (timeout != null) clearTimeout(timeout);
+    signal.removeEventListener("abort", abort);
+    signal.removeEventListener("abort", onAbort);
+  }
+}
 
 export class ProgressWriteQueue {
   private readonly storeIds = new WeakMap<object, number>();
