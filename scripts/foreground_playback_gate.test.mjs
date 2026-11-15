@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { classifyBrowserLaunchFailure, classifyFixtureBootstrapLog, classifyResponse, collectBrowserPrerequisites, collectFixtureDiagnostic, evaluateProgress, parseKernelUsernsFlag, runCasesAfterPublicBootstrap, runPublicBrowserBootstrap, sanitizeBrowserLaunchDiagnostic, sanitizeBrowserPrerequisiteDiagnostic, sanitizeFixtureDiagnostic, sanitizePublicBrowserBootstrap, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
+import { captureFailureUi, copyFailureScreenshot, isBoundedViewportJpeg, sanitizeUiFailureDiagnostic, classifyBrowserLaunchFailure, classifyFixtureBootstrapLog, classifyResponse, collectBrowserPrerequisites, collectFixtureDiagnostic, evaluateProgress, parseKernelUsernsFlag, runCasesAfterPublicBootstrap, runPublicBrowserBootstrap, sanitizeBrowserLaunchDiagnostic, sanitizeBrowserPrerequisiteDiagnostic, sanitizeFixtureDiagnostic, sanitizePublicBrowserBootstrap, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
 import { buildFixtureMediaPlan } from './foreground_fixture_media_plan.mjs';
 const baseline = { time: 10, frames: 300, paused: false, seeking: false, rate: 1, hidden: false, error: null, source: 'one', wall: 1000, presented: { frames: 300 } };
 test('verified Node xz archive has its extraction prerequisite in the image bootstrap', () => {
@@ -643,4 +644,137 @@ test('public bootstrap environment, schema, failure barrier and ordering mutants
     try { await probe(mutant); } catch (error) { assert.equal(error.code, 'ERR_ASSERTION'); rejected = true; }
     assert.equal(rejected, true, 'each public bootstrap mutation must fail an actual semantic assertion');
   }
+});
+
+const syntheticJpeg = Buffer.from([
+  0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x02, 0xd0, 0x05, 0x00, 0x03,
+  0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+  0xff, 0xda, 0x00, 0x0c, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3f, 0x00, 0x10, 0xff, 0xd9,
+]);
+const safeUiState = { dialogCount: 1, inputCount: 2, ready: true, skipTourVisible: false, videoCount: 0, watchlistButtonCount: 1, watchlistVisible: true };
+const uiDiagnostic = (bytes = syntheticJpeg) => ({ schemaVersion: 1, state: safeUiState,
+  screenshot: { filename: 'failure.jpg', bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') } });
+const failedUiReceipt = (bytes = syntheticJpeg) => ({ case: 'admission', outcome: 'failed', fullQualification: false, uiDiagnostic: uiDiagnostic(bytes) });
+
+test('UI report accepts only bounded fixed state and viewport JPEG metadata', () => {
+  assert.deepEqual(sanitizeUiFailureDiagnostic(uiDiagnostic()), uiDiagnostic());
+  assert.equal(isBoundedViewportJpeg(syntheticJpeg), true);
+  for (const value of [{ ...uiDiagnostic(), raw: privateDiagnostic }, { ...uiDiagnostic(), state: { ...safeUiState, raw: privateDiagnostic } },
+    { ...uiDiagnostic(), state: { ...safeUiState, ready: 'true' } }, { ...uiDiagnostic(), state: { ...safeUiState, inputCount: 100 } },
+    { ...uiDiagnostic(), screenshot: { ...uiDiagnostic().screenshot, filename: '../failure.jpg' } },
+    { ...uiDiagnostic(), screenshot: { ...uiDiagnostic().screenshot, sha256: privateDiagnostic } },
+    { ...uiDiagnostic(), screenshot: { ...uiDiagnostic().screenshot, bytes: 524289 } },
+  ]) assert.equal(sanitizeUiFailureDiagnostic(value), null);
+  for (const data of [Buffer.alloc(0), Buffer.from('not jpeg'), Buffer.concat([syntheticJpeg, Buffer.from([0])]),
+    Buffer.from(syntheticJpeg.map((byte, index) => index === 9 ? 0x01 : byte)),
+    Buffer.concat([syntheticJpeg.subarray(0, -2), Buffer.alloc(524288), syntheticJpeg.subarray(-2)]),
+  ]) assert.equal(isBoundedViewportJpeg(data), false);
+});
+
+test('actual failure capture is origin and viewport bounded and masks controls without retaining page text', async () => {
+  const dir = mkdtempSync(join(process.env.RUNNER_TEMP || process.env.TMPDIR || tmpdir(), 'foreground-ui-'));
+  let captures = 0;
+  const locator = (selector) => ({ selector, count: async () => selector === 'input,textarea,select' ? 2 : selector === 'video' ? 0 : 1, first() { return this; }, isVisible: async () => selector === 'Watchlist' });
+  const page = {
+    isClosed: () => false, url: () => 'http://127.0.0.1:43120/', viewportSize: () => ({ width: 1280, height: 720 }),
+    getByRole: (role, options) => locator(options?.name ?? role), locator, evaluate: async () => true,
+    screenshot: async (options) => {
+      captures += 1;
+      assert.equal(options.type, 'jpeg'); assert.equal(options.fullPage, false); assert.equal(options.maskColor, '#000000');
+      for (const selector of ['input', 'textarea', 'code', 'pre', 'iframe', 'password', 'token', 'secret']) assert.ok(options.mask[0].selector.includes(selector));
+      return syntheticJpeg;
+    },
+  };
+  try {
+    const result = await captureFailureUi(page, dir);
+    assert.deepEqual(result, uiDiagnostic());
+    assert.deepEqual(readFileSync(join(dir, 'failure.jpg')), syntheticJpeg);
+    assert.ok(!JSON.stringify(result).includes(privateDiagnostic));
+    const other = { ...page, url: () => 'https://private.invalid/' };
+    assert.equal(await captureFailureUi(other, dir), null);
+    assert.equal(captures, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+function withScreenshotFiles(probe) {
+  const root = mkdtempSync(join(process.env.RUNNER_TEMP || process.env.TMPDIR || tmpdir(), 'foreground-copy-'));
+  const source = join(root, 'case'), dest = join(root, 'evidence');
+  mkdirSync(source); mkdirSync(dest);
+  writeFileSync(join(source, 'failure.jpg'), syntheticJpeg);
+  writeFileSync(join(source, 'result.json'), JSON.stringify(failedUiReceipt()));
+  try { probe(source, dest); } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
+test('actual copy guard accepts only a matching failed receipt, regular image, and bounded total', () => {
+  withScreenshotFiles((source, dest) => {
+    assert.equal(copyFailureScreenshot(source, dest, 'admission'), true);
+    assert.deepEqual(readFileSync(join(dest, 'failure-admission.jpg')), syntheticJpeg);
+  });
+  withScreenshotFiles((source, dest) => {
+    writeFileSync(join(source, 'result.json'), JSON.stringify({ ...failedUiReceipt(), outcome: 'passed' }));
+    assert.equal(copyFailureScreenshot(source, dest, 'admission'), false);
+  });
+  withScreenshotFiles((source, dest) => {
+    writeFileSync(join(source, 'result.json'), JSON.stringify({ ...failedUiReceipt(), uiDiagnostic: { ...uiDiagnostic(), screenshot: { ...uiDiagnostic().screenshot, sha256: 'a'.repeat(64) } } }));
+    assert.equal(copyFailureScreenshot(source, dest, 'admission'), false);
+  });
+  withScreenshotFiles((source, dest) => {
+    rmSync(join(source, 'failure.jpg')); writeFileSync(join(source, 'target.jpg'), syntheticJpeg);
+    symlinkSync(join(source, 'target.jpg'), join(source, 'failure.jpg'));
+    assert.equal(copyFailureScreenshot(source, dest, 'admission'), false);
+  });
+  withScreenshotFiles((source, dest) => {
+    writeFileSync(join(dest, 'large'), 'x'); truncateSync(join(dest, 'large'), 32 * 1024 * 1024);
+    assert.equal(copyFailureScreenshot(source, dest, 'admission'), false);
+  });
+});
+
+test('failure capture and copy are absent from the positive path', () => {
+  const driver = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  const workflow = readFileSync(new URL('../.github/workflows/foreground-playback-qa.yml', import.meta.url), 'utf8');
+  assert.match(driver, /\} catch \(error\) \{\s*evidence\.failureCode = failureCode\(error\);\s*failure = error;\s*try \{\s*const diagnostic = await captureFailureUi\(page, caseDir\)/);
+  assert.match(workflow, /if test "\$status" -eq 0 && test "\$image_count" -ne 0/);
+  assert.match(workflow, /if test "\$status" -ne 0; then[\s\S]*--copy-failure-screenshot/);
+});
+
+test('individual failure screenshot report and copy mutants are rejected behaviorally', async () => {
+  const original = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  const mutations = [
+    ["receipt.outcome !== 'failed'", 'false', (api) => withScreenshotFiles((source, dest) => {
+      writeFileSync(join(source, 'result.json'), JSON.stringify({ ...failedUiReceipt(), outcome: 'passed' }));
+      assert.equal(api.copyFailureScreenshot(source, dest, 'admission'), false);
+    })],
+    ["diag.screenshot.sha256 !== createHash('sha256').update(bytes).digest('hex')", 'false', (api) => withScreenshotFiles((source, dest) => {
+      writeFileSync(join(source, 'result.json'), JSON.stringify({ ...failedUiReceipt(), uiDiagnostic: { ...uiDiagnostic(), screenshot: { ...uiDiagnostic().screenshot, sha256: 'a'.repeat(64) } } }));
+      assert.equal(api.copyFailureScreenshot(source, dest, 'admission'), false);
+    })],
+    ["Object.keys(value.state).sort().join(',') !== UI_STATE_KEYS.join(',')", 'false', (api) => assert.equal(api.sanitizeUiFailureDiagnostic({ ...uiDiagnostic(), state: { ...safeUiState, raw: privateDiagnostic } }), null)],
+    ["fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);", 'fd = openSync(path, constants.O_RDONLY);', (api) => withScreenshotFiles((source, dest) => {
+      rmSync(join(source, 'failure.jpg')); writeFileSync(join(source, 'target.jpg'), syntheticJpeg);
+      symlinkSync(join(source, 'target.jpg'), join(source, 'failure.jpg'));
+      assert.equal(api.copyFailureScreenshot(source, dest, 'admission'), false);
+    })],
+    ["bytes.length > FAILURE_JPEG_LIMIT", 'false', (api) => assert.equal(api.isBoundedViewportJpeg(Buffer.concat([syntheticJpeg.subarray(0, -2), Buffer.alloc(524288), syntheticJpeg.subarray(-2)])), false)],
+    ["total += info.size;\n      if (total > EVIDENCE_LIMIT) return false;\n    }\n    writeFileSync(`${evidenceDir}/failure-${name}.jpg`", "total += info.size;\n      if (false) return false;\n    }\n    writeFileSync(`${evidenceDir}/failure-${name}.jpg`", (api) => withScreenshotFiles((source, dest) => {
+      writeFileSync(join(dest, 'large'), 'x'); truncateSync(join(dest, 'large'), 32 * 1024 * 1024);
+      assert.equal(api.copyFailureScreenshot(source, dest, 'admission'), false);
+    })],
+  ];
+  for (const [from, to, probe] of mutations) {
+    probe({ copyFailureScreenshot, sanitizeUiFailureDiagnostic, isBoundedViewportJpeg });
+    assert.equal(original.split(from).length, 2);
+    const mutant = await import(`data:text/javascript;base64,${Buffer.from(original.replace(from, to)).toString('base64')}`);
+    let rejected = false;
+    try { probe(mutant); } catch (error) { assert.equal(error.code, 'ERR_ASSERTION'); rejected = true; }
+    assert.equal(rejected, true);
+  }
+});
+
+
+test('failure receipt and image descriptors use nonblocking no-follow opens', () => {
+  const source = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  const body = source.slice(source.indexOf('function readGuardedBytes('), source.indexOf('export function copyFailureScreenshot('));
+  const expected = /openSync\(path, constants\.O_RDONLY \| constants\.O_NOFOLLOW \| constants\.O_NONBLOCK\)/;
+  assert.match(body, expected);
+  assert.doesNotMatch(body.replace(' | constants.O_NONBLOCK', ''), expected);
 });

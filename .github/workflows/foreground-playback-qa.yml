@@ -137,8 +137,23 @@ jobs:
                   if test "$item" = summary; then path=/qa/output/summary.json; else path="/qa/output/$item/result.json"; fi
                   if test -f "$path" && ! test -L "$path"; then cp "$path" "/evidence/$item.json" || status=1; fi
                 done
+                image_count=0
+                image_case=""
+                for item in "${files[@]}"; do
+                  if test "$item" = summary; then continue; fi
+                  path="/qa/output/$item/failure.jpg"
+                  if test -e "$path" || test -L "$path"; then image_count=$((image_count + 1)); image_case="$item"; fi
+                done
+                if test "$status" -eq 0 && test "$image_count" -ne 0; then
+                  printf "{\"phase\":\"evidence\",\"failureCode\":\"Error\",\"reason\":\"unexpected-failure-image\"}\n" > /evidence/status.json
+                  exit 1
+                fi
                 if test "$status" -ne 0; then
-                  printf "{\"phase\":\"%s\",\"failureCode\":\"Error\"}\n" "$phase" > /evidence/status.json
+                  if test "$image_count" -gt 1 || { test "$image_count" -eq 1 && ! node /repo/scripts/foreground_playback_gate.mjs --copy-failure-screenshot "/qa/output/$image_case" /evidence "$image_case"; }; then
+                    printf "{\"phase\":\"evidence\",\"failureCode\":\"Error\",\"reason\":\"failure-image-refused\"}\n" > /evidence/status.json
+                  else
+                    printf "{\"phase\":\"%s\",\"failureCode\":\"Error\"}\n" "$phase" > /evidence/status.json
+                  fi
                   exit "$status"
                 fi
                 if test "$missing" -ne 0 || ! node /repo/scripts/foreground_playback_gate.mjs --validate-evidence /evidence "$QA_MODE"; then

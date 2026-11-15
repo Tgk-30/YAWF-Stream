@@ -63,6 +63,123 @@ export function validateEvidenceDirectory(directory, mode) {
   } catch { return false; }
 }
 
+const FAILURE_JPEG_LIMIT = 512 * 1024;
+const UI_STATE_KEYS = ['dialogCount', 'inputCount', 'ready', 'skipTourVisible', 'videoCount', 'watchlistButtonCount', 'watchlistVisible'];
+const UI_MASK = 'input,textarea,select,code,pre,[contenteditable],[role="textbox"],iframe,[data-private],[data-sensitive],[class*="password" i],[class*="token" i],[class*="secret" i],[class*="credential" i],[id*="password" i],[id*="token" i],[name*="secret" i],[aria-label*="password" i],[aria-label*="token" i],[autocomplete]';
+
+export function sanitizeUiFailureDiagnostic(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).sort().join(',') !== 'schemaVersion,screenshot,state' || value.schemaVersion !== 1 ||
+      !value.state || typeof value.state !== 'object' || Array.isArray(value.state) ||
+      Object.keys(value.state).sort().join(',') !== UI_STATE_KEYS.join(',')) return null;
+  for (const key of ['dialogCount', 'inputCount', 'videoCount', 'watchlistButtonCount']) {
+    if (!Number.isSafeInteger(value.state[key]) || value.state[key] < 0 || value.state[key] > 99) return null;
+  }
+  for (const key of ['ready', 'skipTourVisible', 'watchlistVisible']) if (typeof value.state[key] !== 'boolean') return null;
+  const shot = value.screenshot;
+  if (shot !== null && (!shot || typeof shot !== 'object' || Array.isArray(shot) ||
+      Object.keys(shot).sort().join(',') !== 'bytes,filename,sha256' || shot.filename !== 'failure.jpg' ||
+      !Number.isSafeInteger(shot.bytes) || shot.bytes < 1 || shot.bytes > FAILURE_JPEG_LIMIT ||
+      typeof shot.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(shot.sha256))) return null;
+  return { schemaVersion: 1, state: { ...value.state }, screenshot: shot === null ? null : { ...shot } };
+}
+
+export function isBoundedViewportJpeg(bytes) {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 12 || bytes.length > FAILURE_JPEG_LIMIT ||
+      bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes.at(-2) !== 0xff || bytes.at(-1) !== 0xd9) return false;
+  let pos = 2;
+  let validFrame = false;
+  while (pos + 4 <= bytes.length) {
+    if (bytes[pos++] !== 0xff) return false;
+    while (bytes[pos] === 0xff) pos += 1;
+    const marker = bytes[pos++];
+    if (marker === 0xd9 || marker === undefined) return false;
+    if (pos + 2 > bytes.length) return false;
+    const length = bytes.readUInt16BE(pos);
+    if (length < 2 || pos + length > bytes.length) return false;
+    if (marker === 0xda) return validFrame && length >= 6 && pos + length < bytes.length - 2;
+    if ([0xc0, 0xc1, 0xc2].includes(marker)) {
+      if (length < 11) return false;
+      const components = bytes[pos + 7];
+      if (![1, 3, 4].includes(components) || length !== 8 + 3 * components ||
+          bytes.readUInt16BE(pos + 3) !== 720 || bytes.readUInt16BE(pos + 5) !== 1280) return false;
+      validFrame = true;
+    }
+    pos += length;
+  }
+  return false;
+}
+
+export async function captureFailureUi(page, caseDir) {
+  if (!page || page.isClosed() || new URL(page.url()).origin !== 'http://127.0.0.1:43120') return null;
+  const viewport = page.viewportSize();
+  if (!viewport || viewport.width !== 1280 || viewport.height !== 720) return null;
+  const watchlist = page.getByRole('button', { name: 'Watchlist', exact: true });
+  const skip = page.getByRole('button', { name: 'Skip the tour' });
+  const count = async (locator) => Math.min(99, await locator.count());
+  const state = {
+    dialogCount: await count(page.getByRole('dialog')),
+    inputCount: await count(page.locator('input,textarea,select')),
+    ready: await page.evaluate(() => document.readyState === 'complete'),
+    skipTourVisible: await skip.first().isVisible(),
+    videoCount: await count(page.locator('video')),
+    watchlistButtonCount: await count(watchlist),
+    watchlistVisible: await watchlist.first().isVisible(),
+  };
+  let screenshot = null;
+  try {
+    const bytes = await page.screenshot({ type: 'jpeg', quality: 55, fullPage: false, timeout: 5000, mask: [page.locator(UI_MASK)], maskColor: '#000000' });
+    if (isBoundedViewportJpeg(bytes)) {
+      screenshot = { filename: 'failure.jpg', bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+      if (!sanitizeUiFailureDiagnostic({ schemaVersion: 1, state, screenshot })) return null;
+      writeFileSync(`${caseDir}/failure.jpg`, bytes, { flag: 'wx', mode: 0o600 });
+    }
+  } catch { screenshot = null; }
+  return sanitizeUiFailureDiagnostic({ schemaVersion: 1, state, screenshot });
+}
+
+// Both files are read through no-follow descriptors and copied only for a failed case.
+function readGuardedBytes(path, limit) {
+  let fd;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size < 1 || info.size > limit) return null;
+    const bytes = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (count <= 0) return null;
+      offset += count;
+    }
+    return bytes;
+  } catch { return null; }
+  finally { if (fd != null) closeSync(fd); }
+}
+
+export function copyFailureScreenshot(caseDir, evidenceDir, name) {
+  if (!['admission', 'direct', 'hls', 'stall'].includes(name)) return false;
+  try {
+    const receiptBytes = readGuardedBytes(`${caseDir}/result.json`, EVIDENCE_LIMIT);
+    const bytes = readGuardedBytes(`${caseDir}/failure.jpg`, FAILURE_JPEG_LIMIT);
+    if (!receiptBytes || !bytes) return false;
+    const receipt = JSON.parse(receiptBytes.toString('utf8'));
+    const diag = sanitizeUiFailureDiagnostic(receipt.uiDiagnostic);
+    if (receipt.case !== name || receipt.outcome !== 'failed' || receipt.fullQualification !== false || !diag?.screenshot ||
+        !isBoundedViewportJpeg(bytes) || diag.screenshot.bytes !== bytes.length ||
+        diag.screenshot.sha256 !== createHash('sha256').update(bytes).digest('hex')) return false;
+    let total = bytes.length + 512;
+    for (const item of readdirSync(evidenceDir)) {
+      const info = lstatSync(`${evidenceDir}/${item}`);
+      if (!info.isFile() || info.isSymbolicLink()) return false;
+      total += info.size;
+      if (total > EVIDENCE_LIMIT) return false;
+    }
+    writeFileSync(`${evidenceDir}/failure-${name}.jpg`, bytes, { flag: 'wx', mode: 0o600 });
+    return true;
+  } catch { return false; }
+}
+
 export function classifyResponse(path) {
   const match = /^\/api\/stream\/[^/]+\/(index\.m3u8|480p\.m3u8|480p_seg_\d{5}\.ts)$/.exec(path);
   if (match) return match[1];
@@ -398,7 +515,7 @@ async function runCase(chromium, name, output) {
   mkdirSync(caseDir, { mode: 0o700 });
   const fixtureDir = `${caseDir}/fixture`;
   const fixtureLog = `${caseDir}/fixture-private.log`;
-  let browser, proc, log, failure;
+  let browser, proc, log, failure, page;
   const evidence = { case: name, fullQualification: false, samples: [], events: [], requests: [], producers: [], outcome: 'failed', phase: 'fixture-ready' };
   const failureCode = (error) => error?.name === 'TimeoutError' ? 'Timeout' : error instanceof Error ? 'Error' : 'other';
   try {
@@ -420,14 +537,14 @@ async function runCase(chromium, name, output) {
       throw error;
     }
     evidence.browserVersion = browser.version();
-    const context = await browser.newContext({ serviceWorkers: 'block' });
+    const context = await browser.newContext({ serviceWorkers: 'block', viewport: { width: 1280, height: 720 }, deviceScaleFactor: 1 });
     await context.route('**/*', async (route) => {
       const u = new URL(route.request().url());
       if (u.origin !== 'http://127.0.0.1:43120' && u.origin !== 'http://127.0.0.1:43121') return route.abort('blockedbyclient');
       return route.continue();
     });
     await context.routeWebSocket('**/*', (ws) => ws.close());
-    const page = await context.newPage();
+    page = await context.newPage();
     const pendingResponses = new Set();
     page.on('response', (response) => {
       const task = (async () => {
@@ -551,6 +668,10 @@ async function runCase(chromium, name, output) {
   } catch (error) {
     evidence.failureCode = failureCode(error);
     failure = error;
+    try {
+      const diagnostic = await captureFailureUi(page, caseDir);
+      if (diagnostic) evidence.uiDiagnostic = diagnostic;
+    } catch { /* Never retain browser error text or replace the original failure. */ }
   } finally {
     const cleanup = async (operation) => {
       try { await operation(); } catch (error) {
@@ -588,7 +709,9 @@ async function main() {
   }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  if (process.argv[2] === '--validate-evidence') {
+  if (process.argv[2] === '--copy-failure-screenshot') {
+    if (process.argv.length !== 6 || !copyFailureScreenshot(process.argv[3], process.argv[4], process.argv[5])) process.exitCode = 1;
+  } else if (process.argv[2] === '--validate-evidence') {
     if (process.argv.length !== 5 || !validateEvidenceDirectory(process.argv[3], process.argv[4])) process.exitCode = 1;
   } else await main();
 }
