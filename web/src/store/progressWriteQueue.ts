@@ -167,7 +167,18 @@ export class ProgressWriteQueue {
     }
   }
 
-  /** Bound the wait only; the profile owner decides whether to cancel work. */
+  /** The profile owner must block admissions before awaiting this barrier. */
+  async drainGeneration(generation: number): Promise<void> {
+    if (await this.flushWithin() === false) {
+      // A stuck old-profile request must not hold account switching forever or
+      // dispatch its pending closure after the cookie changes. Remote progress
+      // writes have their own shorter aborting deadline.
+      this.cancelGeneration(generation);
+      await this.flush();
+    }
+  }
+
+  /** Bound the wait only; drainGeneration owns cancellation and final settlement. */
   async flushWithin(): Promise<boolean> {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {

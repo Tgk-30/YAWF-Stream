@@ -522,19 +522,11 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     return auxiliaryRevisionsRef.current[slice];
   }, []);
 
-  const cancelResumeGeneration = useCallback((generation: number) => {
-    resumeWriteQueueRef.current?.cancelGeneration(generation);
-  }, []);
-
-  const flushResumeWrites = useCallback(async () => {
-    await resumeWriteQueueRef.current?.flush();
-  }, []);
-
   const invalidateProfileReads = useCallback((): number => {
     const previousGeneration = profileReadGenerationRef.current;
     const generation = profileReadGenerationRef.current + 1;
     profileReadGenerationRef.current = generation;
-    cancelResumeGeneration(previousGeneration);
+    resumeWriteQueueRef.current?.cancelGeneration(previousGeneration);
     watchlistReadyGenerationRef.current = null;
     setWatchlistReadyGeneration(null);
     setDurableProfileReady(false);
@@ -549,7 +541,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     setCachedResolutions({});
     setCalendarLastSeenAt(null);
     return generation;
-  }, [cancelResumeGeneration]);
+  }, []);
 
   const auxiliaryReadIsCurrent = useCallback(
     (generation: number, slice: AuxiliarySlice, revision: number): boolean =>
@@ -817,13 +809,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       invalidateProfileReads();
     };
     try {
-      if (await resumeWriteQueueRef.current?.flushWithin() === false) {
-        // A stuck old-profile request must not hold account switching forever or
-        // dispatch its pending closure after the cookie changes. Remote progress
-        // writes have their own shorter aborting deadline.
-        cancelResumeGeneration(generation);
-        await resumeWriteQueueRef.current?.flush();
-      }
+      await resumeWriteQueueRef.current?.drainGeneration(generation);
       operationStarted = true;
       const result = await operation(markProfileChanged);
       succeeded = true;
@@ -836,7 +822,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         resumeWritesBlockedRef.current = false;
       }
     }
-  }, [cancelResumeGeneration, invalidateProfileReads]);
+  }, [invalidateProfileReads]);
 
   const refreshProfiles = useCallback(async () => {
     if (isServerMode()) return;
@@ -1147,7 +1133,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     // The webview player's final progress report is emitted during unmount.
     // Drain all writes visible at this session boundary before reading the
     // updated slice, including one added while an earlier write is settling.
-    await flushResumeWrites().catch(() => {});
+    await resumeWriteQueueRef.current?.flush().catch(() => {});
     try {
       const loaded = await loadContinueWatching();
       if (!auxiliaryReadIsCurrent(generation, "continueWatching", revision)) return;
@@ -1162,7 +1148,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     } catch {
       // Keep a pending owned bootstrap authoritative after a failed refresh.
     }
-  }, [auxiliaryReadIsCurrent, flushResumeWrites]);
+  }, [auxiliaryReadIsCurrent]);
 
   // Install one listener for the whole app. It restores the descriptor with
   // direct setters rather than navigation commands, and the ref guard prevents

@@ -66,6 +66,24 @@ const cases = [
     suite: "reloadProfileData",
     title: "bounds the profile drain at 12 seconds while remote progress times out and advances",
   },
+  {
+    id: "profile-drain-initial-wait",
+    source: queueSource,
+    from: "if (await this.flushWithin() === false) {",
+    to: "if (false) {",
+    test: "src/store/progressWriteQueue.test.ts",
+    suite: "ProgressWriteQueue",
+    title: "drains the admitted generation without cancellation when writes settle in time",
+  },
+  {
+    id: "profile-drain-final-settlement",
+    source: queueSource,
+    from: "await this.flush();",
+    to: "void this.flush();",
+    test: "src/store/progressWriteQueue.test.ts",
+    suite: "ProgressWriteQueue",
+    title: "cancels at the profile deadline but awaits active settlement before releasing the barrier",
+  },
 ];
 
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
