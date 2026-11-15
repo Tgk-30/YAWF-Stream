@@ -366,12 +366,30 @@ interface WebKitVideoElement extends HTMLVideoElement {
   webkitSetPresentationMode?: (
     mode: "inline" | "picture-in-picture" | "fullscreen",
   ) => void;
+  webkitSupportsPresentationMode?: (
+    mode: "inline" | "picture-in-picture" | "fullscreen",
+  ) => boolean;
   webkitPresentationMode?: "inline" | "picture-in-picture" | "fullscreen";
   webkitShowPlaybackTargetPicker?: () => void;
 }
 
 interface WebKitDocument extends Document {
   webkitFullscreenElement?: Element | null;
+}
+
+function supportsWebKitPictureInPicture(video: WebKitVideoElement): boolean {
+  try {
+    return typeof video.webkitSetPresentationMode === "function" &&
+      typeof video.webkitSupportsPresentationMode === "function" &&
+      video.webkitSupportsPresentationMode.call(video, "picture-in-picture") === true;
+  } catch {
+    return false;
+  }
+}
+
+function supportsStandardPictureInPicture(video: HTMLVideoElement): boolean {
+  return document.pictureInPictureEnabled === true &&
+    typeof video.requestPictureInPicture === "function";
 }
 
 function shouldUseNativeHls(
@@ -5330,30 +5348,28 @@ function WebviewPlayer({
     const video = videoRef.current;
     if (video == null) return;
     const webkitVideo = video as WebKitVideoElement;
-    const supportsStandardPiP =
-      document.pictureInPictureEnabled === true &&
-      typeof video.requestPictureInPicture === "function";
-    const supportsWebKitPiP = typeof webkitVideo.webkitSetPresentationMode === "function";
-    setPictureInPictureSupported(supportsStandardPiP || supportsWebKitPiP);
-
+    let active = true;
     const syncPictureInPicture = () => {
-      setIsPictureInPicture(
-        document.pictureInPictureElement === video ||
-          webkitVideo.webkitPresentationMode === "picture-in-picture",
-      );
+      if (!active || !ownsSource(video)) return;
+      const standardActive = document.pictureInPictureElement === video;
+      const webkitActive = webkitVideo.webkitPresentationMode === "picture-in-picture";
+      setIsPictureInPicture(standardActive || webkitActive);
+      // Enter capability can change after metadata or source replacement. An
+      // already-active current video's exit must not depend on enter support.
+      const canExit = (standardActive && typeof document.exitPictureInPicture === "function") ||
+        (webkitActive && typeof webkitVideo.webkitSetPresentationMode === "function");
+      setPictureInPictureSupported(canExit || (mediaEventsCurrent(video) &&
+        (supportsStandardPictureInPicture(video) || supportsWebKitPictureInPicture(webkitVideo))));
     };
-    const leavePictureInPicture = () => setIsPictureInPicture(false);
-
-    video.addEventListener("enterpictureinpicture", syncPictureInPicture);
-    video.addEventListener("leavepictureinpicture", leavePictureInPicture);
-    video.addEventListener("webkitpresentationmodechanged", syncPictureInPicture);
+    const events = ["loadedmetadata", "canplay", "emptied", "enterpictureinpicture",
+      "leavepictureinpicture", "webkitpresentationmodechanged"];
+    events.forEach((event) => video.addEventListener(event, syncPictureInPicture));
     syncPictureInPicture();
     return () => {
-      video.removeEventListener("enterpictureinpicture", syncPictureInPicture);
-      video.removeEventListener("leavepictureinpicture", leavePictureInPicture);
-      video.removeEventListener("webkitpresentationmodechanged", syncPictureInPicture);
+      active = false;
+      events.forEach((event) => video.removeEventListener(event, syncPictureInPicture));
     };
-  }, []);
+  }, [sourceIdentity]);
 
   useEffect(() => {
     if (underTauri) return;
@@ -7337,34 +7353,34 @@ function WebviewPlayer({
 
   const togglePictureInPicture = () => {
     const video = videoRef.current;
-    if (video == null) return;
+    if (video == null || !ownsSource(video)) return;
     const webkitVideo = video as WebKitVideoElement;
-    if (
-      document.pictureInPictureEnabled === true &&
-      typeof video.requestPictureInPicture === "function"
-    ) {
-      try {
+    try {
+      if (document.pictureInPictureElement === video && typeof document.exitPictureInPicture === "function") {
+        void document.exitPictureInPicture().catch(() => {});
+        return;
+      }
+      if (webkitVideo.webkitPresentationMode === "picture-in-picture" &&
+          typeof webkitVideo.webkitSetPresentationMode === "function") {
+        webkitVideo.webkitSetPresentationMode("inline");
+        return;
+      }
+      if (!mediaEventsCurrent(video)) return;
+      const standard = supportsStandardPictureInPicture(video);
+      const webkit = !standard && supportsWebKitPictureInPicture(webkitVideo);
+      setPictureInPictureSupported(standard || webkit);
+      if (standard) {
         if (document.pictureInPictureElement != null) {
           const exit = document.exitPictureInPicture?.();
           if (exit != null) void exit.catch(() => {});
         } else {
           void video.requestPictureInPicture().catch(() => {});
         }
-      } catch {
-        // A just-removed source can reject PiP before returning a promise.
+      } else if (webkit) {
+        webkitVideo.webkitSetPresentationMode!("picture-in-picture");
       }
-      return;
-    }
-    if (typeof webkitVideo.webkitSetPresentationMode === "function") {
-      try {
-        webkitVideo.webkitSetPresentationMode(
-          webkitVideo.webkitPresentationMode === "picture-in-picture"
-            ? "inline"
-            : "picture-in-picture",
-        );
-      } catch {
-        // The iOS presentation mode can be unavailable for a given stream.
-      }
+    } catch {
+      // A source or platform capability can disappear before the API completes.
     }
   };
 
