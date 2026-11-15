@@ -47,9 +47,12 @@ PHASES = {"NOT_STARTED", "PREFLIGHT", "LAUNCH_ONCE", "PRE_RETRY_ASSERTIONS",
           "ONE_VERIFIED_NATIVE_TAP", "WAITING_FOR_SAME_ACTIVITY_RETRY", "FINAL_ASSERTIONS",
           "QUALIFIED_SELECTED_STARTUP_RETRY_ONLY"}
 FAILURE_CODES = {""} | {phase + "_FAILED" for phase in PHASES}
+PRESSED_OBSERVATION_OUTCOMES = {"not-attempted", "budget-skipped", "observation-timeout",
+                                "state-mismatch", "unpressed", "pressed", "observation-error"}
 EVIDENCE_KEYS = set(BOOL_FIELDS) | {
     "schemaVersion", "scope", "phase", "qualification", "failureCode", "elapsedMs",
-    "tapCount", "targetActivityCreates", "pluginLoadCount",
+    "tapCount", "targetActivityCreates", "pluginLoadCount", "retryDownCallElapsedMs",
+    "retryPressedObservationOutcome",
 }
 
 
@@ -115,6 +118,10 @@ def evidence(output):
     for name in ("elapsedMs", "tapCount", "targetActivityCreates", "pluginLoadCount"):
         require(type(value[name]) is int and 0 <= value[name] <= 180000, "EVIDENCE_TYPE")
     require(type(value["phase"]) is str and type(value["failureCode"]) is str, "EVIDENCE_TYPE")
+    require(value["retryDownCallElapsedMs"] is None or
+            (type(value["retryDownCallElapsedMs"]) is int and 0 <= value["retryDownCallElapsedMs"] <= 150000), "EVIDENCE_TYPE")
+    require(type(value["retryPressedObservationOutcome"]) is str, "EVIDENCE_TYPE")
+    require(value["retryPressedObservationOutcome"] in PRESSED_OBSERVATION_OUTCOMES, "EVIDENCE_INPUT_OUTCOME")
     safe = dict(value)
     safe["phase"] = value["phase"] if value["phase"] in PHASES else "UNRECOGNIZED_MODULE_PHASE"
     safe["failureCode"] = value["failureCode"] if value["failureCode"] in FAILURE_CODES else "UNRECOGNIZED_MODULE_FAILURE"
@@ -128,6 +135,8 @@ def evidence(output):
     qualify(0 < value["elapsedMs"] <= 150000 and value["tapCount"] == 1 and
             value["targetActivityCreates"] == 1 and value["pluginLoadCount"] == 2 and
             all(value[name] for name in BOOL_FIELDS), "MODULE_FACTS")
+    qualify(value["retryPressedObservationOutcome"] == "pressed" and value["retryDownPressed"] is True and
+            type(value["retryDownCallElapsedMs"]) is int, "MODULE_INPUT_FACTS")
     qualify(len(re.findall(r"(?m)^OK \(1 test\)\s*$", output)) == 1, "JUNIT_ONE_TEST")
     qualify(re.findall(r"(?m)^INSTRUMENTATION_CODE: (-?\d+)\s*$", output) == ["-1"], "INSTRUMENTATION_COMPLETION")
     qualify(not any(mark in output for mark in ("FAILURES!!!", "INSTRUMENTATION_FAILED", "INSTRUMENTATION_ABORTED", "Process crashed.")), "INSTRUMENTATION_FAILED")

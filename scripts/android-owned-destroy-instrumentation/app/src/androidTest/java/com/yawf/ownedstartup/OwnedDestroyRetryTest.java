@@ -62,6 +62,8 @@ public final class OwnedDestroyRetryTest {
     private boolean uniqueRetryButtonBeforeTap;
     private boolean retryDownPressed;
     private boolean retryOriginalButtonDetachedAfterUp;
+    private Long retryDownCallElapsedMs;
+    private PressedObservationOutcome retryPressedObservationOutcome = PressedObservationOutcome.NOT_ATTEMPTED;
     private boolean sameActivityAfterRetry;
     private boolean wryOwnsNewWebView;
     private boolean activityReferencesNewWebView;
@@ -435,10 +437,20 @@ public final class OwnedDestroyRetryTest {
         long observationDeadline = downTime + Math.min(TAP_HOLD_MAX_MS, longPressMillis - 1L) - TAP_FRAME_MS;
         tapCount = 1;
         try {
-            instrumentation.sendPointerSync(down);
+            long downCallStartedAt = SystemClock.uptimeMillis();
+            try {
+                instrumentation.sendPointerSync(down);
+            } finally {
+                // A capped diagnostic span, never an extension of the gesture budget.
+                retryDownCallElapsedMs = Math.min(TOTAL_DEADLINE_MS,
+                        Math.max(0L, SystemClock.uptimeMillis() - downCallStartedAt));
+            }
             if (SystemClock.uptimeMillis() + holdMillis <= observationDeadline) {
                 SystemClock.sleep(holdMillis);
-                retryDownPressed = retryPressedOnMain(tap, observationDeadline);
+                retryPressedObservationOutcome = retryPressedOnMain(tap, observationDeadline);
+                retryDownPressed = retryPressedObservationOutcome == PressedObservationOutcome.PRESSED;
+            } else {
+                retryPressedObservationOutcome = PressedObservationOutcome.BUDGET_SKIPPED;
             }
         } finally {
             long upTime = SystemClock.uptimeMillis();
@@ -458,6 +470,8 @@ public final class OwnedDestroyRetryTest {
         require(heldWithinBounds, "RETRY_TAP_HOLD_OUT_OF_BOUNDS");
         require(retryDownPressed, "RETRY_DOWN_NOT_OBSERVED_PRESSED");
         require(retryOriginalButtonDetachedAfterUp, "RETRY_ORIGINAL_BUTTON_NOT_DETACHED_AFTER_UP");
+        require(retryPressedObservationOutcome == PressedObservationOutcome.PRESSED && retryDownCallElapsedMs != null,
+                "RETRY_INPUT_DIAGNOSTICS_INCONSISTENT");
     }
 
     private static boolean observeOnMainWithin(Activity activity, long deadlineUptime, Condition condition) {
@@ -485,11 +499,34 @@ public final class OwnedDestroyRetryTest {
         return false;
     }
 
-    private static boolean retryPressedOnMain(TapPlan tap, long deadlineUptime) {
-        return observeOnMainWithin(tap.activity, deadlineUptime, () -> {
-            Rect currentBounds = verifiedRetryScreenBoundsOnMain(tap.activity, tap.button);
-            return currentBounds != null && currentBounds.equals(tap.screenBounds) && tap.button.isPressed();
-        });
+    private static PressedObservationOutcome retryPressedOnMain(TapPlan tap, long deadlineUptime) {
+        AtomicReference<PressedObservationOutcome> result = new AtomicReference<>();
+        CountDownLatch observed = new CountDownLatch(1);
+        try {
+            tap.activity.runOnUiThread(() -> {
+                try {
+                    if (SystemClock.uptimeMillis() <= deadlineUptime) {
+                        Rect currentBounds = verifiedRetryScreenBoundsOnMain(tap.activity, tap.button);
+                        PressedObservationOutcome value = currentBounds == null || !currentBounds.equals(tap.screenBounds)
+                                ? PressedObservationOutcome.STATE_MISMATCH
+                                : tap.button.isPressed() ? PressedObservationOutcome.PRESSED : PressedObservationOutcome.UNPRESSED;
+                        if (SystemClock.uptimeMillis() <= deadlineUptime) result.set(value);
+                    }
+                } catch (Throwable ignored) {
+                    if (SystemClock.uptimeMillis() <= deadlineUptime) result.set(PressedObservationOutcome.OBSERVATION_ERROR);
+                } finally {
+                    observed.countDown();
+                }
+            });
+            long remaining = deadlineUptime - SystemClock.uptimeMillis();
+            if (remaining <= 0 || !observed.await(remaining, TimeUnit.MILLISECONDS) ||
+                    SystemClock.uptimeMillis() > deadlineUptime) return PressedObservationOutcome.OBSERVATION_TIMEOUT;
+            PressedObservationOutcome value = result.get();
+            return value == null ? PressedObservationOutcome.OBSERVATION_TIMEOUT : value;
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        } catch (RuntimeException | LinkageError ignored) { }
+        return PressedObservationOutcome.OBSERVATION_ERROR;
     }
 
     private boolean awaitOriginalButtonDetachedAfterUp(TapPlan tap) {
@@ -567,6 +604,8 @@ public final class OwnedDestroyRetryTest {
         evidence.put("uniqueShownEnabledRetryBeforeTap", uniqueRetryButtonBeforeTap);
         evidence.put("retryDownPressed", retryDownPressed);
         evidence.put("retryOriginalButtonDetachedAfterUp", retryOriginalButtonDetachedAfterUp);
+        evidence.put("retryDownCallElapsedMs", retryDownCallElapsedMs == null ? JSONObject.NULL : retryDownCallElapsedMs);
+        evidence.put("retryPressedObservationOutcome", retryPressedObservationOutcome.wireValue);
         evidence.put("oldWebViewDetached", first != null && viewDetachedOnMain(first));
         evidence.put("newWebViewDistinctAttached", first != null && second != null && first != second &&
                 viewAttachedOnMain(second));
@@ -596,6 +635,19 @@ public final class OwnedDestroyRetryTest {
             decorWebViewCount = webViews; onlyDecorWebView = onlyWebView;
             retryButtonCount = retryButtons; retryButtonShownAndEnabled = retryReady;
         }
+    }
+
+    private enum PressedObservationOutcome {
+        NOT_ATTEMPTED("not-attempted"),
+        BUDGET_SKIPPED("budget-skipped"),
+        OBSERVATION_TIMEOUT("observation-timeout"),
+        STATE_MISMATCH("state-mismatch"),
+        UNPRESSED("unpressed"),
+        PRESSED("pressed"),
+        OBSERVATION_ERROR("observation-error");
+
+        final String wireValue;
+        PressedObservationOutcome(String wireValue) { this.wireValue = wireValue; }
     }
 
     private static final class TapPlan {

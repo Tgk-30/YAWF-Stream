@@ -23,7 +23,7 @@ def dex(name, definition):
  b[offset:]=data;b[12:32]=hashlib.sha1(b[32:]).digest();struct.pack_into('<I',b,8,zlib.adler32(b[12:])&0xffffffff);return bytes(b)
 
 def proof():
- value={key:True for key in m.BOOL_FIELDS};value.update(schemaVersion=1,scope='selected_first_plugin_load_failure_then_one_native_retry',phase='QUALIFIED_SELECTED_STARTUP_RETRY_ONLY',qualification=True,failureCode='',elapsedMs=10000,tapCount=1,targetActivityCreates=1,pluginLoadCount=2);return value
+ value={key:True for key in m.BOOL_FIELDS};value.update(schemaVersion=1,scope='selected_first_plugin_load_failure_then_one_native_retry',phase='QUALIFIED_SELECTED_STARTUP_RETRY_ONLY',qualification=True,failureCode='',elapsedMs=10000,tapCount=1,targetActivityCreates=1,pluginLoadCount=2,retryDownCallElapsedMs=10,retryPressedObservationOutcome='pressed');return value
 
 def output(value=None):
  return '\n'.join(['INSTRUMENTATION_STATUS: class='+m.TEST_CLASS,'INSTRUMENTATION_STATUS: test='+m.METHOD,'INSTRUMENTATION_STATUS: numtests=1','INSTRUMENTATION_STATUS: owned_destroy_evidence='+json.dumps(value or proof()),'INSTRUMENTATION_STATUS_CODE: 0','INSTRUMENTATION_RESULT: stream=','OK (1 test)','INSTRUMENTATION_CODE: -1',''])
@@ -51,7 +51,7 @@ class Fake(m.System):
     if self.timeout:raise m.Refusal('HARD_SUBPROCESS_TIMEOUT')
     if self.instrument_output is not None:return self.instrument_exit,self.instrument_output,self.instrument_stderr
     if self.unqualified:
-     value=proof();value.update(qualification=False,phase='LAUNCH_ONCE',failureCode='LAUNCH_ONCE_FAILED');text=output(value)
+     value=proof();value.update(qualification=False,phase='LAUNCH_ONCE',failureCode='LAUNCH_ONCE_FAILED',retryDownPressed=False,retryOriginalButtonDetachedAfterUp=False,retryDownCallElapsedMs=None,retryPressedObservationOutcome='not-attempted');text=output(value)
     else:text=output()
    else:raise AssertionError('unexpected command')
   elif tool=='aapt':
@@ -174,7 +174,7 @@ for field in fields:
    assert error.module_evidence is None and 'PRIVATE_INPUT'not in str(error)
   else:raise AssertionError('unobserved input fact accepted')
 for pressed,detached in [(False,False),(True,False),(False,True),(True,True)]:
- value=proof();value.update(qualification=False,phase='ONE_VERIFIED_NATIVE_TAP',failureCode='ONE_VERIFIED_NATIVE_TAP_FAILED',pluginLoadCount=1,elapsedMs=1500,retryDownPressed=pressed,retryOriginalButtonDetachedAfterUp=detached)
+ value=proof();value.update(qualification=False,phase='ONE_VERIFIED_NATIVE_TAP',failureCode='ONE_VERIFIED_NATIVE_TAP_FAILED',pluginLoadCount=1,elapsedMs=1500,retryDownPressed=pressed,retryOriginalButtonDetachedAfterUp=detached,retryPressedObservationOutcome='pressed'if pressed else'unpressed')
  try:m.evidence(output(value))
  except m.Refusal as error:
   assert str(error)=='MODULE_UNQUALIFIED'
@@ -182,6 +182,91 @@ for pressed,detached in [(False,False),(True,False),(False,True),(True,True)]:
   assert error.module_evidence[fields[0]]is pressed and error.module_evidence[fields[1]]is detached
   assert error.module_evidence['phase']=='ONE_VERIFIED_NATIVE_TAP'
  else:raise AssertionError('partial input facts became startup qualification')
+`));
+
+test('diagnostic outcomes preserve pending versus negative and reject unknown or malformed facts before retention',()=>run(String.raw`
+outcomes={'not-attempted','budget-skipped','observation-timeout','state-mismatch','unpressed','pressed','observation-error'}
+assert m.PRESSED_OBSERVATION_OUTCOMES==outcomes
+for outcome in outcomes:
+ value=proof();value.update(qualification=False,phase='ONE_VERIFIED_NATIVE_TAP',failureCode='ONE_VERIFIED_NATIVE_TAP_FAILED',pluginLoadCount=1,retryDownPressed=outcome=='pressed',retryOriginalButtonDetachedAfterUp=False,retryPressedObservationOutcome=outcome,retryDownCallElapsedMs=None if outcome=='not-attempted'else 10)
+ try:m.evidence(output(value))
+ except m.Refusal as error:
+  assert str(error)=='MODULE_UNQUALIFIED'and error.module_evidence['qualification']is False
+  assert error.module_evidence['retryPressedObservationOutcome']==outcome
+  assert error.module_evidence['retryDownCallElapsedMs']==value['retryDownCallElapsedMs']
+  assert error.module_evidence['retryDownPressed']is(outcome=='pressed')
+ else:raise AssertionError('partial diagnostics became qualification')
+for field in ['retryDownCallElapsedMs','retryPressedObservationOutcome']:
+ value=proof();value.pop(field)
+ try:m.evidence(output(value))
+ except m.Refusal as error:assert str(error)=='EVIDENCE_SCHEMA'and error.module_evidence is None
+ else:raise AssertionError('missing diagnostic accepted')
+for bad in [True,False,-1,150001,1.5,'10',[],{},'https://private.invalid/?token=PRIVATE_DIAGNOSTIC']:
+ value=proof();value.update(qualification=False,retryDownCallElapsedMs=bad)
+ try:m.evidence(output(value))
+ except m.Refusal as error:assert str(error)=='EVIDENCE_TYPE'and error.module_evidence is None
+ else:raise AssertionError('malformed duration accepted')
+for bad in [None,True,1,[],{},'pending','PRESSED','https://private.invalid/?token=PRIVATE_DIAGNOSTIC']:
+ value=proof();value.update(qualification=False,retryPressedObservationOutcome=bad)
+ try:m.evidence(output(value))
+ except m.Refusal as error:
+  assert str(error)==('EVIDENCE_INPUT_OUTCOME'if type(bad)is str else'EVIDENCE_TYPE')
+  assert error.module_evidence is None and 'PRIVATE_DIAGNOSTIC'not in str(error)
+ else:raise AssertionError('unknown outcome accepted')
+for outcome in outcomes-{'pressed'}:
+ value=proof();value['retryPressedObservationOutcome']=outcome
+ rejects(lambda:m.evidence(output(value)),'MODULE_INPUT_FACTS')
+value=proof();value['retryDownCallElapsedMs']=None
+rejects(lambda:m.evidence(output(value)),'MODULE_INPUT_FACTS')
+for elapsed in [0,10]:
+ value=proof();value['retryDownCallElapsedMs']=elapsed
+ assert m.evidence(output(value))==value
+`));
+
+test('actual controller diagnostic guards reject individual semantic and privacy mutants',()=>run(String.raw`
+original=pathlib.Path(m.__file__).read_text()
+def expect_refusal(api,value,code,private=False):
+ try:api['evidence'](output(value))
+ except api['Refusal']as error:
+  assert str(error)==code
+  if private:assert error.module_evidence is None
+ else:raise AssertionError('diagnostic refusal lost')
+def unknown_outcome(api):
+ value=proof();value.update(qualification=False,retryPressedObservationOutcome='https://private.invalid/?token=PRIVATE_DIAGNOSTIC')
+ expect_refusal(api,value,'EVIDENCE_INPUT_OUTCOME',True)
+def malformed_duration(api):
+ value=proof();value.update(qualification=False,retryDownCallElapsedMs='PRIVATE_DIAGNOSTIC')
+ expect_refusal(api,value,'EVIDENCE_TYPE',True)
+def pending_cannot_qualify(api):
+ value=proof();value['retryPressedObservationOutcome']='not-attempted'
+ expect_refusal(api,value,'MODULE_INPUT_FACTS')
+def unknown_duration_cannot_qualify(api):
+ value=proof();value['retryDownCallElapsedMs']=None
+ expect_refusal(api,value,'MODULE_INPUT_FACTS')
+def pending_is_preserved(api):
+ value=proof();value.update(qualification=False,phase='ONE_VERIFIED_NATIVE_TAP',failureCode='ONE_VERIFIED_NATIVE_TAP_FAILED',retryDownPressed=False,retryPressedObservationOutcome='not-attempted',retryDownCallElapsedMs=None)
+ try:api['evidence'](output(value))
+ except api['Refusal']as error:
+  assert str(error)=='MODULE_UNQUALIFIED'
+  assert error.module_evidence['retryPressedObservationOutcome']=='not-attempted'
+  assert error.module_evidence['retryDownCallElapsedMs']is None
+ else:raise AssertionError('pending observation qualified')
+mutants=[
+ ('require(value["retryPressedObservationOutcome"] in PRESSED_OBSERVATION_OUTCOMES, "EVIDENCE_INPUT_OUTCOME")','require(True, "EVIDENCE_INPUT_OUTCOME")',unknown_outcome),
+ ('require(value["retryDownCallElapsedMs"] is None or\n            (type(value["retryDownCallElapsedMs"]) is int and 0 <= value["retryDownCallElapsedMs"] <= 150000), "EVIDENCE_TYPE")','require(True, "EVIDENCE_TYPE")',malformed_duration),
+ ('value["retryPressedObservationOutcome"] == "pressed"','True',pending_cannot_qualify),
+ ('type(value["retryDownCallElapsedMs"]) is int, "MODULE_INPUT_FACTS")','True, "MODULE_INPUT_FACTS")',unknown_duration_cannot_qualify),
+ ('safe = dict(value)','safe = dict(value)\n    safe["retryPressedObservationOutcome"] = "unpressed"',pending_is_preserved),
+ ('safe = dict(value)','safe = dict(value)\n    safe["retryDownCallElapsedMs"] = 0 if safe["retryDownCallElapsedMs"] is None else safe["retryDownCallElapsedMs"]',pending_is_preserved),
+]
+for before,after,probe in mutants:
+ probe(vars(m))
+ assert original.count(before)==1
+ api={'__name__':'owned_diagnostic_mutant','__file__':m.__file__}
+ exec(compile(original.replace(before,after,1),'<owned-diagnostic-mutant>','exec'),api)
+ try:probe(api)
+ except AssertionError:pass
+ else:raise AssertionError('individual diagnostic mutant survived')
 `));
 
 test('only one complete exact-schema final evidence plus genuine JUnit completion qualifies',()=>run(String.raw`

@@ -156,8 +156,10 @@ test('one native gesture uses clipped screen coordinates, a real bounded hold an
     '\n                instrumentation.sendPointerSync(up);\n',
     'heldMillis >= holdMillis && heldMillis <= TAP_HOLD_MAX_MS && heldMillis < longPressMillis',
     'SystemClock.uptimeMillis() + holdMillis <= observationDeadline',
-    'retryDownPressed = retryPressedOnMain(tap, observationDeadline);',
-    'currentBounds.equals(tap.screenBounds) && tap.button.isPressed()',
+    'retryPressedObservationOutcome = retryPressedOnMain(tap, observationDeadline);',
+    'retryDownPressed = retryPressedObservationOutcome == PressedObservationOutcome.PRESSED;',
+    'currentBounds == null || !currentBounds.equals(tap.screenBounds)',
+    ': tap.button.isPressed() ? PressedObservationOutcome.PRESSED : PressedObservationOutcome.UNPRESSED',
     'observed.await(remaining, TimeUnit.MILLISECONDS)',
     'if (SystemClock.uptimeMillis() <= deadlineUptime) result.set(value);',
     'RETRY_BUTTON_DETACH_DEADLINE_MS = 2_000L',
@@ -172,7 +174,7 @@ test('one native gesture uses clipped screen coordinates, a real bounded hold an
     (code.match(/MotionEvent\.ACTION_UP/g) ?? []).length === 1 &&
     (code.match(/\.sendPointerSync\(/g) ?? []).length === 2 &&
     (code.match(/sendExactlyOneTap\(instrumentation, tap\)/g) ?? []).length === 1 &&
-    /retryDownPressed = retryPressedOnMain\(tap, observationDeadline\);\s*\}\s*\} finally \{\s*long upTime = SystemClock\.uptimeMillis\(\);[\s\S]*?instrumentation\.sendPointerSync\(up\)/.test(code) &&
+    /retryDownPressed = retryPressedObservationOutcome == PressedObservationOutcome\.PRESSED;\s*\} else \{\s*retryPressedObservationOutcome = PressedObservationOutcome\.BUDGET_SKIPPED;\s*\}\s*\} finally \{\s*long upTime = SystemClock\.uptimeMillis\(\);[\s\S]*?instrumentation\.sendPointerSync\(up\)/.test(code) &&
     !/performClick|callOnClick|dispatchTouchEvent|UiAutomation|UiDevice|ACTION_MOVE|ACTION_CANCEL|setPressed\(/.test(code);
   assert.equal(nativeTapContract(source), true);
   for (const [from, to] of [
@@ -182,7 +184,7 @@ test('one native gesture uses clipped screen coordinates, a real bounded hold an
     ['SystemClock.uptimeMillis() + holdMillis <= observationDeadline', 'true'],
     ['MotionEvent.obtain(downTime, upTime, MotionEvent.ACTION_UP, x, y, 0)',
       'MotionEvent.obtain(downTime, downTime + 80L, MotionEvent.ACTION_UP, x, y, 0)'],
-    ['retryDownPressed = retryPressedOnMain(tap, observationDeadline);', 'retryDownPressed = true;'],
+    ['retryDownPressed = retryPressedObservationOutcome == PressedObservationOutcome.PRESSED;', 'retryDownPressed = true;'],
     ['ownedFocusedActivityOnMain(tap.activity) && !tap.button.isAttachedToWindow()', 'true'],
     ['require(retryDownPressed, "RETRY_DOWN_NOT_OBSERVED_PRESSED");', ''],
     ['require(retryOriginalButtonDetachedAfterUp, "RETRY_ORIGINAL_BUTTON_NOT_DETACHED_AFTER_UP");', ''],
@@ -202,6 +204,42 @@ test('one native gesture uses clipped screen coordinates, a real bounded hold an
   assert.equal(inputEvidenceContract(controller), true);
   for (const field of ['retryDownPressed', 'retryOriginalButtonDetachedAfterUp']) {
     assert.equal(inputEvidenceContract(controller.replace(`"${field}"`, '')), false);
+  }
+});
+
+test('input diagnostics distinguish pending and negative observations without changing gesture admission', async () => {
+  const source = await read('app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyRetryTest.java');
+  const diagnosticContract = (code) => [
+    'private Long retryDownCallElapsedMs;',
+    'retryPressedObservationOutcome = PressedObservationOutcome.NOT_ATTEMPTED;',
+    'long downCallStartedAt = SystemClock.uptimeMillis();',
+    'retryDownCallElapsedMs = Math.min(TOTAL_DEADLINE_MS,',
+    'Math.max(0L, SystemClock.uptimeMillis() - downCallStartedAt)',
+    'retryPressedObservationOutcome = PressedObservationOutcome.BUDGET_SKIPPED;',
+    'AtomicReference<PressedObservationOutcome> result = new AtomicReference<>();',
+    'return value == null ? PressedObservationOutcome.OBSERVATION_TIMEOUT : value;',
+    'currentBounds == null || !currentBounds.equals(tap.screenBounds)',
+    'tap.button.isPressed() ? PressedObservationOutcome.PRESSED : PressedObservationOutcome.UNPRESSED',
+    'result.set(PressedObservationOutcome.OBSERVATION_ERROR)',
+    'evidence.put("retryDownCallElapsedMs", retryDownCallElapsedMs == null ? JSONObject.NULL : retryDownCallElapsedMs);',
+    'evidence.put("retryPressedObservationOutcome", retryPressedObservationOutcome.wireValue);',
+  ].every((required) => code.includes(required)) &&
+    /try \{\s*instrumentation\.sendPointerSync\(down\);\s*\} finally \{[\s\S]*?retryDownCallElapsedMs = Math\.min/.test(code);
+  assert.equal(diagnosticContract(source), true);
+  const outcomes = source.match(/private enum PressedObservationOutcome \{([\s\S]*?)\n    \}/)?.[1] ?? '';
+  assert.deepEqual([...outcomes.matchAll(/\b[A-Z_]+\("([a-z-]+)"\)/g)].map((match) => match[1]), [
+    'not-attempted', 'budget-skipped', 'observation-timeout', 'state-mismatch', 'unpressed', 'pressed', 'observation-error',
+  ]);
+  for (const [from, to] of [
+    ['private Long retryDownCallElapsedMs;', 'private long retryDownCallElapsedMs;'],
+    ['return value == null ? PressedObservationOutcome.OBSERVATION_TIMEOUT : value;',
+      'return value == null ? PressedObservationOutcome.UNPRESSED : value;'],
+    ['retryPressedObservationOutcome = PressedObservationOutcome.BUDGET_SKIPPED;',
+      'retryPressedObservationOutcome = PressedObservationOutcome.UNPRESSED;'],
+    ['retryDownCallElapsedMs = Math.min(TOTAL_DEADLINE_MS,', 'retryDownCallElapsedMs = Math.max(TOTAL_DEADLINE_MS,'],
+  ]) {
+    assert.ok(source.includes(from));
+    assert.equal(diagnosticContract(source.replace(from, to)), false);
   }
 });
 
