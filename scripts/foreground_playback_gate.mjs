@@ -91,12 +91,12 @@ export function classifyBrowserLaunchFailure(error) {
     if (!(error instanceof Error) || typeof error.message !== 'string' || Buffer.byteLength(error.message, 'utf8') > BROWSER_LAUNCH_MESSAGE_LIMIT) return fallback;
     const text = error.message;
     const facts = [];
-    if (/^(?:\s*\[pid=\d+\]\[err\]\s*)?Failed to move to new namespace:[^\r\n]{0,2048}(?:Operation not permitted|EPERM|errno\s*=\s*1\b)/mi.test(text)) facts.push('namespace-denied');
-    if (/^[^\r\n]{0,256}\bNo usable sandbox!/mi.test(text)) facts.push('sandbox-unavailable');
+    if (/^(?:[ \t]*-[ \t]+)?[ \t]*(?:\[pid=\d+\]\[err\][ \t]*)?Failed to move to new namespace:[^\r\n]{0,2048}(?:Operation not permitted|EPERM|errno[ \t]*=[ \t]*1\b)/mi.test(text)) facts.push('namespace-denied');
+    if (/^[^\r\n]{0,256}\bNo usable sandbox!/mi.test(text) || /^[ \t]*(?:browserType\.launch:[ \t]*)?(?:[║|][ \t]*)?Chromium sandboxing failed!(?:[ \t]*[║|])?[ \t]*$/m.test(text)) facts.push('sandbox-unavailable');
     if (/^browserType\.launch: Executable doesn't exist at\b/m.test(text)) facts.push('executable-missing');
     if (error.code === 'ENOENT') facts.push('launch-enoent');
     if (/Host system is missing dependencies to run browsers|error while loading shared libraries:/i.test(text)) facts.push('dependency-missing');
-    const exits = [...text.matchAll(/^\s*(?:\[pid=\d+\]\s*)?<process did exit: exitCode=(\d{1,3}|null), signal=(null|SIG[A-Z0-9]+)>/gm)];
+    const exits = [...text.matchAll(/^[ \t]*(?:-[ \t]+)?(?:\[pid=\d+\][ \t]*)?<process did exit: exitCode=(\d{1,3}|null), signal=(null|SIG[A-Z0-9]+)>/gm)];
     let exitCode = null;
     if (exits.length) {
       facts.push('process-exited');

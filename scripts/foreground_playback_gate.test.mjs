@@ -396,3 +396,40 @@ test('individual browser diagnostic semantic mutants are rejected by actual clas
     assert.equal(rejected, true, 'each browser diagnostic mutation must be rejected');
   }
 });
+
+test('pinned Playwright sandbox rewrite and bullet call logs yield only bounded categorical facts', () => {
+  const text = `browserType.launch: Target page, context or browser has been closed\n` +
+    `╔════════════════════════════════╗\n║ Chromium sandboxing failed!    ║\n╚════════════════════════════════╝\n` +
+    `Call log:\n  - [pid=123][err] Failed to move to new namespace: errno = Operation not permitted\n` +
+    `  - [pid=123] <process did exit: exitCode=1, signal=null>\n${privateDiagnostic}`;
+  assert.deepEqual(classifyBrowserLaunchFailure(new Error(text)), {
+    schemaVersion: 1, facts: ['namespace-denied', 'sandbox-unavailable', 'process-exited', 'target-closed'], exitCode: 1,
+  });
+  const crash = new Error('Call log:\n  - [pid=9] <process did exit: exitCode=null, signal=SIGSEGV>');
+  assert.deepEqual(classifyBrowserLaunchFailure(crash), { schemaVersion: 1, facts: ['process-exited', 'process-crashed'], exitCode: null });
+  for (const text of ['private text Chromium sandboxing failed!', 'quoted - [pid=123][err] Failed to move to new namespace: EPERM',
+    'quoted - [pid=123] <process did exit: exitCode=1, signal=null>']) {
+    assert.deepEqual(classifyBrowserLaunchFailure(new Error(text)), { schemaVersion: 1, facts: ['unclassified'], exitCode: null });
+  }
+  assert.ok(!JSON.stringify(classifyBrowserLaunchFailure(new Error(text))).includes('PRIVATE_DIAGNOSTIC'));
+});
+
+test('pinned rewrite and bullet parser semantic mutants fail actual classifier probes', async () => {
+  const original = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  const mutations = [
+    ['Chromium sandboxing failed!', 'Chromium sandboxing changed!',
+      (api) => assert.ok(api.classifyBrowserLaunchFailure(new Error('║ Chromium sandboxing failed! ║')).facts.includes('sandbox-unavailable'))],
+    [String.raw`(?:[ \t]*-[ \t]+)?[ \t]*(?:\[pid=\d+\]\[err\][ \t]*)?`, String.raw`[ \t]*(?:\[pid=\d+\]\[err\][ \t]*)?`,
+      (api) => assert.ok(api.classifyBrowserLaunchFailure(new Error('  - [pid=2][err] Failed to move to new namespace: EPERM')).facts.includes('namespace-denied'))],
+    [String.raw`(?:-[ \t]+)?(?:\[pid=\d+\][ \t]*)?`, String.raw`(?:\[pid=\d+\][ \t]*)?`,
+      (api) => assert.equal(api.classifyBrowserLaunchFailure(new Error('  - [pid=2] <process did exit: exitCode=1, signal=null>')).exitCode, 1)],
+  ];
+  for (const [from, to, probe] of mutations) {
+    probe({ classifyBrowserLaunchFailure });
+    assert.equal(original.split(from).length, 2);
+    const mutant = await import(`data:text/javascript;base64,${Buffer.from(original.replace(from, to)).toString('base64')}`);
+    let rejected = false;
+    try { probe(mutant); } catch (error) { assert.equal(error.code, 'ERR_ASSERTION'); rejected = true; }
+    assert.equal(rejected, true, 'each pinned format mutation must be rejected');
+  }
+});
