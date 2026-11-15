@@ -19266,7 +19266,7 @@ describe("automatic starvation95 adaptation", () => {
   });
 
   it("[manual-snapshot] preserves the stricter automatic owned-state fence", () => {
-    const source = readFileSync(new URL("./VideoPlayer.tsx", import.meta.url), "utf8");
+    const source = readFileSync("src/components/VideoPlayer.tsx", "utf8");
     expect(source).toContain('purpose === "automatic-starvation" && (automaticHandoffState == null || state == null)');
   });
 
