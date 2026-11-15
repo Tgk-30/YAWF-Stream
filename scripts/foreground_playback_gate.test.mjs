@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { classifyFixtureBootstrapLog, classifyResponse, collectFixtureDiagnostic, evaluateProgress, sanitizeFixtureDiagnostic, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
+import { classifyBrowserLaunchFailure, classifyFixtureBootstrapLog, classifyResponse, collectFixtureDiagnostic, evaluateProgress, sanitizeBrowserLaunchDiagnostic, sanitizeFixtureDiagnostic, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
 import { buildFixtureMediaPlan } from './foreground_fixture_media_plan.mjs';
 const baseline = { time: 10, frames: 300, paused: false, seeking: false, rate: 1, hidden: false, error: null, source: 'one', wall: 1000, presented: { frames: 300 } };
 test('verified Node xz archive has its extraction prerequisite in the image bootstrap', () => {
@@ -331,4 +331,68 @@ test('host receipt reader requires exact regular non-symlink files and matching 
     symlinkSync(join(dir, 'summary.json'), join(dir, 'admission.json'));
     assert.equal(validateEvidenceDirectory(dir, 'admission'), false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test('actual browser-launch classifier retains only finite safe facts and bounded exit codes', () => {
+  const failure = (text) => new Error(`${text}\n${privateDiagnostic}`);
+  const expected = (facts, exitCode = null) => ({ schemaVersion: 1, facts, exitCode });
+  for (const [error, result] of [
+    [failure('[pid=123][err] Failed to move to new namespace: failed: errno = Operation not permitted'), expected(['namespace-denied'])],
+    [failure('[pid=123][err] No usable sandbox!'), expected(['sandbox-unavailable'])],
+    [failure("browserType.launch: Executable doesn't exist at /sensitive/path"), expected(['executable-missing'])],
+    [Object.assign(failure('spawn error'), { code: 'ENOENT' }), expected(['launch-enoent'])],
+    [failure('Host system is missing dependencies to run browsers'), expected(['dependency-missing'])],
+    [failure('[pid=123][err] error while loading shared libraries: /sensitive/library'), expected(['dependency-missing'])],
+    [failure('[pid=123] <process did exit: exitCode=1, signal=null>'), expected(['process-exited'], 1)],
+    [failure('[pid=123] <process did exit: exitCode=null, signal=SIGSEGV>'), expected(['process-exited', 'process-crashed'])],
+    [failure('browserType.launch: Target page, context or browser has been closed'), expected(['target-closed'])],
+    [Object.assign(failure('deadline'), { name: 'TimeoutError' }), expected(['timeout'])],
+  ]) {
+    const actual = classifyBrowserLaunchFailure(error);
+    assert.deepEqual(actual, result);
+    assert.ok(!JSON.stringify(actual).includes('PRIVATE_DIAGNOSTIC'));
+    assert.ok(!JSON.stringify(actual).includes('/sensitive/'));
+  }
+  for (const error of [null, {}, privateDiagnostic, failure('unrecognized'), failure('quoted Failed to move to new namespace: Operation not permitted'),
+    failure(`browserType.launch: Executable doesn't exist at ${'x'.repeat(64 * 1024)}`)]) {
+    assert.deepEqual(classifyBrowserLaunchFailure(error), expected(['unclassified']));
+  }
+  assert.equal(classifyBrowserLaunchFailure(failure('[pid=1] <process did exit: exitCode=256, signal=null>')).exitCode, null);
+  assert.equal(classifyBrowserLaunchFailure(failure('[pid=1] <process did exit: exitCode=1, signal=null>\n[pid=2] <process did exit: exitCode=2, signal=null>')).exitCode, null);
+});
+
+test('browser diagnostic validator rejects unknown, duplicate, private and invalid exit values', () => {
+  const safe = { schemaVersion: 1, facts: ['process-exited'], exitCode: 1 };
+  assert.deepEqual(sanitizeBrowserLaunchDiagnostic(safe), safe);
+  for (const value of [null, [], {}, { ...safe, raw: privateDiagnostic }, { ...safe, schemaVersion: 2 },
+    { ...safe, facts: [privateDiagnostic] }, { ...safe, facts: [] }, { ...safe, facts: ['process-exited', 'process-exited'] },
+    { ...safe, facts: ['unclassified', 'process-exited'] }, { ...safe, facts: ['timeout'] },
+    ...[undefined, true, -1, 256, 1.5, NaN, Infinity, '1', privateDiagnostic].map((exitCode) => ({ ...safe, exitCode })),
+  ]) assert.equal(sanitizeBrowserLaunchDiagnostic(value), null);
+});
+
+test('browser-launch diagnostics are attached only to actual sandboxed launch failures', () => {
+  const source = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  assert.match(source, /try \{\s*browser = await chromium\.launch\(\{ headless: true, chromiumSandbox: true \}\);\s*\} catch \(error\) \{\s*evidence\.browserLaunchDiagnostic = classifyBrowserLaunchFailure\(error\);\s*throw error;/);
+});
+
+test('individual browser diagnostic semantic mutants are rejected by actual classifier and validator probes', async () => {
+  const original = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  const mutations = [
+    ["facts.push('namespace-denied')", "facts.push('unclassified')", (api) => assert.deepEqual(api.classifyBrowserLaunchFailure(new Error('Failed to move to new namespace: Operation not permitted')).facts, ['namespace-denied'])],
+    ["facts.push('dependency-missing')", "facts.push('unclassified')", (api) => assert.deepEqual(api.classifyBrowserLaunchFailure(new Error('Host system is missing dependencies to run browsers')).facts, ['dependency-missing'])],
+    ["Buffer.byteLength(error.message, 'utf8') > BROWSER_LAUNCH_MESSAGE_LIMIT", 'false', (api) => assert.deepEqual(api.classifyBrowserLaunchFailure(new Error(`Host system is missing dependencies to run browsers ${'x'.repeat(64 * 1024)}`)).facts, ['unclassified'])],
+    ["Object.keys(value).sort().join(',') !== 'exitCode,facts,schemaVersion'", 'false', (api) => assert.equal(api.sanitizeBrowserLaunchDiagnostic({ schemaVersion: 1, facts: ['timeout'], exitCode: null, raw: privateDiagnostic }), null)],
+    ["!BROWSER_LAUNCH_FACTS.includes(fact)", 'false', (api) => assert.equal(api.sanitizeBrowserLaunchDiagnostic({ schemaVersion: 1, facts: [privateDiagnostic], exitCode: null }), null)],
+    ["value.exitCode > 255", 'false', (api) => assert.equal(api.sanitizeBrowserLaunchDiagnostic({ schemaVersion: 1, facts: ['process-exited'], exitCode: 256 }), null)],
+  ];
+  for (const [from, to, probe] of mutations) {
+    probe({ classifyBrowserLaunchFailure, sanitizeBrowserLaunchDiagnostic });
+    assert.equal(original.split(from).length, 2);
+    const mutant = await import(`data:text/javascript;base64,${Buffer.from(original.replace(from, to)).toString('base64')}`);
+    let rejected = false;
+    try { probe(mutant); } catch (error) { assert.equal(error.code, 'ERR_ASSERTION'); rejected = true; }
+    assert.equal(rejected, true, 'each browser diagnostic mutation must be rejected');
+  }
 });

@@ -68,6 +68,49 @@ export function classifyResponse(path) {
   return /^\/api\/stream\/[^/]+$/.test(path) ? 'direct-proxy' : null;
 }
 
+// Browser diagnostics are categorical only. Never retain the exception or browser logs.
+const BROWSER_LAUNCH_MESSAGE_LIMIT = 64 * 1024;
+const BROWSER_LAUNCH_FACTS = [
+  'namespace-denied', 'sandbox-unavailable', 'executable-missing', 'launch-enoent', 'dependency-missing',
+  'process-exited', 'process-crashed', 'target-closed', 'timeout', 'unclassified',
+];
+
+export function sanitizeBrowserLaunchDiagnostic(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).sort().join(',') !== 'exitCode,facts,schemaVersion' || value.schemaVersion !== 1 ||
+      !Array.isArray(value.facts) || value.facts.length === 0 || value.facts.length > BROWSER_LAUNCH_FACTS.length ||
+      value.facts.some((fact, index) => !BROWSER_LAUNCH_FACTS.includes(fact) || value.facts.indexOf(fact) !== index) ||
+      (value.facts.includes('unclassified') && value.facts.length !== 1) ||
+      (value.exitCode !== null && (!value.facts.includes('process-exited') || !Number.isSafeInteger(value.exitCode) || value.exitCode < 0 || value.exitCode > 255))) return null;
+  return { schemaVersion: 1, facts: [...value.facts], exitCode: value.exitCode };
+}
+
+export function classifyBrowserLaunchFailure(error) {
+  const fallback = { schemaVersion: 1, facts: ['unclassified'], exitCode: null };
+  try {
+    if (!(error instanceof Error) || typeof error.message !== 'string' || Buffer.byteLength(error.message, 'utf8') > BROWSER_LAUNCH_MESSAGE_LIMIT) return fallback;
+    const text = error.message;
+    const facts = [];
+    if (/^(?:\s*\[pid=\d+\]\[err\]\s*)?Failed to move to new namespace:[^\r\n]{0,2048}(?:Operation not permitted|EPERM|errno\s*=\s*1\b)/mi.test(text)) facts.push('namespace-denied');
+    if (/^[^\r\n]{0,256}\bNo usable sandbox!/mi.test(text)) facts.push('sandbox-unavailable');
+    if (/^browserType\.launch: Executable doesn't exist at\b/m.test(text)) facts.push('executable-missing');
+    if (error.code === 'ENOENT') facts.push('launch-enoent');
+    if (/Host system is missing dependencies to run browsers|error while loading shared libraries:/i.test(text)) facts.push('dependency-missing');
+    const exits = [...text.matchAll(/^\s*(?:\[pid=\d+\]\s*)?<process did exit: exitCode=(\d{1,3}|null), signal=(null|SIG[A-Z0-9]+)>/gm)];
+    let exitCode = null;
+    if (exits.length) {
+      facts.push('process-exited');
+      const codes = exits.map((match) => match[1] === 'null' ? null : Number(match[1]));
+      if (codes.every((code) => Number.isSafeInteger(code) && code >= 0 && code <= 255 && code === codes[0])) exitCode = codes[0];
+      if (exits.some((match) => ['SIGSEGV', 'SIGABRT', 'SIGILL', 'SIGTRAP', 'SIGBUS'].includes(match[2]))) facts.push('process-crashed');
+    }
+    if (/^browserType\.launch: Target page, context or browser has been closed/m.test(text)) facts.push('target-closed');
+    if (error.name === 'TimeoutError') facts.push('timeout');
+    if (facts.length === 0) facts.push('unclassified');
+    return sanitizeBrowserLaunchDiagnostic({ schemaVersion: 1, facts, exitCode }) ?? fallback;
+  } catch { return fallback; }
+}
+
 const FIXTURE_STATUS_LIMIT = 2048;
 const FIXTURE_PRIVATE_LOG_LIMIT = 64 * 1024;
 const FIXTURE_STAGES = new Set([
@@ -219,7 +262,12 @@ async function runCase(chromium, name, output) {
     evidence.webIndexSha256 = smoke.webIndexSha256;
     assert(Number(evidence.mediaProbe.format.duration) >= 599 && smoke.mediaBytes < 1_073_741_824, 'Fixture media duration or size invalid');
     evidence.phase = 'browser-launch';
-    browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+    try {
+      browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+    } catch (error) {
+      evidence.browserLaunchDiagnostic = classifyBrowserLaunchFailure(error);
+      throw error;
+    }
     evidence.browserVersion = browser.version();
     const context = await browser.newContext({ serviceWorkers: 'block' });
     await context.route('**/*', async (route) => {
