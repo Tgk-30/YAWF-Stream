@@ -596,7 +596,8 @@ async function runCase(chromium, name, output) {
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     evidence.phase = 'tour';
     const skipTour = page.getByRole('button', { name: 'Skip the tour' });
-    if (await skipTour.isVisible()) await skipTour.click();
+    // Every isolated fixture is a fresh first-run profile; wait for its real tour.
+    await skipTour.click({ timeout: 60_000 });
     evidence.phase = 'watchlist';
     await page.getByRole('button', { name: 'Watchlist', exact: true }).first().click({ timeout: 60_000 });
     await page.getByText('Synthetic Fixture Movie', { exact: true }).first().click();

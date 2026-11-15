@@ -778,3 +778,18 @@ test('failure receipt and image descriptors use nonblocking no-follow opens', ()
   assert.match(body, expected);
   assert.doesNotMatch(body.replace(' | constants.O_NONBLOCK', ''), expected);
 });
+
+
+test('fresh fixture waits for its real tour dismissal before Watchlist input', () => {
+  const source = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  const from = source.indexOf("    evidence.phase = 'tour';");
+  const to = source.indexOf("    evidence.phase = 'watchlist';", from);
+  assert.ok(from >= 0 && to > from);
+  const validate = (text) => {
+    assert.match(text, /await skipTour\.click\(\{ timeout: 60_000 \}\);/);
+    assert.doesNotMatch(text, /if \(await skipTour\.isVisible\(\)\)/);
+  };
+  const tour = source.slice(from, to);
+  validate(tour);
+  assert.throws(() => validate(tour.replace('await skipTour.click({ timeout: 60_000 });', 'if (await skipTour.isVisible()) await skipTour.click();')), { code: 'ERR_ASSERTION' });
+});
