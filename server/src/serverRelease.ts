@@ -1,8 +1,8 @@
 const RELEASES_API = "https://api.github.com/repos/Tgk-30/YAWF-Stream/releases";
 const RELEASES_URL = "https://github.com/Tgk-30/YAWF-Stream/releases";
-export const SERVER_RELEASES_PER_PAGE = 20;
+export const SERVER_RELEASES_PER_PAGE = 100;
 export const SERVER_RELEASE_PAGE_LIMIT = 10;
-export const SERVER_RELEASE_PAGE_MAX_BYTES = 1_000_000;
+export const SERVER_RELEASE_PAGE_MAX_BYTES = 4_000_000;
 export const SERVER_RELEASE_DISCOVERY_MAX_BYTES = 8_000_000;
 export const SERVER_RELEASE_DISCOVERY_TIMEOUT_MS = 10_000;
 const TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-web)?$/;
