@@ -144,13 +144,18 @@ def instrumentation_signals(stdout, stderr):
     """
     text = stdout.decode("utf-8", errors="replace") + "\n" + stderr.decode("utf-8", errors="replace")
     exceptions = ("NoClassDefFoundError", "ClassNotFoundException", "UnsatisfiedLinkError",
-                  "VerifyError", "SecurityException", "IllegalStateException", "RuntimeException")
+                  "VerifyError", "SecurityException", "IllegalStateException", "RuntimeException",
+                  "NoSuchMethodError", "NoSuchFieldError", "AbstractMethodError", "IncompatibleClassChangeError",
+                  "ExceptionInInitializerError", "IllegalAccessError", "ClassCastException", "AssertionError", "OutOfMemoryError")
     facts = {name: re.search(r"(?<![A-Za-z0-9_$])" + name + r"(?![A-Za-z0-9_$])", text) is not None
              for name in exceptions}
     facts.update(
         instrumentationRunFailed=any(mark in text for mark in
                                      ("INSTRUMENTATION_FAILED", "INSTRUMENTATION_ABORTED", "Instrumentation run failed")),
         processCrashed=any(mark in text for mark in ("Process crashed.", "Process crashed", "process crashed")),
+        FatalSignal=re.search(r"(?<![A-Za-z0-9_$])Fatal signal(?![A-Za-z0-9_$])", text) is not None,
+        SIGABRT=re.search(r"(?<![A-Za-z0-9_$])SIGABRT(?![A-Za-z0-9_$])", text) is not None,
+        SIGSEGV=re.search(r"(?<![A-Za-z0-9_$])SIGSEGV(?![A-Za-z0-9_$])", text) is not None,
         junitStarted=re.search(r"(?m)^INSTRUMENTATION_STATUS: class=" + re.escape(TEST_CLASS) + r"\r?$", text) is not None and
                      re.search(r"(?m)^INSTRUMENTATION_STATUS_CODE: 1\r?$", text) is not None,
         ownedTestClassMentioned=re.search(r"(?<![A-Za-z0-9_.$])" + re.escape(TEST_CLASS) + r"(?![A-Za-z0-9_$])", text) is not None,

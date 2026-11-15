@@ -213,6 +213,7 @@ test('fixed instrumentation signals survive missing evidence without retaining a
 private='https://private.invalid/path?token=private-value /private/owner/file PRIVATE_MESSAGE'
 expected={'NoClassDefFoundError','ClassNotFoundException','UnsatisfiedLinkError','VerifyError','SecurityException','IllegalStateException','RuntimeException','instrumentationRunFailed','processCrashed','junitStarted','ownedTestClassMentioned','ownedRunnerClassMentioned'}
 expected|={'missingAndroidxTest','missingAndroidxAppcompat','missingAndroidxCore','missingTauri','missingKotlin','missingOwnedTest','missingOwnedTarget','missingOther','androidJUnitRunnerMentioned','instrumentationRegistryMentioned','androidJUnit4ClassRunnerMentioned','appCompatActivityMentioned','coreComponentFactoryMentioned','pluginMentioned','pluginManagerMentioned','pluginHandleMentioned'}
+expected|={'NoSuchMethodError','NoSuchFieldError','AbstractMethodError','IncompatibleClassChangeError','ExceptionInInitializerError','IllegalAccessError','ClassCastException','AssertionError','OutOfMemoryError','FatalSignal','SIGABRT','SIGSEGV'}
 text=('java.lang.NoClassDefFoundError: '+private+'\n'+m.TEST_CLASS+'\n'+m.RUNNER+'\nInstrumentation run failed\nProcess crashed.\nINSTRUMENTATION_STATUS: class='+m.TEST_CLASS+'\nINSTRUMENTATION_STATUS_CODE: 1\n').encode()
 facts=m.instrumentation_signals(text,b'java.lang.SecurityException: '+private.encode())
 assert set(facts)==expected and all(type(x)is bool for x in facts.values())
@@ -263,5 +264,30 @@ try:
  with mock.patch.object(m,'System',return_value=f.fake),mock.patch.object(sys,'argv',argv),mock.patch('sys.stdout',new_callable=io.StringIO):assert m.main()==1
  saved=json.loads((pathlib.Path(f.args.evidence_dir)/'OWNED_STARTUP.json').read_text());assert saved['code']=='EVIDENCE_COUNT'and saved['qualification']is False
  assert saved['instrumentationSignals']['missingAndroidxTest']and saved['instrumentationSignals']['missingOther'];assert 'CustomerName'not in json.dumps(saved)and 'HiddenRunner'not in json.dumps(saved)
+finally:f.close()
+`));
+
+
+test('fixed linkage and native-crash markers retain booleans only on a pre-JUnit refusal',()=>run(String.raw`
+extra={'NoSuchMethodError','NoSuchFieldError','AbstractMethodError','IncompatibleClassChangeError','ExceptionInInitializerError','IllegalAccessError','ClassCastException','AssertionError','OutOfMemoryError','FatalSignal','SIGABRT','SIGSEGV'}
+private='https://private.invalid/path?token=secret-value /private/person/file PRIVATE_MESSAGE'
+for name in extra-{'FatalSignal','SIGABRT','SIGSEGV'}:
+ facts=m.instrumentation_signals(('java.lang.'+name+': '+private).encode(),b'')
+ assert facts[name]is True and all(type(v)is bool for v in facts.values())
+ assert not any(facts[k]for k in extra-{name});assert private not in json.dumps(facts)
+ assert m.instrumentation_signals(('Not'+name+'Suffix').encode(),b'')[name]is False
+native=m.instrumentation_signals(('Fatal signal 6 (SIGABRT), '+private).encode(),b'SIGSEGV')
+assert native['FatalSignal']and native['SIGABRT']and native['SIGSEGV'];assert private not in json.dumps(native)
+for token in ['NotSIGABRTSuffix','NotSIGSEGVSuffix','NotFatal signalSuffix']:
+ facts=m.instrumentation_signals(token.encode(),b'');assert not any(facts[k]for k in extra)
+f=Fixture()
+try:
+ f.fake.instrument_output=('java.lang.NoSuchMethodError: '+private).encode();f.fake.instrument_stderr=('Fatal signal 6 (SIGABRT), '+private).encode()
+ argv=['controller']
+ for key,value in vars(f.args).items():argv+=['--'+key.replace('_','-'),str(value)]
+ with mock.patch.object(m,'System',return_value=f.fake),mock.patch.object(sys,'argv',argv),mock.patch('sys.stdout',new_callable=io.StringIO)as captured:assert m.main()==1
+ saved=json.loads((pathlib.Path(f.args.evidence_dir)/'OWNED_STARTUP.json').read_text());assert saved['qualification']is False and saved['code']=='EVIDENCE_COUNT'
+ signals=saved['instrumentationSignals'];assert signals['NoSuchMethodError']and signals['FatalSignal']and signals['SIGABRT'];assert not signals['junitStarted']
+ serialized=json.dumps(saved)+captured.getvalue();assert all(value not in serialized for value in ['private.invalid','secret-value','/private/person','PRIVATE_MESSAGE','java.lang.NoSuchMethodError:'])
 finally:f.close()
 `));
