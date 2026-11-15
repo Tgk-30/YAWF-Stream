@@ -26,7 +26,7 @@ CLASSES = ("app.tauri.plugin.PluginManager", "app.tauri.plugin.PluginHandle")
 CRATE = "f316751027fc2644221d1a448564d519efb07067fda584879d9cda966391d212"
 MODULE_FILES = {
     "README.md": "d6b45d0e950c182c471367699ffc18dfe5b26ae2a202615426f282531fbf1833",
-    "app/build.gradle.kts": "3141f2b39007bbbcce27ea7cc212fc46c419e730b6b310bc110de6564d054113",
+    "app/build.gradle.kts": "28e537b94963d3e3f0c0c38098f3383736649a77bc5fe2e68ea2dca3423e6e36",
     "app/src/androidTest/AndroidManifest.xml": "bb1c618c5a517eba63d8c2355b1470a355b2baca85e393695b2e05dcc96001d3",
     "app/src/androidTest/java/com/yawf/ownedstartup/FaultOncePlugin.java": "14c3fb04da8343d19b4392b8b3c6eb31cf4cdfcea33776ba10ce36cdf18f1369",
     "app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyInstrumentationRunner.java": "746ad475010a9fc0ec067325c6c43ba4f339d626f6f50e5cb50d25c652ac372c",

@@ -1,3 +1,5 @@
+import java.security.MessageDigest
+
 plugins {
     id("com.android.application")
 }
@@ -22,7 +24,7 @@ val verifyTauriApiInput = tasks.register("verifyTauriAndroidApiInput") {
         require(apiClassesJar.isFile && !apiClassesJar.isDirectory) { "TAURI_ANDROID_API_CLASSES_JAR_NOT_FILE" }
         require(apiSourceReceipt.isFile) { "TAURI_ANDROID_API_SOURCE_RECEIPT_NOT_FILE" }
         require(apiClassesJarSha256.matches(Regex("[a-f0-9]{64}"))) { "TAURI_ANDROID_API_SHA256_INVALID" }
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        val digest = MessageDigest.getInstance("SHA-256")
             .digest(apiClassesJar.readBytes()).joinToString("") { "%02x".format(it) }
         require(digest == apiClassesJarSha256) { "TAURI_ANDROID_API_CLASSES_JAR_HASH_MISMATCH" }
 

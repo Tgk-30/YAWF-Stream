@@ -8,6 +8,11 @@ const read = (path) => readFile(new URL(path, root), 'utf8');
 test('API linkage is checksum-bound compile-only JAR, never packaged AAR or implementation', async () => {
   const gradle = await read('app/build.gradle.kts');
   const readme = await read('README.md');
+  const digestImportContract = (source) => /^import java\.security\.MessageDigest$/m.test(source) &&
+    /val digest = MessageDigest\.getInstance\("SHA-256"\)/.test(source) &&
+    !/val digest = java\.security\./.test(source);
+  assert.equal(digestImportContract(gradle), true);
+  assert.equal(digestImportContract(gradle.replace('MessageDigest.getInstance', 'java.security.MessageDigest.getInstance')), false);
   assert.match(gradle, /TAURI_ANDROID_API_CLASSES_JAR_REQUIRED/);
   assert.match(gradle, /TAURI_ANDROID_API_CLASSES_JAR_SHA256_REQUIRED/);
   assert.match(gradle, /TAURI_ANDROID_API_SOURCE_RECEIPT_REQUIRED/);

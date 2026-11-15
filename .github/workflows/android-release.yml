@@ -419,9 +419,11 @@ jobs:
           YAWF_GRADLE_API_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'emulator' 'system-images;android-36;google_apis;x86_64'
-          archive="$(node scripts/fetch_android_gradle.mjs)"
+          token="$YAWF_GRADLE_API_TOKEN"
           unset YAWF_GRADLE_API_TOKEN
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'emulator' 'system-images;android-36;google_apis;x86_64'
+          archive="$(YAWF_GRADLE_API_TOKEN="$token" node scripts/fetch_android_gradle.mjs)"
+          unset token
           unzip -q "$archive" -d "$RUNNER_TEMP/owned-gradle"
           echo "$RUNNER_TEMP/owned-gradle/gradle-9.6.1/bin" >> "$GITHUB_PATH"
           echo 'GRADLE_USER_HOME='"$RUNNER_TEMP/owned-gradle-home" >> "$GITHUB_ENV"
@@ -435,7 +437,7 @@ jobs:
           set -euo pipefail
           (cd "$RUNNER_TEMP/owned-startup-input/phone" && sha256sum --strict -c SHA256SUMS)
           (cd "$RUNNER_TEMP/owned-startup-input/api" && sha256sum --strict -c SHA256SUMS)
-          python3 scripts/prepare_android_owned_fault_alias.py \
+          python3 -B scripts/prepare_android_owned_fault_alias.py \
             --inputs "$RUNNER_TEMP/owned-startup-input" \
             --source "$CANDIDATE_SHA" --run "$CANDIDATE_RUN" \
             --module scripts/android-owned-destroy-instrumentation \
