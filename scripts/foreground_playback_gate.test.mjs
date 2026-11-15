@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { classifyResponse, evaluateProgress, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
+import { classifyFixtureBootstrapLog, classifyResponse, collectFixtureDiagnostic, evaluateProgress, sanitizeFixtureDiagnostic, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
 const baseline = { time: 10, frames: 300, paused: false, seeking: false, rate: 1, hidden: false, error: null, source: 'one', wall: 1000, presented: { frames: 300 } };
 test('verified Node xz archive has its extraction prerequisite in the image bootstrap', () => {
   const dockerfile = readFileSync(new URL('./foreground-playback/Dockerfile', import.meta.url), 'utf8');
@@ -31,6 +31,152 @@ test('old short fixture remains default while long and transcode require explici
   assert.match(s, /fixtureCLI\.foregroundLong \? 600 : 36/);
   assert.match(s, /enableTranscode: fixtureCLI\.foregroundLong/);
   assert.match(s, /length: 12/);
+});
+
+const fixtureStatus = { schemaVersion: 1, stage: 'mp4-generation', status: 'refused', failureCode: 'ffmpeg-exit', childExitCode: 1 };
+const privateDiagnostic = 'https://private.invalid/session?providerKey=PRIVATE_DIAGNOSTIC cookie=PRIVATE_DIAGNOSTIC';
+test('long-mode diagnostics use fixed stages and owned guard codes without changing short-mode or cleanup', () => {
+  const fixture = readFileSync(new URL('./android_external_player_server_fixture.mts', import.meta.url), 'utf8');
+  const driver = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  const writer = fixture.slice(fixture.indexOf('function writeForegroundDiagnostic('), fixture.indexOf('function markForegroundStage('));
+  assert.match(writer, /if \(!fixtureCLI\.foregroundLong\) return;/);
+  assert.match(writer, /JSON\.stringify\(\{ schemaVersion: 1, stage: foregroundStage, status, failureCode, childExitCode \}\)/);
+  assert.match(writer, /renameSync\(`\$\{path\}\.tmp`, path\)/);
+  assert.doesNotMatch(writer, /message|stack|stdout|stderr|headers|cookies/);
+  assert.match(fixture, /if \(fixtureCLI\.foregroundLong\) \{[\s\S]*?process\.on\("uncaughtExceptionMonitor", recordForegroundRefusal\)/);
+  assert.doesNotMatch(fixture, /process\.on\("uncaughtException",/);
+  for (const stage of new Set([...fixture.matchAll(/markForegroundStage\("([a-z-]+)"\)/g)].map((match) => match[1]))) {
+    assert.ok(sanitizeFixtureDiagnostic({ ...fixtureStatus, stage, status: stage === 'ready' ? 'ready' : 'running', failureCode: null, childExitCode: null }), stage);
+  }
+  const failureType = fixture.match(/type ForegroundFixtureFailure =([\s\S]*?);/)?.[1];
+  assert.ok(failureType);
+  for (const [, failureCode] of failureType.matchAll(/"([a-z-]+)"/g)) {
+    assert.ok(sanitizeFixtureDiagnostic({ ...fixtureStatus, failureCode, childExitCode: null }), failureCode);
+  }
+  for (const stage of ['mp4-generation', 'static-hls-generation', 'media-probe', 'input-check', 'server-build', 'seed-owner', 'smoke-bootstrap', 'smoke-proxy-full', 'ready']) {
+    assert.ok(fixture.includes(`markForegroundStage("${stage}")`), stage);
+  }
+  const retained = driver.indexOf('evidence.fixtureDiagnostic = collectFixtureDiagnostic(fixtureDir, fixtureLog, proc?.exitCode)');
+  assert.ok(retained > 0 && retained < driver.indexOf('rmSync(fixtureDir, { recursive: true, force: true })'));
+});
+
+test('fixture status sanitizer rejects unknown private facts, malformed exits and contradictory states', () => {
+  assert.deepEqual(sanitizeFixtureDiagnostic(fixtureStatus), fixtureStatus);
+  assert.deepEqual(sanitizeFixtureDiagnostic({ ...fixtureStatus, stage: 'ready', status: 'ready', failureCode: null, childExitCode: null }),
+    { ...fixtureStatus, stage: 'ready', status: 'ready', failureCode: null, childExitCode: null });
+  for (const key of Object.keys(fixtureStatus)) {
+    const value = { ...fixtureStatus }; delete value[key];
+    assert.equal(sanitizeFixtureDiagnostic(value), null, key);
+  }
+  for (const value of [null, [], 1, privateDiagnostic,
+    { ...fixtureStatus, schemaVersion: true }, { ...fixtureStatus, stage: privateDiagnostic },
+    { ...fixtureStatus, stage: 'Error' }, { ...fixtureStatus, failureCode: privateDiagnostic },
+    { ...fixtureStatus, failureCode: 'Error' }, { ...fixtureStatus, raw: privateDiagnostic },
+    { ...fixtureStatus, status: privateDiagnostic }, { ...fixtureStatus, status: 'running' },
+    { ...fixtureStatus, status: 'ready', failureCode: null, childExitCode: null },
+    { ...fixtureStatus, stage: 'ready', status: 'running', failureCode: null, childExitCode: null },
+    { ...fixtureStatus, failureCode: null }, { ...fixtureStatus, failureCode: 'smoke-assertion' },
+  ]) assert.equal(sanitizeFixtureDiagnostic(value), null);
+  for (const childExitCode of [undefined, true, false, -1, 0, 256, 1.5, NaN, Infinity, '1', [], {}, privateDiagnostic]) {
+    assert.equal(sanitizeFixtureDiagnostic({ ...fixtureStatus, childExitCode }), null);
+  }
+  assert.deepEqual(sanitizeFixtureDiagnostic({ ...fixtureStatus, stage: 'server-build', failureCode: 'unclassified-error', childExitCode: null }),
+    { ...fixtureStatus, stage: 'server-build', failureCode: 'unclassified-error', childExitCode: null });
+});
+
+test('bootstrap classification distinguishes public Node codes and classes from arbitrary private text', () => {
+  for (const [text, expected] of [
+    [`Error [ERR_MODULE_NOT_FOUND]: ${privateDiagnostic}`, 'bootstrap-module-not-found'],
+    [`  code: 'MODULE_NOT_FOUND',\n${privateDiagnostic}`, 'bootstrap-module-not-found'],
+    [`TypeError [ERR_UNKNOWN_FILE_EXTENSION]: ${privateDiagnostic}`, 'bootstrap-file-extension'],
+    [`Error [ERR_REQUIRE_ESM]: ${privateDiagnostic}`, 'bootstrap-require-esm'],
+    [`Error [ERR_DLOPEN_FAILED]: ${privateDiagnostic}`, 'bootstrap-native-module-load'],
+    [`SyntaxError: ${privateDiagnostic}`, 'bootstrap-syntax-error'],
+    [`ReferenceError: ${privateDiagnostic}`, 'bootstrap-reference-error'],
+    [`TypeError: ${privateDiagnostic}`, 'bootstrap-type-error'],
+    [`RangeError: ${privateDiagnostic}`, 'bootstrap-range-error'],
+  ]) {
+    assert.equal(classifyFixtureBootstrapLog(text), expected);
+    assert.ok(!classifyFixtureBootstrapLog(text).includes('PRIVATE_DIAGNOSTIC'));
+  }
+  for (const text of [null, {}, '', `Error: ${privateDiagnostic}`, `CustomPrivateError: ${privateDiagnostic}`,
+    `private body contains TypeError: ${privateDiagnostic}`, `quoted Error [ERR_MODULE_NOT_FOUND]: ${privateDiagnostic}`,
+    `Error [PRIVATE_DIAGNOSTIC]: ${privateDiagnostic}`, `SyntaxError: ${'x'.repeat(64 * 1024)}`]) {
+    assert.equal(classifyFixtureBootstrapLog(text), 'bootstrap-unclassified');
+  }
+});
+
+test('actual diagnostic reader retains only bounded regular-file facts before private cleanup', () => {
+  const directory = mkdtempSync(join(process.env.RUNNER_TEMP || process.env.TMPDIR || tmpdir(), 'foreground-diagnostic-'));
+  const fixture = join(directory, 'fixture'), log = join(directory, 'fixture-private.log');
+  const status = join(fixture, 'foreground-fixture-status.json');
+  mkdirSync(fixture);
+  try {
+    writeFileSync(log, `SyntaxError: ${privateDiagnostic}\n`);
+    writeFileSync(status, `${JSON.stringify(fixtureStatus)}\n`);
+    const retained = collectFixtureDiagnostic(fixture, log, 1);
+    assert.deepEqual(retained, { source: 'status-file', ...fixtureStatus, fixtureExitCode: 1 });
+    rmSync(status); rmSync(log);
+    assert.equal(retained.stage, 'mp4-generation');
+    assert.ok(!JSON.stringify(retained).includes('PRIVATE_DIAGNOSTIC'));
+    writeFileSync(log, `Error [ERR_MODULE_NOT_FOUND]: ${privateDiagnostic}\n`);
+    assert.deepEqual(collectFixtureDiagnostic(fixture, log, 1), {
+      source: 'bootstrap-log', schemaVersion: 1, stage: 'bootstrap', status: 'unavailable',
+      failureCode: 'bootstrap-module-not-found', childExitCode: null, fixtureExitCode: 1,
+    });
+    writeFileSync(log, `Error: ${privateDiagnostic}\n`);
+    assert.equal(collectFixtureDiagnostic(fixture, log, null).failureCode, 'bootstrap-unclassified');
+    writeFileSync(log, `${'x'.repeat(70_000)}\nReferenceError: ${privateDiagnostic}\n`);
+    assert.equal(collectFixtureDiagnostic(fixture, log, 1).failureCode, 'bootstrap-reference-error');
+    const partial = 'SyntaxError: PRIVATE_DIAGNOSTIC';
+    writeFileSync(log, `private prefix ${partial}${'x'.repeat(64 * 1024 - partial.length)}`);
+    assert.equal(collectFixtureDiagnostic(fixture, log, 1).failureCode, 'bootstrap-unclassified');
+    for (const raw of [privateDiagnostic, 'x'.repeat(2049), JSON.stringify(fixtureStatus),
+      `${JSON.stringify({ ...fixtureStatus, raw: privateDiagnostic })}\n`,
+      `{"stage":"PRIVATE_DIAGNOSTIC",${JSON.stringify(fixtureStatus).slice(1)}\n`,
+    ]) {
+      writeFileSync(status, raw);
+      const value = collectFixtureDiagnostic(fixture, log, 1);
+      assert.equal(value.source, 'invalid-status');
+      assert.equal(value.failureCode, 'status-invalid');
+      assert.ok(!JSON.stringify(value).includes('PRIVATE_DIAGNOSTIC'));
+    }
+    rmSync(status);
+    const target = join(directory, 'target.json'); writeFileSync(target, `${JSON.stringify(fixtureStatus)}\n`);
+    symlinkSync(target, status);
+    assert.equal(collectFixtureDiagnostic(fixture, log, 1).source, 'invalid-status');
+    rmSync(status); mkdirSync(status);
+    assert.equal(collectFixtureDiagnostic(fixture, log, 1).source, 'invalid-status');
+    rmSync(status, { recursive: true });
+    rmSync(log); symlinkSync(target, log);
+    assert.equal(collectFixtureDiagnostic(fixture, log, 1).source, 'unavailable');
+    rmSync(log);
+    for (const exit of [undefined, null, true, '1', -1, 256, 1.5, NaN, Infinity]) {
+      assert.equal(collectFixtureDiagnostic(fixture, log, exit).fixtureExitCode, null);
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('actual diagnostic classifiers reject individual privacy and schema mutants behaviorally', async () => {
+  const original = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  const mutations = [
+    ['!FIXTURE_STAGES.has(value.stage)', 'false', (api) => assert.equal(api.sanitizeFixtureDiagnostic({ ...fixtureStatus, stage: privateDiagnostic }), null)],
+    ['!FIXTURE_FAILURES.has(value.failureCode)', 'false', (api) => assert.equal(api.sanitizeFixtureDiagnostic({ ...fixtureStatus, failureCode: privateDiagnostic, childExitCode: null }), null)],
+    ["Object.keys(value).sort().join(',') !== 'childExitCode,failureCode,schemaVersion,stage,status'", 'false',
+      (api) => assert.equal(api.sanitizeFixtureDiagnostic({ ...fixtureStatus, raw: privateDiagnostic }), null)],
+    ['!Number.isSafeInteger(value.childExitCode)', 'false', (api) => assert.equal(api.sanitizeFixtureDiagnostic({ ...fixtureStatus, childExitCode: '1' }), null)],
+    ['`^${name}:`', '`${name}:`', (api) => assert.equal(api.classifyFixtureBootstrapLog(`private body contains TypeError: ${privateDiagnostic}`), 'bootstrap-unclassified')],
+    ["Buffer.byteLength(text, 'utf8') > FIXTURE_PRIVATE_LOG_LIMIT", 'false',
+      (api) => assert.equal(api.classifyFixtureBootstrapLog(`SyntaxError: ${'x'.repeat(64 * 1024)}`), 'bootstrap-unclassified')],
+  ];
+  for (const [from, to, probe] of mutations) {
+    probe({ sanitizeFixtureDiagnostic, classifyFixtureBootstrapLog });
+    assert.equal(original.split(from).length, 2);
+    const mutant = await import(`data:text/javascript;base64,${Buffer.from(original.replace(from, to)).toString('base64')}`);
+    let rejected = false;
+    try { probe(mutant); } catch (error) { assert.equal(error.code, 'ERR_ASSERTION'); rejected = true; }
+    assert.equal(rejected, true, 'a semantic mutant must fail the actual classifier assertion');
+  }
 });
 test('transcode gate cannot pass on static fixture HLS', () => {
   const s = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');

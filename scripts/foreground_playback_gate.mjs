@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
@@ -66,6 +66,93 @@ export function classifyResponse(path) {
   const match = /^\/api\/stream\/[^/]+\/(index\.m3u8|480p\.m3u8|480p_seg_\d{5}\.ts)$/.exec(path);
   if (match) return match[1];
   return /^\/api\/stream\/[^/]+$/.test(path) ? 'direct-proxy' : null;
+}
+
+const FIXTURE_STATUS_LIMIT = 2048;
+const FIXTURE_PRIVATE_LOG_LIMIT = 64 * 1024;
+const FIXTURE_STAGES = new Set([
+  'input-check', 'media-preflight', 'mp4-generation', 'static-hls-generation', 'media-probe', 'media-output-check',
+  'runtime-init', 'media-listen', 'server-build', 'seed-owner', 'seed-credentials', 'seed-settings', 'seed-watchlist',
+  'smoke-media', 'smoke-addon', 'smoke-outbound', 'smoke-login', 'smoke-bootstrap', 'smoke-watchlist',
+  'smoke-discover', 'smoke-detail', 'smoke-streams', 'smoke-resolve', 'smoke-proxy-full', 'smoke-proxy-range',
+  'smoke-external-full', 'smoke-external-range', 'smoke-web', 'smoke-receipt', 'server-listen', 'ready',
+]);
+const FIXTURE_FAILURES = new Set([
+  'input-missing', 'input-invalid', 'ffmpeg-execution', 'ffmpeg-exit', 'ffmpeg-filter-missing', 'font-missing',
+  'probe-execution', 'probe-exit', 'probe-json', 'probe-streams', 'probe-codecs', 'media-layout', 'media-file',
+  'http-status', 'csrf-missing', 'smoke-assertion', 'json-response', 'unclassified-error',
+]);
+
+export function sanitizeFixtureDiagnostic(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).sort().join(',') !== 'childExitCode,failureCode,schemaVersion,stage,status' ||
+      value.schemaVersion !== 1 || !FIXTURE_STAGES.has(value.stage) ||
+      !['running', 'refused', 'ready'].includes(value.status)) return null;
+  if (value.status === 'refused') {
+    if (!FIXTURE_FAILURES.has(value.failureCode) ||
+        (value.childExitCode !== null && (!['ffmpeg-exit', 'probe-exit'].includes(value.failureCode) ||
+          !Number.isSafeInteger(value.childExitCode) || value.childExitCode < 1 || value.childExitCode > 255))) return null;
+  } else if (value.failureCode !== null || value.childExitCode !== null ||
+      (value.status === 'ready') !== (value.stage === 'ready')) return null;
+  return { schemaVersion: 1, stage: value.stage, status: value.status, failureCode: value.failureCode, childExitCode: value.childExitCode };
+}
+
+// Hints only when the fixture failed before its status file existed. Never copy
+// exception messages, frames, paths, URLs or arbitrary error names into evidence.
+export function classifyFixtureBootstrapLog(text) {
+  if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > FIXTURE_PRIVATE_LOG_LIMIT) return 'bootstrap-unclassified';
+  for (const [code, classification] of [
+    ['ERR_MODULE_NOT_FOUND', 'bootstrap-module-not-found'], ['MODULE_NOT_FOUND', 'bootstrap-module-not-found'],
+    ['ERR_UNKNOWN_FILE_EXTENSION', 'bootstrap-file-extension'], ['ERR_REQUIRE_ESM', 'bootstrap-require-esm'],
+    ['ERR_DLOPEN_FAILED', 'bootstrap-native-module-load'],
+  ]) {
+    if (new RegExp(`^(?:Error|TypeError) \\[${code}\\]:|^  code: '${code}',?\\r?$`, 'm').test(text)) return classification;
+  }
+  for (const [name, classification] of [
+    ['SyntaxError', 'bootstrap-syntax-error'], ['ReferenceError', 'bootstrap-reference-error'],
+    ['TypeError', 'bootstrap-type-error'], ['RangeError', 'bootstrap-range-error'],
+  ]) if (new RegExp(`^${name}:`, 'm').test(text)) return classification;
+  return 'bootstrap-unclassified';
+}
+
+function readBoundedRegular(path, limit, tail = false) {
+  let descriptor;
+  try {
+    const entry = lstatSync(path);
+    if (!entry.isFile() || entry.isSymbolicLink()) return { kind: 'invalid' };
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const info = fstatSync(descriptor);
+    if (!info.isFile() || (!tail && (info.size < 1 || info.size > limit))) return { kind: 'invalid' };
+    const offset = tail ? Math.max(0, info.size - limit) : 0;
+    const buffer = Buffer.alloc(tail ? Math.min(limit, info.size) : limit + 1);
+    const bytes = readSync(descriptor, buffer, 0, buffer.length, offset);
+    if (!tail && bytes > limit) return { kind: 'invalid' };
+    let text = buffer.subarray(0, bytes).toString('utf8');
+    if (offset > 0) text = text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '';
+    return { kind: 'read', text };
+  } catch (error) {
+    return { kind: error?.code === 'ENOENT' ? 'missing' : 'invalid' };
+  } finally {
+    if (descriptor != null) { try { closeSync(descriptor); } catch { /* No raw filesystem errors in evidence. */ } }
+  }
+}
+
+export function collectFixtureDiagnostic(fixtureDirectory, privateLog, observedExitCode) {
+  const fixtureExitCode = Number.isSafeInteger(observedExitCode) && observedExitCode >= 0 && observedExitCode <= 255 ? observedExitCode : null;
+  const status = readBoundedRegular(`${fixtureDirectory}/foreground-fixture-status.json`, FIXTURE_STATUS_LIMIT);
+  if (status.kind === 'read') {
+    try {
+      const value = JSON.parse(status.text);
+      const safe = sanitizeFixtureDiagnostic(value);
+      if (safe && status.text === `${JSON.stringify(value)}\n`) return { source: 'status-file', ...safe, fixtureExitCode };
+    } catch { /* An invalid diagnostic is not trusted and is never retained. */ }
+  }
+  if (status.kind !== 'missing') {
+    return { source: 'invalid-status', schemaVersion: 1, stage: 'unavailable', status: 'unavailable', failureCode: 'status-invalid', childExitCode: null, fixtureExitCode };
+  }
+  const log = readBoundedRegular(privateLog, FIXTURE_PRIVATE_LOG_LIMIT, true);
+  return { source: log.kind === 'read' ? 'bootstrap-log' : 'unavailable', schemaVersion: 1, stage: 'bootstrap', status: 'unavailable',
+    failureCode: classifyFixtureBootstrapLog(log.kind === 'read' ? log.text : ''), childExitCode: null, fixtureExitCode };
 }
 
 const sha = (s) => createHash('sha256').update(s).digest('hex');
@@ -271,6 +358,7 @@ async function runCase(chromium, name, output) {
         if (!failure) { evidence.phase = 'cleanup'; evidence.failureCode = failureCode(error); evidence.outcome = 'failed'; failure = error; }
       }
     };
+    await cleanup(async () => { evidence.fixtureDiagnostic = collectFixtureDiagnostic(fixtureDir, fixtureLog, proc?.exitCode); });
     await cleanup(async () => { if (browser) await browser.close(); });
     await cleanup(async () => {
       if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
