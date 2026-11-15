@@ -1545,6 +1545,34 @@ describe("recordResume", () => {
     expect(loadContinueWatching).toHaveBeenCalledTimes(1);
   });
 
+  it("persists each queued snapshot through the store captured at admission", async () => {
+    let finishFirst!: () => void;
+    storeRecordHistory.mockImplementationOnce(() => new Promise((resolve) => {
+      finishFirst = () => resolve({});
+    }));
+    const nextRecordHistory = vi.fn(async (_entry: unknown) => ({}));
+    const nextStore = { ...fakeStore, recordHistory: nextRecordHistory };
+    const { result } = await renderStore();
+    act(() => {
+      result.current.recordResume(createProgressWriteQueue, media("store-bound"), 5, 100);
+      result.current.recordResume(createProgressWriteQueue, media("store-bound"), 15, 100);
+      getStore.mockReturnValue(nextStore);
+      result.current.recordResume(createProgressWriteQueue, media("store-bound"), 30, 100);
+    });
+    expect(storeRecordHistory).toHaveBeenCalledTimes(1);
+    expect(nextRecordHistory).not.toHaveBeenCalled();
+    await act(async () => {
+      finishFirst();
+      await result.current.refreshContinueWatching();
+    });
+    expect(storeRecordHistory.mock.calls.map(([entry]) =>
+      (entry as { progressSeconds: number }).progressSeconds,
+    )).toEqual([5, 15]);
+    expect(nextRecordHistory).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ mediaId: "store-bound", progressSeconds: 30 }),
+    );
+  });
+
   it("admits the first resume synchronously and flushes the latest backward seek", async () => {
     const { result } = await renderStore();
     act(() => {

@@ -79,6 +79,64 @@ describe("ProgressWriteQueue", () => {
     expect(writes).toEqual([1, 2]);
   });
 
+  it("clears the profile drain timer when all writes settle before the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const queue = new ProgressWriteQueue();
+      const active = deferred();
+      queue.enqueue({
+        store: {}, generation: 1, mediaId: "movie", episodeId: null,
+        write: () => active.promise,
+      });
+      const drain = queue.flushWithin();
+      expect(vi.getTimerCount()).toBe(1);
+      active.resolve();
+      await expect(drain).resolves.toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds the profile drain at 12 seconds without taking cancellation ownership", async () => {
+    vi.useFakeTimers();
+    try {
+      const queue = new ProgressWriteQueue();
+      const active = deferred();
+      let signal!: AbortSignal;
+      const pendingWrite = vi.fn(async () => {});
+      queue.enqueue({
+        store: {}, generation: 1, mediaId: "active", episodeId: null,
+        write: (writeSignal) => {
+          signal = writeSignal;
+          return active.promise;
+        },
+      });
+      queue.enqueue({
+        store: {}, generation: 1, mediaId: "pending", episodeId: null,
+        write: pendingWrite,
+      });
+      const settled = vi.fn();
+      const drain = queue.flushWithin();
+      void drain.then(settled);
+      await vi.advanceTimersByTimeAsync(11_999);
+      expect(settled).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(drain).resolves.toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(signal.aborted).toBe(false);
+      expect(pendingWrite).not.toHaveBeenCalled();
+
+      queue.cancelGeneration(1);
+      expect(signal.aborted).toBe(true);
+      active.resolve();
+      await queue.flush();
+      expect(pendingWrite).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("bounds both pending distinct identities and concurrent writes", async () => {
     const queue = new ProgressWriteQueue();
     const store = {};

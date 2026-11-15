@@ -1,7 +1,6 @@
 import type { MediaPreview } from "../models/media";
 import type { PlaybackPrefs } from "../storage/models";
-import type { Store } from "../storage/types";
-import { RemoteStore } from "../storage/RemoteStore";
+import type { WatchHistoryUpsert } from "../storage/types";
 
 /** Serial, coalescing, best-effort persistence for frequently sampled progress. */
 export interface ProgressWriteJob {
@@ -15,6 +14,7 @@ export interface ProgressWriteJob {
 }
 
 const MAX_PENDING_PROGRESS_WRITES = 64;
+const PROFILE_PROGRESS_DRAIN_TIMEOUT_MS = 12_000;
 export const PROGRESS_HISTORY_TIMEOUT_MS = 10_000;
 
 /** Timeout/abort wrapper kept in the lazily loaded progress-only chunk. */
@@ -60,8 +60,9 @@ export class ProgressWriteQueue {
   private draining: Promise<void> | null = null;
 
   recordResume(
-    store: Store,
+    store: object,
     generation: number,
+    persist: (entry: WatchHistoryUpsert, signal: AbortSignal) => Promise<unknown>,
     item: MediaPreview,
     progressSeconds: number,
     durationSeconds: number | null,
@@ -119,12 +120,7 @@ export class ProgressWriteQueue {
       episodeId: episodeId ?? null,
       snapshot: entry,
       mergeSnapshot: mergePendingEntries,
-      write: (signal, snapshot) => {
-        const pendingEntry = snapshot as typeof entry;
-        return store instanceof RemoteStore
-          ? store.recordHistoryProgress(pendingEntry, signal)
-          : store.recordHistory(pendingEntry);
-      },
+      write: (signal, snapshot) => persist(snapshot as typeof entry, signal),
     });
   }
 
@@ -162,6 +158,21 @@ export class ProgressWriteQueue {
       this.kick();
       const current = this.draining;
       if (current != null) await current;
+    }
+  }
+
+  /** Bound the wait only; the profile owner decides whether to cancel work. */
+  async flushWithin(): Promise<boolean> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.flush().then(() => true),
+        new Promise<boolean>((resolve) => {
+          timeout = setTimeout(() => resolve(false), PROFILE_PROGRESS_DRAIN_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timeout != null) clearTimeout(timeout);
     }
   }
 

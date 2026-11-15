@@ -65,7 +65,6 @@ import { useServerSession } from "../lib/ServerSessionContext";
 import { verifyPassword } from "../lib/passwordHash";
 import type { SettingsSection } from "../lib/settingsNavigation";
 
-const PROFILE_PROGRESS_DRAIN_TIMEOUT_MS = 12_000;
 import {
   dbNameForProfile,
   ensureDefaultProfile,
@@ -818,16 +817,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       invalidateProfileReads();
     };
     try {
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      const drained = flushResumeWrites();
-      const timedOut = await Promise.race([
-        drained.then(() => false),
-        new Promise<boolean>((resolve) => {
-          timeout = setTimeout(() => resolve(true), PROFILE_PROGRESS_DRAIN_TIMEOUT_MS);
-        }),
-      ]);
-      if (timeout != null) clearTimeout(timeout);
-      if (timedOut) {
+      if (await resumeWriteQueueRef.current?.flushWithin() === false) {
         // A stuck old-profile request must not hold account switching forever or
         // dispatch its pending closure after the cookie changes. Remote progress
         // writes have their own shorter aborting deadline.
@@ -846,7 +836,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         resumeWritesBlockedRef.current = false;
       }
     }
-  }, [cancelResumeGeneration, flushResumeWrites, invalidateProfileReads]);
+  }, [cancelResumeGeneration, invalidateProfileReads]);
 
   const refreshProfiles = useCallback(async () => {
     if (isServerMode()) return;
@@ -1675,9 +1665,13 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       // Detail already has the queue code loaded. Admit the first report
       // synchronously, with one queue owned by this provider across sessions.
       const queue = resumeWriteQueueRef.current ??= createQueue();
+      const store = getStore();
       queue.recordResume(
-        getStore(), profileReadGenerationRef.current, item,
-        progressSeconds, durationSeconds, episodeId, prefs,
+        store, profileReadGenerationRef.current,
+        (entry, signal) => store instanceof RemoteStore
+          ? store.recordHistoryProgress(entry, signal)
+          : store.recordHistory(entry),
+        item, progressSeconds, durationSeconds, episodeId, prefs,
       );
     },
     [],
