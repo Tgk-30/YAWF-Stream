@@ -71,6 +71,9 @@ class Fixture:
   self.temporary=tempfile.TemporaryDirectory(dir=os.environ['TMPDIR']);self.root=pathlib.Path(self.temporary.name).resolve();self.job=self.root/'job';self.job.mkdir();self.avd=self.job/'owned36.avd';self.avd.mkdir();sdk=self.root/'sdk'
   for name in ['platform-tools/adb','build-tools/36.0.0/aapt','build-tools/36.0.0/apksigner','cmdline-tools/latest/bin/apkanalyzer']:
    p=sdk/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('fake never executed');p.chmod(0o755)
+  android_jar=sdk/'platforms/android-36/android.jar';android_jar.parent.mkdir(parents=True)
+  with zipfile.ZipFile(android_jar,'w')as archive:
+   for name in ['java/lang/RuntimeException.class','java/lang/IllegalStateException.class','java/lang/Object.class']:archive.writestr(name,b'public SDK fixture class')
   target=self.job/'target.apk';test=self.job/'test.apk'
   for p,name in [(target,'Lproduct/Main;'),(test,'Ltest/Observer;')]:
    with zipfile.ZipFile(p,'w')as archive:archive.writestr('classes.dex',dex(name,True))
@@ -289,5 +292,41 @@ try:
  saved=json.loads((pathlib.Path(f.args.evidence_dir)/'OWNED_STARTUP.json').read_text());assert saved['qualification']is False and saved['code']=='EVIDENCE_COUNT'
  signals=saved['instrumentationSignals'];assert signals['NoSuchMethodError']and signals['FatalSignal']and signals['SIGABRT'];assert not signals['junitStarted']
  serialized=json.dumps(saved)+captured.getvalue();assert all(value not in serialized for value in ['private.invalid','secret-value','/private/person','PRIVATE_MESSAGE','java.lang.NoSuchMethodError:'])
+finally:f.close()
+`));
+
+
+test('public diagnostic classes require exact APK definitions or SDK entries and discard all runtime text',()=>run(String.raw`
+f=Fixture()
+try:
+ test_apk=pathlib.Path(f.args.test_apk);sdk_jar=pathlib.Path(f.args.sdk)/'platforms/android-36/android.jar'
+ with zipfile.ZipFile(test_apk,'a')as archive:archive.writestr('classes2.dex',dex('Lprivate/person/ReferenceOnlyException;',False))
+ definitions=m.public_definition_names((pathlib.Path(f.args.target_apk),test_apk),sdk_jar,lambda:None)
+ assert definitions=={'product.Main','test.Observer','java.lang.RuntimeException','java.lang.IllegalStateException','java.lang.Object'}
+ assert 'private.person.ReferenceOnlyException'not in definitions
+ text=('INSTRUMENTATION_RESULT: longMsg=java.lang.IllegalStateException: https://private.invalid/?token=SECRET_MESSAGE\nCaused by: java.lang.RuntimeException: /private/person/file\n at product.Main.privateMethodSecret(PrivateFilename.java:123)\n at test.Observer.otherSecret(Unknown Source)\nCaused by: private.person.ReferenceOnlyException: SECRET_MESSAGE\n at product.MainForged.privateMethod(Secret.java:77)\n at private.person.Owner.privateMethod(Secret.java:1)\njava.lang.Object: arbitrary message').encode()
+ facts=m.public_code_diagnostics(text,b'',definitions)
+ assert facts['headerClasses']==['java.lang.IllegalStateException','java.lang.RuntimeException','java.lang.Object']
+ assert facts['frameClasses']==[{'class':'product.Main','line':123},{'class':'test.Observer','line':None}]
+ serialized=json.dumps(facts)
+ for secret in ['private.invalid','SECRET_MESSAGE','/private/person','privateMethodSecret','PrivateFilename','otherSecret','ReferenceOnlyException','MainForged','Secret.java']:assert secret not in serialized
+ # Exact allowlist is not a prefix grant, and output cardinality is hard bounded.
+ names={'public.Type'+str(n)for n in range(30)}
+ many='\n'.join('public.Type'+str(n)+': secret\n at public.Type'+str(n)+'.secret(Secret.java:9999999)'for n in range(30))
+ bounded=m.public_code_diagnostics(many.encode(),b'',names);assert len(bounded['headerClasses'])==8 and len(bounded['frameClasses'])==12;assert all(row['line']is None for row in bounded['frameClasses'])
+ assert m.public_code_diagnostics(b'Caused by: public.Type0Forgery: secret\n at public.Type0Forgery.secret(Secret.java:1)',b'',names)=={'headerClasses':[],'frameClasses':[]}
+ # Private visitor does not change default counts, and references never invoke it.
+ observed=[];assert m.dex_class_counts(dex('Lprivate/person/ReferenceOnlyException;',False),observed.append)==(0,0);assert observed==[]
+ assert m.dex_class_counts(dex('Ltest/Observer;',True),observed.append)==(1,0);assert observed==[b'Ltest/Observer;']
+finally:f.close()
+f=Fixture()
+try:
+ f.fake.instrument_output=b'INSTRUMENTATION_RESULT: longMsg=java.lang.IllegalStateException: PRIVATE_MESSAGE\n at product.Main.secretMethod(PrivateFile.java:42)\nCaused by: private.person.NotDefined: PRIVATE_MESSAGE'
+ argv=['controller']
+ for key,value in vars(f.args).items():argv+=['--'+key.replace('_','-'),str(value)]
+ with mock.patch.object(m,'System',return_value=f.fake),mock.patch.object(sys,'argv',argv),mock.patch('sys.stdout',new_callable=io.StringIO)as captured:assert m.main()==1
+ saved=json.loads((pathlib.Path(f.args.evidence_dir)/'OWNED_STARTUP.json').read_text());assert saved['code']=='EVIDENCE_COUNT'and saved['qualification']is False
+ assert saved['instrumentationPublicCode']=={'headerClasses':['java.lang.IllegalStateException'],'frameClasses':[{'class':'product.Main','line':42}]}
+ for secret in ['PRIVATE_MESSAGE','secretMethod','PrivateFile','NotDefined']:assert secret not in json.dumps(saved)+captured.getvalue()
 finally:f.close()
 `));

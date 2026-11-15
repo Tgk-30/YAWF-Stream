@@ -211,11 +211,11 @@ def instrumentation_signals(stdout, stderr):
     return facts
 
 
-def dex_class_counts(data):
+def dex_class_counts(data, _definition=None):
     """Bounded standard DEX035..040 header/index/class-definition visitor.
 
     Strings or type references are not definitions. This is not a bytecode verifier.
-    No descriptor or other APK string is returned or logged.
+    The private visitor receives definitions only; default counts are unchanged.
     """
     require(112 <= len(data) <= 128 * 1024**2 and
             re.fullmatch(b"dex\\n0(?:3[5-9]|40)\\x00", data[:8]) is not None, "DEX_HEADER")
@@ -270,7 +270,10 @@ def dex_class_counts(data):
         for field in (12, 20, 24, 28):
             value = u32(off + field)
             require(value == 0 or 112 <= value < len(data), "DEX_CLASS_OFFSET")
-        forbidden += descriptor(class_index).startswith(b"Lapp/tauri/")
+        raw = descriptor(class_index)
+        forbidden += raw.startswith(b"Lapp/tauri/")
+        if _definition is not None:
+            _definition(raw)
     return classes, forbidden
 
 
@@ -291,6 +294,87 @@ def no_tauri_definitions(apk):
             count += classes; entries += 1
     require(entries > 0, "APK_DEX_MISSING")
     return {"dexFiles": entries, "classDefinitions": count, "tauriClassDefinitions": 0}
+
+
+def _public_class_name(internal):
+    # Only bounded ASCII Java binary names can enter this diagnostic allowlist.
+    if len(internal) > 512 or re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]{0,127}(?:/[A-Za-z_$][A-Za-z0-9_$]{0,127}){0,31}", internal) is None:
+        return None
+    return internal.replace("/", ".")
+
+
+def public_definition_names(apks, android_jar, guard):
+    """Exact verified APK definitions and public SDK JAR entries, not references."""
+    names = set()
+    def add(internal):
+        name = _public_class_name(internal)
+        if name is not None:
+            names.add(name)
+            require(len(names) <= 100000, "PUBLIC_CLASS_COUNT")
+    def definition(raw):
+        try:
+            internal = raw[1:-1].decode("ascii")
+        except UnicodeDecodeError:
+            return
+        add(internal)
+    for apk in apks:
+        guard(); total, entries = 0, 0
+        with zipfile.ZipFile(apk) as archive:
+            rows = archive.infolist()
+            require(len(rows) <= 20000 and len({row.filename for row in rows}) == len(rows), "APK_ZIP_ENTRIES")
+            for info in rows:
+                if not info.filename.lower().endswith(".dex"):
+                    continue
+                require(re.fullmatch(r"classes(?:[2-9]|[1-9][0-9]+)?\.dex", info.filename) is not None, "APK_DEX_NAME")
+                require(not info.flag_bits & 1 and info.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED), "APK_DEX_COMPRESSION")
+                total += info.file_size
+                require(total <= 256 * 1024**2 and info.file_size <= 128 * 1024**2, "APK_DEX_BYTES")
+                dex_class_counts(archive.read(info), definition)
+                entries += 1; guard()
+        require(entries > 0, "APK_DEX_MISSING")
+    before = android_jar.lstat()
+    require(stat.S_ISREG(before.st_mode) and not android_jar.is_symlink() and 0 < before.st_size <= 128 * 1024**2, "PUBLIC_SDK_JAR")
+    with zipfile.ZipFile(android_jar) as archive:
+        rows = archive.infolist()
+        require(len(rows) <= 100000 and len({row.filename for row in rows}) == len(rows), "PUBLIC_SDK_JAR_ENTRIES")
+        require(sum(row.file_size for row in rows) <= 256 * 1024**2, "PUBLIC_SDK_JAR_BYTES")
+        for info in rows:
+            require(not info.flag_bits & 1 and not stat.S_ISLNK(info.external_attr >> 16), "PUBLIC_SDK_JAR_ENTRY")
+            if info.filename.endswith(".class"):
+                add(info.filename[:-6])
+        guard()
+    after = android_jar.lstat()
+    require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns), "PUBLIC_SDK_JAR_CHANGED")
+    return names
+
+
+def public_code_diagnostics(stdout, stderr, definitions):
+    """Class names only if defined in the exact public inputs; no runtime text."""
+    text = stdout.decode("utf-8", errors="replace") + "\n" + stderr.decode("utf-8", errors="replace")
+    segment = r"[A-Za-z_$][A-Za-z0-9_$]{0,127}"
+    name = segment + r"(?:\." + segment + r"){0,31}"
+    envelope = r"(?:INSTRUMENTATION_(?:STATUS|RESULT): (?:stream|shortMsg|longMsg|stack)=)?"
+    header = re.compile(envelope + r"(?:Caused by: )?(" + name + r")(?::[^\r\n]*)?")
+    frame = re.compile(r"at (" + name + r")\.(?:" + segment + r"|<init>|<clinit>)\(([^()\r\n]{0,1024})\)")
+    throwables, frames, seen_frames = [], [], set()
+    for raw in text.splitlines():
+        if len(raw) > 8192:
+            continue
+        line = raw.strip()
+        match = frame.fullmatch(line)
+        if match is not None:
+            cls = match[1]
+            if cls in definitions and cls not in seen_frames and len(frames) < 12:
+                numeric = re.search(r":([0-9]{1,7})$", match[2])
+                number = int(numeric[1]) if numeric is not None else None
+                frames.append({"class": cls, "line": number if number is not None and number <= 1000000 else None})
+                seen_frames.add(cls)
+            continue
+        match = header.fullmatch(line)
+        if match is not None and match[1] in definitions and match[1] not in throwables and len(throwables) < 8:
+            throwables.append(match[1])
+    return {"headerClasses": throwables, "frameClasses": frames}
 
 
 def process_identity(pid):
@@ -381,6 +465,7 @@ class Controller:
         self.started = self.sys.clock(); self.commands = []; self.admission = None
         self.next_inventory = 0; self.directory = None; self.evidence_owned = False; self.fingerprints = {}
         self.instrumentation_signals = None
+        self.instrumentation_public_code = None
 
     def under(self, value, parent, exists=True):
         path = Path(value)
@@ -506,6 +591,9 @@ class Controller:
         target = self.apk(self.target, self.admission["targetApk"], True)
         test = self.apk(self.test, self.admission["testApk"], False)
         dex = no_tauri_definitions(self.test)
+        android_jar = sdk / "platforms/android-36/android.jar"
+        require(android_jar.resolve(strict=True).is_relative_to(sdk), "PUBLIC_SDK_JAR_PATH")
+        definitions = public_definition_names((self.target, self.test), android_jar, self.check)
         require(self.text(self.adb + ["shell", "getprop", "ro.build.version.sdk"]).strip() == "36", "GUEST_API")
         require(self.text(self.adb + ["shell", "getprop", "ro.boot.qemu.avd_name"]).splitlines() == [self.admission["avdName"]], "GUEST_AVD_NAME")
         for package in (TARGET, TEST_PACKAGE):
@@ -514,6 +602,7 @@ class Controller:
             require(install_succeeded(self.text(self.adb + ["install", *extra, "--no-streaming", "--no-incremental", str(path)], 45)), "INSTALL_FAILED")
         code, stdout, stderr = self.command(self.adb + ["shell", "am", "instrument", "-w", "-r", "-e", "class", TEST_CLASS + "#" + METHOD, TEST_PACKAGE + "/" + RUNNER], self.a.timeout)
         self.instrumentation_signals = instrumentation_signals(stdout, stderr)
+        self.instrumentation_public_code = public_code_diagnostics(stdout, stderr, definitions)
         require(code == 0, "TOOL_REFUSAL")
         output = stdout.decode("utf-8", errors="strict")
         proof = evidence(output); self.check()
@@ -522,6 +611,7 @@ class Controller:
                   "controllerSha256": digest(Path(__file__).read_bytes()), "targetApk": target, "testApk": test,
                   "testDex": dex, "evidence": proof, "commands": self.commands,
                   "instrumentationSignals": self.instrumentation_signals,
+                  "instrumentationPublicCode": self.instrumentation_public_code,
                   "rootLifecycleCleanupRequired": True, "screenshotsOrGlobalLogcatCollected": False}
         (self.directory / "OWNED_STARTUP.json").write_text(json.dumps(result, sort_keys=True) + "\n")
         return result
@@ -553,6 +643,8 @@ def main():
             result["commands"] = controller.commands
             if controller.instrumentation_signals is not None:
                 result["instrumentationSignals"] = controller.instrumentation_signals
+            if controller.instrumentation_public_code is not None:
+                result["instrumentationPublicCode"] = controller.instrumentation_public_code
             if controller.evidence_owned and controller.directory is not None and controller.directory.is_dir():
                 (controller.directory / "OWNED_STARTUP.json").write_text(json.dumps(result, sort_keys=True) + "\n")
         print(json.dumps({key: value for key, value in result.items() if key != "commands"}))
