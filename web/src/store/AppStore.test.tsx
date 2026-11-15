@@ -23,6 +23,7 @@ import type { ReactNode } from "react";
 import type { MediaPreview } from "../models/media";
 import type { AppServices, AppSettings } from "../data/settings";
 import type { CachedResolutionRecord } from "../storage/models";
+import { createProgressWriteQueue } from "./progressWriteQueue";
 
 // ---- Mockable collaborators ------------------------------------------------
 
@@ -1315,70 +1316,118 @@ describe("importToWatchlist", () => {
 });
 
 describe("recordResume", () => {
+  it("creates its queue only on admitted progress and reuses it across profile generations", async () => {
+    const createQueue = vi.fn(createProgressWriteQueue);
+    const { result } = await renderStore();
+    await act(async () => {
+      await result.current.refreshContinueWatching();
+      await result.current.runProfileTransition(async (markProfileChanged) => {
+        markProfileChanged();
+        result.current.recordResume(createQueue, media("blocked"), 1, 100);
+      });
+    });
+    expect(createQueue).not.toHaveBeenCalled();
+    expect(storeRecordHistory).not.toHaveBeenCalled();
+
+    act(() => result.current.recordResume(createQueue, media("first"), 5, 100));
+    expect(createQueue).toHaveBeenCalledTimes(1);
+    expect(storeRecordHistory).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await result.current.runProfileTransition(async (markProfileChanged) => {
+        markProfileChanged();
+      });
+    });
+    act(() => result.current.recordResume(createQueue, media("next-profile"), 9, 100));
+    await act(async () => { await result.current.refreshContinueWatching(); });
+    expect(createQueue).toHaveBeenCalledTimes(1);
+    expect(storeRecordHistory.mock.calls.map(([entry]) =>
+      (entry as { mediaId: string }).mediaId,
+    )).toEqual(["first", "next-profile"]);
+  });
+
+  it("owns an independent queue for each provider", async () => {
+    const createQueue = vi.fn(createProgressWriteQueue);
+    const first = await renderStore();
+    const second = await renderStore();
+    act(() => {
+      first.result.current.recordResume(createQueue, media("first-provider"), 5, 100);
+      second.result.current.recordResume(createQueue, media("second-provider"), 8, 100);
+    });
+    await act(async () => {
+      await Promise.all([
+        first.result.current.refreshContinueWatching(),
+        second.result.current.refreshContinueWatching(),
+      ]);
+    });
+    expect(createQueue).toHaveBeenCalledTimes(2);
+    expect(createQueue.mock.results[0]?.value).not.toBe(createQueue.mock.results[1]?.value);
+    expect(storeRecordHistory).toHaveBeenCalledTimes(2);
+  });
+
   it("records progress and marks completed at >=95% watched", async () => {
     const { result } = await renderStore();
     const item = media("r1");
 
-    act(() => result.current.recordResume(item, 95, 100));
-    expect(storeRecordHistory).toHaveBeenCalledWith({
+    act(() => result.current.recordResume(createProgressWriteQueue, item, 95, 100));
+    await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledWith({
       mediaId: item.id,
       preview: item,
       progressSeconds: 95,
       durationSeconds: 100,
       completed: true,
       episodeId: null,
-    });
+    }));
   });
 
   it("forwards a series episode id (and defaults to null when omitted)", async () => {
     const { result } = await renderStore();
     const item = media("r5");
 
-    act(() => result.current.recordResume(item, 42, 100, "s2e5"));
-    expect(storeRecordHistory).toHaveBeenCalledWith({
+    act(() => result.current.recordResume(createProgressWriteQueue, item, 42, 100, "s2e5"));
+    await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledWith({
       mediaId: item.id,
       preview: item,
       progressSeconds: 42,
       durationSeconds: 100,
       completed: false,
       episodeId: "s2e5",
-    });
+    }));
   });
 
   it("does NOT mark completed below 95%, and treats null/zero duration as incomplete", async () => {
     const { result } = await renderStore();
 
-    act(() => result.current.recordResume(media("r2"), 40, 100));
-    expect(storeRecordHistory).toHaveBeenCalledWith({
+    act(() => result.current.recordResume(createProgressWriteQueue, media("r2"), 40, 100));
+    await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledWith({
       mediaId: "r2",
       preview: media("r2"),
       progressSeconds: 40,
       durationSeconds: 100,
       completed: false,
       episodeId: null,
-    });
+    }));
 
     storeRecordHistory.mockClear();
-    act(() => result.current.recordResume(media("r3"), 10, null));
-    expect(storeRecordHistory).toHaveBeenCalledWith({
+    act(() => result.current.recordResume(createProgressWriteQueue, media("r3"), 10, null));
+    await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledWith({
       mediaId: "r3",
       preview: media("r3"),
       progressSeconds: 10,
       durationSeconds: null,
       completed: false,
       episodeId: null,
-    });
+    }));
 
     storeRecordHistory.mockClear();
-    act(() => result.current.recordResume(media("r4"), 10, 0));
-    expect(storeRecordHistory).toHaveBeenCalledWith({
+    act(() => result.current.recordResume(createProgressWriteQueue, media("r4"), 10, 0));
+    await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledWith({
       mediaId: "r4",
       preview: media("r4"),
       progressSeconds: 10,
       durationSeconds: 0,
       completed: false,
       episodeId: null,
-    });
+    }));
   });
 
   it("persists progress without refreshing the history slices or provider state", async () => {
@@ -1388,13 +1437,39 @@ describe("recordResume", () => {
     const historyBefore = result.current.history;
     const continueWatchingBefore = result.current.continueWatching;
 
-    act(() => result.current.recordResume(media("no-refresh"), 30, 100));
+    act(() => result.current.recordResume(createProgressWriteQueue, media("no-refresh"), 30, 100));
     await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledTimes(1));
 
     expect(loadHistory).not.toHaveBeenCalled();
     expect(loadContinueWatching).not.toHaveBeenCalled();
     expect(result.current.history).toBe(historyBefore);
     expect(result.current.continueWatching).toBe(continueWatchingBefore);
+  });
+
+  it("keeps Local Mode progress unbounded and passes no transport signal", async () => {
+    const write = deferred<unknown>();
+    const localRecordHistory = vi.fn((_entry: unknown) => write.promise);
+    getStore.mockReturnValue({ ...fakeStore, recordHistory: localRecordHistory });
+    const { result } = await renderStore();
+    loadContinueWatching.mockClear();
+    vi.useFakeTimers();
+    act(() => result.current.recordResume(createProgressWriteQueue, media("local-no-deadline"), 30, 100));
+    const refresh = result.current.refreshContinueWatching();
+    const settled = vi.fn();
+    void refresh.then(settled);
+    expect(localRecordHistory).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ mediaId: "local-no-deadline", progressSeconds: 30 }),
+    );
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_001); });
+    expect(settled).not.toHaveBeenCalled();
+    expect(loadContinueWatching).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => {
+      write.resolve({});
+      await refresh;
+    });
+    expect(loadContinueWatching).toHaveBeenCalledTimes(1);
   });
 
   it("does not invalidate pending bootstrap history slices on a resume tick", async () => {
@@ -1404,7 +1479,7 @@ describe("recordResume", () => {
     loadContinueWatching.mockReturnValue(continuePending.promise);
     const { result } = await renderStore();
 
-    act(() => result.current.recordResume(media("resume-pending"), 30, 100));
+    act(() => result.current.recordResume(createProgressWriteQueue, media("resume-pending"), 30, 100));
     await act(async () => {
       historyPending.resolve([media("boot-history")]);
       continuePending.resolve([{ mediaId: "boot-continue" }]);
@@ -1438,7 +1513,7 @@ describe("recordResume", () => {
     loadContinueWatching.mockResolvedValue([updated]);
 
     act(() =>
-      result.current.recordResume(media("resume-after-close"), 80, 100),
+      result.current.recordResume(createProgressWriteQueue, media("resume-after-close"), 80, 100),
     );
     const closeRefresh = result.current.refreshContinueWatching();
     expect(loadContinueWatching).not.toHaveBeenCalled();
@@ -1450,6 +1525,197 @@ describe("recordResume", () => {
 
     expect(loadContinueWatching).toHaveBeenCalledTimes(1);
     expect(result.current.continueWatching).toEqual([updated]);
+  });
+
+  it("flushes the newest coalesced resume snapshot before the close refresh", async () => {
+    let finishFirst!: () => void;
+    storeRecordHistory
+      .mockImplementationOnce(() => new Promise((resolve) => { finishFirst = () => resolve({}); }))
+      .mockResolvedValue({});
+    const { result } = await renderStore();
+    loadContinueWatching.mockClear();
+
+    act(() => {
+      result.current.recordResume(createProgressWriteQueue, media("blocking"), 5, 100);
+      result.current.recordResume(createProgressWriteQueue, media("coalesced"), 20, 100, null, {
+        preferredAudioId: "audio-a",
+        preferredAudioLang: "eng",
+        preferredSubId: "sub-a",
+        playbackSpeed: 1.25,
+        subtitleDelay: 0.2,
+        subtitlePosition: 70,
+      });
+      result.current.recordResume(createProgressWriteQueue, media("coalesced"), 30, 100, null, {
+        preferredSubId: null,
+      });
+    });
+    const closeRefresh = result.current.refreshContinueWatching();
+    expect(storeRecordHistory).toHaveBeenCalledTimes(1);
+    expect(loadContinueWatching).not.toHaveBeenCalled();
+
+    await act(async () => {
+      finishFirst();
+      await closeRefresh;
+    });
+    expect(storeRecordHistory).toHaveBeenCalledTimes(2);
+    expect(storeRecordHistory.mock.calls[1]?.[0]).toMatchObject({
+      mediaId: "coalesced",
+      progressSeconds: 30,
+      preferredAudioId: "audio-a",
+      preferredAudioLang: "eng",
+      preferredSubId: null,
+      playbackSpeed: 1.25,
+      subtitleDelay: 0.2,
+      subtitlePosition: 70,
+    });
+    expect(loadContinueWatching).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists each queued snapshot through the store captured at admission", async () => {
+    let finishFirst!: () => void;
+    storeRecordHistory.mockImplementationOnce(() => new Promise((resolve) => {
+      finishFirst = () => resolve({});
+    }));
+    const nextRecordHistory = vi.fn(async (_entry: unknown) => ({}));
+    const nextStore = { ...fakeStore, recordHistory: nextRecordHistory };
+    const { result } = await renderStore();
+    act(() => {
+      result.current.recordResume(createProgressWriteQueue, media("store-bound"), 5, 100);
+      result.current.recordResume(createProgressWriteQueue, media("store-bound"), 15, 100);
+      getStore.mockReturnValue(nextStore);
+      result.current.recordResume(createProgressWriteQueue, media("store-bound"), 30, 100);
+    });
+    expect(storeRecordHistory).toHaveBeenCalledTimes(1);
+    expect(nextRecordHistory).not.toHaveBeenCalled();
+    await act(async () => {
+      finishFirst();
+      await result.current.refreshContinueWatching();
+    });
+    expect(storeRecordHistory.mock.calls.map(([entry]) =>
+      (entry as { progressSeconds: number }).progressSeconds,
+    )).toEqual([5, 15]);
+    expect(nextRecordHistory).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ mediaId: "store-bound", progressSeconds: 30 }),
+    );
+  });
+
+  it("admits the first resume synchronously and flushes the latest backward seek", async () => {
+    const { result } = await renderStore();
+    act(() => {
+      result.current.recordResume(createProgressWriteQueue, media("first-latest"), 5, 100);
+      expect(storeRecordHistory).toHaveBeenCalledTimes(1);
+      result.current.recordResume(createProgressWriteQueue, media("first-latest"), 25, 100);
+      result.current.recordResume(createProgressWriteQueue, media("first-latest"), 8, 100);
+    });
+    await act(async () => {
+      await result.current.refreshContinueWatching();
+    });
+    expect(storeRecordHistory.mock.calls.map(([entry]) =>
+      (entry as { progressSeconds: number }).progressSeconds,
+    )).toEqual([5, 8]);
+  });
+
+  it("drains active and pending old-profile writes before a cookie-changing transition", async () => {
+    let finishActive!: () => void;
+    let cookie = "old-profile";
+    const writes: Array<{ mediaId: string; cookie: string }> = [];
+    storeRecordHistory.mockImplementation((unknownEntry: unknown) => {
+      const entry = unknownEntry as { mediaId: string };
+      writes.push({ mediaId: entry.mediaId, cookie });
+      if (entry.mediaId === "active-old") {
+        return new Promise((resolve) => { finishActive = () => resolve({}); });
+      }
+      return Promise.resolve({});
+    });
+    const { result } = await renderStore();
+
+    act(() => {
+      result.current.recordResume(createProgressWriteQueue, media("active-old"), 10, 100);
+      result.current.recordResume(createProgressWriteQueue, media("pending-old"), 20, 100);
+    });
+    let cookieSwitched = false;
+    const transition = result.current.runProfileTransition(async (markProfileChanged) => {
+      cookie = "new-profile";
+      cookieSwitched = true;
+      markProfileChanged();
+    });
+    expect(cookieSwitched).toBe(false);
+    act(() => result.current.recordResume(
+      createProgressWriteQueue, media("blocked-during-drain"), 30, 100,
+    ));
+    expect(storeRecordHistory).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      finishActive();
+      await transition;
+    });
+    expect(writes).toEqual([
+      { mediaId: "active-old", cookie: "old-profile" },
+      { mediaId: "pending-old", cookie: "old-profile" },
+    ]);
+    expect(cookie).toBe("new-profile");
+  });
+
+  it("keeps progress fenced when a switch response fails after changing cookies, then resumes after retry", async () => {
+    const { result } = await renderStore();
+    let cookie = "old-profile";
+    await expect(result.current.runProfileTransition(async () => {
+      cookie = "new-profile"; // server committed the switch before body-read failure
+      throw new Error("switch response failed");
+    })).rejects.toThrow("switch response failed");
+
+    act(() => result.current.recordResume(createProgressWriteQueue, media("blocked-after-uncertain-switch"), 12, 100));
+    expect(storeRecordHistory).not.toHaveBeenCalled();
+    await result.current.runProfileTransition(async (markProfileChanged) => {
+      markProfileChanged();
+      await result.current.reloadProfileData();
+    });
+    act(() => result.current.recordResume(createProgressWriteQueue, media("new-profile-resume"), 15, 100));
+    await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledWith(
+      expect.objectContaining({ mediaId: "new-profile-resume", progressSeconds: 15 }),
+    ));
+    expect(cookie).toBe("new-profile");
+  });
+
+  it("keeps progress fenced after active deletion commits but its response body fails", async () => {
+    let finishActive!: () => void;
+    let cookie = "deleted-profile";
+    const writes: Array<{ mediaId: string; cookie: string }> = [];
+    storeRecordHistory.mockImplementation((unknownEntry: unknown) => {
+      const entry = unknownEntry as { mediaId: string };
+      writes.push({ mediaId: entry.mediaId, cookie });
+      if (entry.mediaId === "active-before-delete") {
+        return new Promise((resolve) => { finishActive = () => resolve({}); });
+      }
+      return Promise.resolve({});
+    });
+    const { result } = await renderStore();
+    act(() => {
+      result.current.recordResume(createProgressWriteQueue, media("active-before-delete"), 10, 100);
+      result.current.recordResume(createProgressWriteQueue, media("pending-before-delete"), 20, 100);
+    });
+
+    let deleteStarted = false;
+    const transition = result.current.runProfileTransition(async () => {
+      deleteStarted = true;
+      cookie = "server-default-after-delete";
+      // Simulate the server committing DELETE but response.text() rejecting,
+      // before the caller can observe a successful response or mark ownership.
+      throw new Error("delete response body failed");
+    });
+    expect(deleteStarted).toBe(false);
+    await act(async () => {
+      finishActive();
+      await expect(transition).rejects.toThrow("delete response body failed");
+    });
+    expect(writes).toEqual([
+      { mediaId: "active-before-delete", cookie: "deleted-profile" },
+      { mediaId: "pending-before-delete", cookie: "deleted-profile" },
+    ]);
+
+    act(() => result.current.recordResume(createProgressWriteQueue, media("must-stay-fenced"), 30, 100));
+    expect(storeRecordHistory).toHaveBeenCalledTimes(2);
+    expect(cookie).toBe("server-default-after-delete");
   });
 
   it("keeps successful bootstrap continue-watching rows after a foreground refresh fails", async () => {
@@ -2030,6 +2296,94 @@ describe("reloadProfileData", () => {
       await result.current.reloadProfileData();
     });
     expect(remote.resetProfileCache).toHaveBeenCalled();
+  });
+
+  it("aborts an active RemoteStore progress request on a direct profile-generation change", async () => {
+    const Ctor = MockRemoteStore as unknown as new () => Record<string, unknown>;
+    const remote = new Ctor() as unknown as {
+      resetProfileCache: ReturnType<typeof vi.fn>;
+      getCachedResolutions: (ids: string[]) => Promise<unknown[]>;
+      deleteCachedResolution: (id: string) => Promise<void>;
+      recordHistory: (entry: unknown, signal: AbortSignal) => Promise<unknown>;
+    };
+    remote.getCachedResolutions = () => Promise.resolve([]);
+    remote.deleteCachedResolution = () => Promise.resolve();
+    let requestSignal: AbortSignal | undefined;
+    remote.recordHistory = vi.fn((_entry: unknown, signal: AbortSignal) => {
+      requestSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError")), { once: true });
+      });
+    });
+    getStore.mockReturnValue(remote as never);
+    const { result } = await renderStore();
+
+    act(() => result.current.recordResume(createProgressWriteQueue, media("remote-active"), 18, 100));
+    await waitFor(() => expect(requestSignal).toBeDefined());
+    expect(requestSignal?.aborted).toBe(false);
+    await act(async () => {
+      await result.current.reloadProfileData();
+    });
+    expect(requestSignal?.aborted).toBe(true);
+    expect(remote.recordHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds the profile drain at 12 seconds while remote progress times out and advances", async () => {
+    const Ctor = MockRemoteStore as unknown as new () => Record<string, unknown>;
+    const remote = new Ctor() as unknown as {
+      resetProfileCache: ReturnType<typeof vi.fn>;
+      getCachedResolutions: (ids: string[]) => Promise<unknown[]>;
+      deleteCachedResolution: (id: string) => Promise<void>;
+      recordHistory: (entry: unknown, signal: AbortSignal) => Promise<unknown>;
+    };
+    remote.getCachedResolutions = () => Promise.resolve([]);
+    remote.deleteCachedResolution = () => Promise.resolve();
+    const requestSignals: AbortSignal[] = [];
+    remote.recordHistory = vi.fn((_entry: unknown, signal: AbortSignal) => {
+      requestSignals.push(signal);
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError")), { once: true });
+      });
+    });
+    getStore.mockReturnValue(remote as never);
+    const { result } = await renderStore();
+    vi.useFakeTimers();
+    act(() => {
+      result.current.recordResume(createProgressWriteQueue, media("slow-profile-progress"), 19, 100);
+      result.current.recordResume(createProgressWriteQueue, media("next-slow-profile-progress"), 20, 100);
+      result.current.recordResume(createProgressWriteQueue, media("cancelled-before-profile-switch"), 21, 100);
+    });
+    expect(requestSignals).toHaveLength(1);
+    let switched = false;
+    const transition = result.current.runProfileTransition(async (markProfileChanged) => {
+      switched = true;
+      markProfileChanged();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9_999);
+    });
+    expect(requestSignals[0]?.aborted).toBe(false);
+    expect(switched).toBe(false);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(requestSignals[0]?.aborted).toBe(true);
+    expect(requestSignals).toHaveLength(2);
+    expect(requestSignals[1]?.aborted).toBe(false);
+    expect(switched).toBe(false);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_999);
+    });
+    expect(requestSignals[1]?.aborted).toBe(false);
+    expect(switched).toBe(false);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(switched).toBe(true);
+    expect(requestSignals[1]?.aborted).toBe(true);
+    expect(requestSignals).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+    await act(async () => { await transition; });
   });
 
   it("does NOT call resetProfileCache for a plain (non-Remote) store", async () => {

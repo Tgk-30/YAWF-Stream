@@ -57,12 +57,14 @@ import type {
 } from "../storage/models";
 import { getStore, swapLocalProfileStore } from "../storage";
 import { RemoteStore } from "../storage/RemoteStore";
+import type { ProgressWriteQueue } from "./progressWriteQueue";
 import { AutoResolveScheduler } from "../lib/autoResolve";
 import { isServerMode } from "../lib/serverMode";
 import { setNetworkMode } from "../lib/networkPolicy";
 import { useServerSession } from "../lib/ServerSessionContext";
 import { verifyPassword } from "../lib/passwordHash";
 import type { SettingsSection } from "../lib/settingsNavigation";
+
 import {
   dbNameForProfile,
   ensureDefaultProfile,
@@ -287,6 +289,11 @@ export interface AppStore {
    * continue-watching / settings). Called after a Server-Mode "who's watching"
    * profile switch so the UI reflects the newly-active profile's data. */
   reloadProfileData: () => Promise<void>;
+  /** Run a cookie-changing profile operation only after existing progress writes
+   * have drained. Call `markProfileChanged` immediately after server success. */
+  runProfileTransition: <T>(
+    operation: (markProfileChanged: () => void) => Promise<T>,
+  ) => Promise<T>;
   /** Local Mode profile registry state. Server Mode continues to use its
    * session profile context and never reads this registry. */
   activeProfile: LocalProfile | null;
@@ -297,9 +304,11 @@ export interface AppStore {
     id: string,
     password?: string,
   ) => Promise<{ ok: boolean; reason?: "bad-password" | "not-found" }>;
-  /** Record a real resume position (called from the player). For series pass
-   *  the playing episode's id (`s2e5`); movies omit it / pass null. */
+  /** Record a real resume position. The lazy player screen supplies the queue
+   * factory so its implementation stays off the initial load. For series pass
+   * the playing episode's id (`s2e5`); movies omit it / pass null. */
   recordResume: (
+    createQueue: () => ProgressWriteQueue,
     item: MediaPreview,
     progressSeconds: number,
     durationSeconds: number | null,
@@ -328,6 +337,7 @@ export interface AppActions {
   removeFromWatchlist: AppStore["removeFromWatchlist"];
   importToWatchlist: AppStore["importToWatchlist"];
   reloadProfileData: AppStore["reloadProfileData"];
+  runProfileTransition: AppStore["runProfileTransition"];
   refreshProfiles: AppStore["refreshProfiles"];
   switchLocalProfile: AppStore["switchLocalProfile"];
   recordResume: AppStore["recordResume"];
@@ -450,7 +460,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   const [continueWatching, setContinueWatching] = useState<WatchHistoryRecord[]>(
     [],
   );
-  const pendingResumeWritesRef = useRef<Set<Promise<unknown>>>(new Set());
+  const resumeWriteQueueRef = useRef<ProgressWriteQueue | null>(null);
+  const resumeWritesBlockedRef = useRef(false);
   const [cachedResolutions, setCachedResolutions] = useState<
     Record<string, CachedResolutionRecord>
   >({});
@@ -512,8 +523,10 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const invalidateProfileReads = useCallback((): number => {
+    const previousGeneration = profileReadGenerationRef.current;
     const generation = profileReadGenerationRef.current + 1;
     profileReadGenerationRef.current = generation;
+    resumeWriteQueueRef.current?.cancelGeneration(previousGeneration);
     watchlistReadyGenerationRef.current = null;
     setWatchlistReadyGeneration(null);
     setDurableProfileReady(false);
@@ -771,9 +784,45 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   // Used after Server Mode and explicit Local Mode profile switches. Invalidate
   // any older bootstrap reads before starting the replacement profile read.
   const reloadProfileData = useCallback(async () => {
-    const generation = invalidateProfileReads();
-    await reloadProfileDataForGeneration(generation);
+    const wasBlocked = resumeWritesBlockedRef.current;
+    resumeWritesBlockedRef.current = true;
+    try {
+      const generation = invalidateProfileReads();
+      await reloadProfileDataForGeneration(generation);
+    } finally {
+      if (!wasBlocked) resumeWritesBlockedRef.current = false;
+    }
   }, [invalidateProfileReads, reloadProfileDataForGeneration]);
+
+  const runProfileTransition = useCallback(async <T,>(
+    operation: (markProfileChanged: () => void) => Promise<T>,
+  ): Promise<T> => {
+    const wasBlocked = resumeWritesBlockedRef.current;
+    resumeWritesBlockedRef.current = true;
+    const generation = profileReadGenerationRef.current;
+    let profileChanged = false;
+    let operationStarted = false;
+    let succeeded = false;
+    const markProfileChanged = () => {
+      if (profileChanged) return;
+      profileChanged = true;
+      invalidateProfileReads();
+    };
+    try {
+      await resumeWriteQueueRef.current?.drainGeneration(generation);
+      operationStarted = true;
+      const result = await operation(markProfileChanged);
+      succeeded = true;
+      return result;
+    } finally {
+      // Once an operation that may mutate auth has begun, a rejection does not
+      // prove that the cookie/profile stayed unchanged. Only successful
+      // completion or a pre-operation barrier failure may reopen progress.
+      if (succeeded || (!operationStarted && !wasBlocked)) {
+        resumeWritesBlockedRef.current = false;
+      }
+    }
+  }, [invalidateProfileReads]);
 
   const refreshProfiles = useCallback(async () => {
     if (isServerMode()) return;
@@ -800,18 +849,23 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       unlockedProfileIds.add(id);
     }
     // Invalidate old-profile auxiliary reads before the database pointer moves.
-    const generation = invalidateProfileReads();
-    // Fail safe across the swap: the target profile's own mode is unknown until
-    // reloadProfileData loads its settings, and getStore() now points at the new
-    // profile's DB. Clamp to the most restrictive mode so a scheduler tick in
-    // that sub-second window cannot make a call the target profile would block.
-    setNetworkMode("offline");
-    await swapLocalProfileStore(dbNameForProfile(profile));
-    await setActiveProfileId(id);
-    await updateProfileRecord(id, { lastUsedAt: Date.now() });
-    await reloadProfileDataForGeneration(generation); // sets the target profile's real networkMode
-    await refreshProfiles();
-    return { ok: true };
+    resumeWritesBlockedRef.current = true;
+    try {
+      const generation = invalidateProfileReads();
+      // Fail safe across the swap: the target profile's own mode is unknown until
+      // reloadProfileData loads its settings, and getStore() now points at the new
+      // profile's DB. Clamp to the most restrictive mode so a scheduler tick in
+      // that sub-second window cannot make a call the target profile would block.
+      setNetworkMode("offline");
+      await swapLocalProfileStore(dbNameForProfile(profile));
+      await setActiveProfileId(id);
+      await updateProfileRecord(id, { lastUsedAt: Date.now() });
+      await reloadProfileDataForGeneration(generation); // sets the target profile's real networkMode
+      await refreshProfiles();
+      return { ok: true };
+    } finally {
+      resumeWritesBlockedRef.current = false;
+    }
   }, [invalidateProfileReads, refreshProfiles, reloadProfileDataForGeneration]);
 
   // Most settings are presentation or playback preferences. Rebuilding every
@@ -1079,9 +1133,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     // The webview player's final progress report is emitted during unmount.
     // Drain all writes visible at this session boundary before reading the
     // updated slice, including one added while an earlier write is settling.
-    while (pendingResumeWritesRef.current.size > 0) {
-      await Promise.all([...pendingResumeWritesRef.current]);
-    }
+    await resumeWriteQueueRef.current?.flush().catch(() => {});
     try {
       const loaded = await loadContinueWatching();
       if (!auxiliaryReadIsCurrent(generation, "continueWatching", revision)) return;
@@ -1593,45 +1645,17 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     [auxiliaryReadIsCurrent, bumpAuxiliaryRevision, queueWatchlistWrite, refreshCachedResolutions, settleWatchlistWrite],
   );
 
-  const recordResume = useCallback(
-    (
-      item: MediaPreview,
-      progressSeconds: number,
-      durationSeconds: number | null,
-      episodeId?: string | null,
-      prefs?: PlaybackPrefs,
-    ) => {
-      const completed =
-        durationSeconds != null &&
-        durationSeconds > 0 &&
-        progressSeconds / durationSeconds >= 0.95;
-      // `recordHistory()` is intentionally convenient for interactive history
-      // mutations because it reads the refreshed list back. Playback progress
-      // is different: doing that every five seconds deserializes all history
-      // rows and changes the provider context for the entire app. The storage
-      // upsert already preserves omitted player prefs, so persist directly and
-      // refresh once at the playback-session boundary or when History opens.
-      const write = getStore()
-        .recordHistory({
-          mediaId: item.id,
-          episodeId: episodeId ?? null,
-          progressSeconds,
-          durationSeconds,
-          completed,
-          preview: item,
-          preferredAudioId: prefs?.preferredAudioId,
-          preferredAudioLang: prefs?.preferredAudioLang,
-          preferredSubId: prefs?.preferredSubId,
-          playbackSpeed: prefs?.playbackSpeed,
-          subtitleDelay: prefs?.subtitleDelay,
-          subtitlePosition: prefs?.subtitlePosition,
-        })
-        .catch(() => {
-          // Progress persistence is best effort. The next tick and final close
-          // report can retry without interrupting playback.
-        });
-      pendingResumeWritesRef.current.add(write);
-      void write.finally(() => pendingResumeWritesRef.current.delete(write));
+  const recordResume = useCallback<AppStore["recordResume"]>(
+    (createQueue, item, progressSeconds, durationSeconds, episodeId, prefs) => {
+      if (resumeWritesBlockedRef.current) return;
+      // Detail already has the queue code loaded. Admit the first report
+      // synchronously, with one queue owned by this provider across sessions.
+      const queue = resumeWriteQueueRef.current ??= createQueue();
+      const store = getStore();
+      queue.recordResume(
+        store, profileReadGenerationRef.current, store instanceof RemoteStore,
+        item, progressSeconds, durationSeconds, episodeId, prefs,
+      );
     },
     [],
   );
@@ -1661,6 +1685,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     removeFromWatchlist,
     importToWatchlist,
     reloadProfileData,
+    runProfileTransition,
     refreshProfiles,
     switchLocalProfile,
     recordResume,
@@ -1692,6 +1717,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       removeFromWatchlist: (...args) => live().removeFromWatchlist(...args),
       importToWatchlist: (...args) => live().importToWatchlist(...args),
       reloadProfileData: () => live().reloadProfileData(),
+      runProfileTransition: (...args) => live().runProfileTransition(...args),
       refreshProfiles: () => live().refreshProfiles(),
       switchLocalProfile: (...args) => live().switchLocalProfile(...args),
       recordResume: (...args) => live().recordResume(...args),
@@ -1752,6 +1778,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       removeFromWatchlist,
       importToWatchlist,
       reloadProfileData,
+      runProfileTransition,
       activeProfile,
       profiles,
       multiUserEnabled,
@@ -1808,6 +1835,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       removeFromWatchlist,
       importToWatchlist,
       reloadProfileData,
+      runProfileTransition,
       activeProfile,
       profiles,
       multiUserEnabled,
