@@ -2300,7 +2300,8 @@ export function VideoPlayer({
               credentials: "include",
               headers: { accept: "application/vnd.apple.mpegurl" },
               signal: controller.signal,
-              ...(purpose === "automatic-starvation" ? { cache: "no-store" as const, redirect: "error" as const } : {}),
+              cache: "no-store",
+              ...(purpose === "automatic-starvation" ? { redirect: "error" as const } : {}),
             }),
             remainingMs,
             "Server optimized playback timed out.",
@@ -2340,9 +2341,9 @@ export function VideoPlayer({
           );
           if (!ownsRequest()) return false;
           if (!text.startsWith("#EXTM3U")) throw new Error("The server did not return a playable HLS manifest.");
-          const snapshot = purpose === "automatic-starvation"
-            ? parseServerHlsSnapshot(next.url, text, response.headers, quality, next.timelineOffsetSeconds, audioTrack)
-            : "legacy";
+          // Auto and older servers have no single-rendition snapshot. If a
+          // server advertises metadata, malformed or incompatible data fails.
+          const snapshot = parseServerHlsSnapshot(next.url, text, response.headers, quality, next.timelineOffsetSeconds, audioTrack);
           if (snapshot == null || (snapshot === "legacy" && advertisedSnapshot)) {
             throw new Error("The server returned invalid playback readiness metadata.");
           }
@@ -2358,17 +2359,24 @@ export function VideoPlayer({
           }
           // Sampling the owned decoder updates the absolute clock even without
           // a timeupdate event. No await separates this sample and activation.
-          automaticHandoffState = purpose === "automatic-starvation" && typeof handoffState === "function"
-            ? handoffState() : null;
+          const sampledHandoffState = typeof handoffState === "function"
+            ? handoffState() : handoffState ?? null;
+          automaticHandoffState = purpose === "automatic-starvation" ? sampledHandoffState : null;
           if (!ownsRequest()) return false;
           // A refused owned reader must stay refused even on legacy masters.
           if (purpose === "automatic-starvation" && snapshot === "legacy" && automaticHandoffState == null) return false;
           activationPosition = positionIntent === "fixed" ? position : latestAbsolutePositionRef.current;
           if (purpose === "automatic-starvation" && activationPosition < next.timelineOffsetSeconds) return false;
-          if (snapshot !== "legacy") {
-            const state = currentWebviewHandoffState(automaticHandoffState);
-            if (automaticHandoffState == null || state == null || !serverHlsSnapshotAdmits(snapshot, activationPosition - next.timelineOffsetSeconds,
-              state.paused, state.playbackRate, performance.now() - snapshotRequestedAt)) {
+          if (snapshot !== "legacy" && (purpose === "ordinary" || purpose === "automatic-starvation")) {
+            const state = currentWebviewHandoffState(sampledHandoffState);
+            // A caller without any handoff state keeps compatibility behavior;
+            // it is not eligible for a readiness-qualified claim. A temporarily
+            // unready owned reader, however, must not use a stale clock.
+            if (state != null && activationPosition < next.timelineOffsetSeconds) return false;
+            if ((purpose === "automatic-starvation" && (automaticHandoffState == null || state == null)) ||
+              (typeof handoffState === "function" && sampledHandoffState == null) ||
+              (state != null && !serverHlsSnapshotAdmits(snapshot, activationPosition - next.timelineOffsetSeconds,
+                state.paused, state.playbackRate, performance.now() - snapshotRequestedAt))) {
               const delay = Math.min(500, manifestDeadline - Date.now());
               if (delay <= 0) { controller.abort(); throw new Error("Server optimized playback timed out."); }
               await abortableDelay(delay, controller.signal);
@@ -8017,10 +8025,26 @@ function WebviewPlayer({
     const selected = serverAudioTracks.find(
       (track) => track.index === resolvedServerAudioTrack,
     );
+    const initialVideo = videoRef.current;
+    const initialPosition = initialVideo != null && currentMediaEvent(initialVideo)
+      ? captureRecoverySnapshot(initialVideo).position : absolutePlaybackPosition();
     void onSelectServerOptimized(
       quality,
-      absolutePlaybackPosition(),
-      playbackHandoffState,
+      initialPosition,
+      () => {
+        const video = videoRef.current;
+        if (video == null || !currentMediaEvent(video) || video.seeking || rendererSeekingRef.current) return null;
+        if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.error != null ||
+          recoveryClockWasReset(video) || terminalRecoveryOwns(video) || !Number.isFinite(video.currentTime)) {
+          // Decoder failure or reset does not discard the owner's existing
+          // recovery position and play/pause intent.
+          const recovery = captureRecoverySnapshot(video);
+          onAbsolutePositionChange(recovery.position);
+          return recovery.state;
+        }
+        onAbsolutePositionChange(absolutePlaybackPosition());
+        return playbackHandoffState();
+      },
       resolvedServerAudioTrack ?? undefined,
       activeServerAudioPreference ?? (selected == null ? undefined : {
         id: selected.id,
@@ -8031,9 +8055,11 @@ function WebviewPlayer({
     absolutePlaybackPosition,
     activeServerAudioPreference,
     resolvedServerAudioTrack,
+    onAbsolutePositionChange,
     onSelectServerOptimized,
     playbackHandoffState,
     serverAudioTracks,
+    sourceIdentity,
   ]);
 
   const selectDeviceOriginal = useCallback(() => {

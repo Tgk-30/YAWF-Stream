@@ -1,0 +1,222 @@
+name: Isolated foreground playback QA
+on:
+  push:
+    branches:
+      - codex/foreground-playback113
+    paths:
+      - .github/workflows/foreground-playback-qa.yml
+      - scripts/android_external_player_server_fixture.mts
+      - scripts/foreground_playback_gate.mjs
+      - scripts/foreground_playback_gate.test.mjs
+      - scripts/foreground_fixture_media_plan.mjs
+      - scripts/check_manual_hls_readiness_regressions.mjs
+      - scripts/prepare_foreground_seccomp.mjs
+      - scripts/prepare_foreground_seccomp.test.mjs
+      - scripts/foreground-playback/**
+  workflow_dispatch:
+    inputs:
+      run_mode:
+        description: Admission only, or full 480-second cases and negative control
+        type: choice
+        required: true
+        default: admission
+        options:
+          - admission
+          - full
+permissions:
+  contents: read
+jobs:
+  validate:
+    name: Validate foreground playback contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test scripts/foreground_playback_gate.test.mjs
+      - run: node --test scripts/prepare_foreground_seccomp.test.mjs
+      - run: node --test --test-name-pattern='fixture emits bounded token-free media and HTTP diagnostics' scripts/android_external_player_workflow.test.mjs
+      - name: Install locked web test dependencies
+        run: npm ci
+        working-directory: web
+      - name: Revert-check each manual HLS readiness regression
+        run: node scripts/check_manual_hls_readiness_regressions.mjs
+      - name: Retain bounded manual HLS unit revert receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-hls-readiness-unit-revert-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/manual-hls-readiness-regressions.json
+          if-no-files-found: warn
+          retention-days: 3
+  foreground-chromium:
+    needs: validate
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.repository == 'Tgk-30/YAWF-Stream' && github.actor == github.repository_owner }}
+    # Retain host22; the audited chroot-only profile derivation is versioned separately.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Admit disk and prepare verified bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/foreground-evidence"
+          trap 'status=$?; if (( status != 0 )); then printf "{\"phase\":\"bootstrap\",\"failureCode\":\"Error\"}\n" > "$RUNNER_TEMP/foreground-evidence/status.json"; fi' EXIT
+          test "$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')" -ge 18874368 || { echo 'Requires 12 GiB plus 6 GiB reserve'; exit 1; }
+          test "${ImageOS:-}" = ubuntu22 || { echo "Unexpected foreground host image"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/foreground-build"
+          {
+            printf 'source=%s\n' "$(git rev-parse HEAD)"
+            echo 'browserImage=mcr.microsoft.com/playwright@sha256:766137e2d9caad4744187e53cdc89320ba6f2eb57cff097374020944b44dd0a9'
+            echo 'scope=synthetic-desktop-chromium-not-native-ipad'
+            printf 'hostRunner=ubuntu-22.04\nhostImageOS=%s\nhostImageVersion=%s\n' "$ImageOS" "${ImageVersion:-unavailable}"
+          } > "$RUNNER_TEMP/foreground-evidence/binding.txt"
+          cp scripts/foreground-playback/Dockerfile "$RUNNER_TEMP/foreground-build/Dockerfile"
+          curl --fail --silent --show-error --location --max-time 120 https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-x64.tar.xz -o "$RUNNER_TEMP/foreground-build/node-v24.22.3-linux-x64.tar.xz"
+          echo '4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb  '"$RUNNER_TEMP/foreground-build/node-v24.22.3-linux-x64.tar.xz" | sha256sum -c -
+          node scripts/prepare_foreground_seccomp.mjs >> "$RUNNER_TEMP/foreground-evidence/binding.txt"
+          echo 'e53c15d248f57bceec0a3a16fad1b4ab0d05a7bddb455f86a60e2dba5612cdf7  '"$RUNNER_TEMP/foreground-seccomp-playwright-1.65.1-chroot-v1.json" | sha256sum -c -
+          docker build --pull -t "foreground-qa:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "$RUNNER_TEMP/foreground-build"
+      - name: Install locked dependencies and build frontend before isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          trap 'status=$?; if (( status != 0 )); then printf "{\"phase\":\"bootstrap\",\"failureCode\":\"Error\"}\n" > "$RUNNER_TEMP/foreground-evidence/status.json"; fi' EXIT
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$GITHUB_WORKSPACE:/repo" -w /repo "foreground-qa:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" bash -euc '
+            node --version
+            cd /repo/web && npm ci && npm run build
+            cd /repo/server && npm ci
+            cd /repo/scripts/foreground-playback && npm ci && npm audit --omit=dev --audit-level=high
+            cd /repo && node --test scripts/foreground_playback_gate.test.mjs
+          '
+      - name: Run in fresh loopback-only sandbox
+        shell: bash
+        env:
+          QA_MODE: ${{ inputs.run_mode }}
+        run: |
+          set -euo pipefail
+          mode="$QA_MODE"
+          case "$mode" in admission|full) ;; *) exit 1 ;; esac
+          name="foreground-qa-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            status=$?
+            docker rm -f "$name" >/dev/null 2>&1 || true
+            if (( status != 0 )) && [[ ! -e "$RUNNER_TEMP/foreground-evidence/status.json" ]]; then
+              printf '{"phase":"evidence","failureCode":"Error"}\n' > "$RUNNER_TEMP/foreground-evidence/status.json"
+            fi
+            return "$status"
+          }
+          trap cleanup EXIT
+          uid=$(id -u); gid=$(id -g)
+          test -f "$RUNNER_TEMP/foreground-seccomp-playwright-1.65.1-chroot-v1.json"
+          test ! -L "$RUNNER_TEMP/foreground-seccomp-playwright-1.65.1-chroot-v1.json"
+          echo 'e53c15d248f57bceec0a3a16fad1b4ab0d05a7bddb455f86a60e2dba5612cdf7  '"$RUNNER_TEMP/foreground-seccomp-playwright-1.65.1-chroot-v1.json" | sha256sum -c -
+          docker create --name "$name" --network none --user "$uid:$gid" --cap-drop ALL \
+            --security-opt no-new-privileges --security-opt "seccomp=$RUNNER_TEMP/foreground-seccomp-playwright-1.65.1-chroot-v1.json" \
+            --read-only --cpus 4 --memory 6g --pids-limit 512 --shm-size 512m \
+            --tmpfs "/qa:rw,nosuid,nodev,size=2g,uid=$uid,gid=$gid,mode=700" \
+            --tmpfs "/tmp:rw,nosuid,nodev,size=256m,uid=$uid,gid=$gid,mode=700" \
+            -v "$GITHUB_WORKSPACE:/repo:ro" -v "$RUNNER_TEMP/foreground-evidence:/evidence:rw" \
+            -e HOME=/tmp -e TMPDIR=/qa/tmp -e QA_OUTPUT=/qa/output -e QA_MODE="$mode" -w /repo \
+            "foreground-qa:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" bash -euc '
+              phase=namespace
+              finish() {
+                status=$?
+                trap - EXIT
+                set +e
+                files=(summary)
+                if test "$QA_MODE" = admission; then files+=(admission); else files+=(direct hls stall); fi
+                bytes=$(du -sb /evidence | cut -f1)
+                missing=0
+                for item in "${files[@]}"; do
+                  if test "$item" = summary; then path=/qa/output/summary.json; else path="/qa/output/$item/result.json"; fi
+                  if test -f "$path" && ! test -L "$path"; then bytes=$((bytes + $(stat -c %s "$path"))); else missing=1; fi
+                done
+                # Reserve space for a bounded refusal receipt; never upload oversized data.
+                if test "$bytes" -gt 33553920; then
+                  printf "{\"phase\":\"evidence\",\"failureCode\":\"Error\",\"reason\":\"oversize\"}\n" > /evidence/status.json
+                  if test "$status" -eq 0; then status=1; fi
+                  exit "$status"
+                fi
+                for item in "${files[@]}"; do
+                  if test "$item" = summary; then path=/qa/output/summary.json; else path="/qa/output/$item/result.json"; fi
+                  if test -f "$path" && ! test -L "$path"; then cp "$path" "/evidence/$item.json" || status=1; fi
+                done
+                image_count=0
+                image_case=""
+                for item in "${files[@]}"; do
+                  if test "$item" = summary; then continue; fi
+                  path="/qa/output/$item/failure.jpg"
+                  if test -e "$path" || test -L "$path"; then image_count=$((image_count + 1)); image_case="$item"; fi
+                done
+                if test "$status" -eq 0 && test "$image_count" -ne 0; then
+                  printf "{\"phase\":\"evidence\",\"failureCode\":\"Error\",\"reason\":\"unexpected-failure-image\"}\n" > /evidence/status.json
+                  exit 1
+                fi
+                if test "$status" -ne 0; then
+                  if test "$image_count" -gt 1 || { test "$image_count" -eq 1 && ! node /repo/scripts/foreground_playback_gate.mjs --copy-failure-screenshot "/qa/output/$image_case" /evidence "$image_case"; }; then
+                    printf "{\"phase\":\"evidence\",\"failureCode\":\"Error\",\"reason\":\"failure-image-refused\"}\n" > /evidence/status.json
+                  else
+                    printf "{\"phase\":\"%s\",\"failureCode\":\"Error\"}\n" "$phase" > /evidence/status.json
+                  fi
+                  exit "$status"
+                fi
+                if test "$missing" -ne 0 || ! node /repo/scripts/foreground_playback_gate.mjs --validate-evidence /evidence "$QA_MODE"; then
+                  printf "{\"phase\":\"evidence\",\"failureCode\":\"Error\",\"reason\":\"receipt-refused\"}\n" > /evidence/status.json
+                  exit 1
+                fi
+                exit 0
+              }
+              trap finish EXIT
+              # No server, media tool, or browser runs until this admission passes.
+              test "$(id -u)" -ne 0
+              for mask in CapInh CapPrm CapEff CapBnd CapAmb; do
+                test "$(grep -c "^$mask:[[:space:]]*0000000000000000$" "/proc/$$/status")" = 1
+              done
+              test "$(grep -c "^NoNewPrivs:[[:space:]]*1$" "/proc/$$/status")" = 1
+              printf "runtimeParentNonroot=true\nruntimeParentCapabilityMasksZero=true\nruntimeParentNoNewPrivs=1\n" >> /evidence/binding.txt
+              test "$(ls /sys/class/net)" = lo
+              ip -o link show lo | grep -q "<.*UP"
+              test -z "$(ip -4 route show)"
+              test -z "$(ip -6 route show)"
+              mkdir -p /qa/tmp /qa/output
+              phase=bootstrap
+              {
+                node --version
+                dpkg-query -W ffmpeg fonts-dejavu-core
+                cat /opt/ffmpeg-deb.sha256
+                sha256sum /usr/bin/ffmpeg /usr/bin/ffprobe /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+                ffmpeg -version | head -n 1
+                ffmpeg -hide_banner -encoders 2>/dev/null | grep -E "libx264| aac "
+                ffprobe -version | head -n 1
+              } > /evidence/toolchain.txt
+              phase=evidence
+              node /repo/scripts/foreground_playback_gate.mjs > /qa/private.log 2>&1
+            ' >/dev/null
+          docker start "$name" >/dev/null
+          if ! timeout 2250s docker wait "$name" > "$RUNNER_TEMP/foreground-exit"; then
+            printf '{"phase":"window","failureCode":"Timeout"}\n' > "$RUNNER_TEMP/foreground-evidence/status.json"
+            echo 'Runtime deadline exceeded'; exit 1
+          fi
+          test "$(cat "$RUNNER_TEMP/foreground-exit")" = 0 || { echo 'Foreground gate failed; inspect bounded result artifacts'; exit 1; }
+          node scripts/foreground_playback_gate.mjs --validate-evidence "$RUNNER_TEMP/foreground-evidence" "$mode" || { echo 'Host receipt validation refused results'; exit 1; }
+      - name: Upload bounded sanitized evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: foreground-chromium-synthetic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/foreground-evidence/
+          if-no-files-found: warn
+          retention-days: 3

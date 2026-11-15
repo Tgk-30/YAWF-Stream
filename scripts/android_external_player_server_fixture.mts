@@ -17,19 +17,27 @@ import {
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { buildFixtureMediaPlan } from "./foreground_fixture_media_plan.mjs";
 
 interface FixtureCLI {
   repo: string;
   output: string;
   smokeOnly: boolean;
+  foregroundLong: boolean;
 }
 
 function parseFixtureCLI(argv: string[]): FixtureCLI {
   let repo: string | null = null;
   let output: string | null = null;
   let smokeOnly = false;
+  let foregroundLong = false;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
+    if (argument === "--foreground-long") {
+      if (foregroundLong) throw new Error("Duplicate --foreground-long argument.");
+      foregroundLong = true;
+      continue;
+    }
     if (argument === "--smoke-only") {
       if (smokeOnly) throw new Error("Duplicate --smoke-only argument.");
       smokeOnly = true;
@@ -54,7 +62,7 @@ function parseFixtureCLI(argv: string[]): FixtureCLI {
   if (repo == null || output == null) {
     throw new Error("Usage: server-ui-fixture.mts --repo <absolute-checkout> --output <absolute-empty-directory> [--smoke-only]");
   }
-  return { repo, output, smokeOnly };
+  return { repo, output, smokeOnly, foregroundLong };
 }
 
 function canonicalAbsoluteDirectory(raw: string, label: string, create: boolean): string {
@@ -82,13 +90,68 @@ if (isInside(REPO, ARTIFACT_DIR) || isInside(ARTIFACT_DIR, REPO)) {
 if (readdirSync(ARTIFACT_DIR).length !== 0) {
   throw new Error("--output must be empty so evidence is never overwritten or mixed.");
 }
+
+type ForegroundFixtureStage =
+  "input-check" | "media-preflight" | "mp4-generation" | "static-hls-generation" | "media-probe" | "media-output-check" |
+  "long-mp4-generation" | "long-media-probe" |
+  "runtime-init" | "media-listen" | "server-build" | "seed-owner" | "seed-credentials" | "seed-settings" | "seed-watchlist" |
+  "smoke-media" | "smoke-addon" | "smoke-outbound" | "smoke-login" | "smoke-bootstrap" | "smoke-watchlist" |
+  "smoke-discover" | "smoke-detail" | "smoke-streams" | "smoke-resolve" | "smoke-proxy-full" | "smoke-proxy-range" |
+  "smoke-external-full" | "smoke-external-range" | "smoke-web" | "smoke-receipt" | "server-listen" | "ready";
+type ForegroundFixtureFailure =
+  "input-missing" | "input-invalid" | "ffmpeg-execution" | "ffmpeg-exit" | "ffmpeg-filter-missing" | "font-missing" |
+  "probe-execution" | "probe-exit" | "probe-json" | "probe-streams" | "probe-codecs" | "media-layout" | "media-file" |
+  "http-status" | "csrf-missing" | "smoke-assertion" | "json-response" | "unclassified-error";
+const foregroundRefusals = new WeakMap<Error, { failureCode: ForegroundFixtureFailure; childExitCode: number | null }>();
+let foregroundStage: ForegroundFixtureStage = "input-check";
+let foregroundRefused = false;
+
+function writeForegroundDiagnostic(status: "running" | "refused" | "ready", failureCode: ForegroundFixtureFailure | null,
+  childExitCode: number | null = null): void {
+  if (!fixtureCLI.foregroundLong) return;
+  const path = join(ARTIFACT_DIR, "foreground-fixture-status.json");
+  try {
+    writeFileSync(`${path}.tmp`, `${JSON.stringify({ schemaVersion: 1, stage: foregroundStage, status, failureCode, childExitCode })}\n`, { mode: 0o600 });
+    renameSync(`${path}.tmp`, path);
+  } catch { /* Diagnostics never change fixture execution or copy filesystem error text. */ }
+}
+
+function markForegroundStage(stage: ForegroundFixtureStage): void {
+  if (!fixtureCLI.foregroundLong) return;
+  foregroundStage = stage;
+  foregroundRefused = false;
+  writeForegroundDiagnostic(stage === "ready" ? "ready" : "running", null);
+}
+
+function recordForegroundRefusal(error: unknown): void {
+  if (!fixtureCLI.foregroundLong || foregroundRefused) return;
+  foregroundRefused = true;
+  const refusal = error instanceof Error ? foregroundRefusals.get(error) : undefined;
+  writeForegroundDiagnostic("refused", refusal?.failureCode ?? "unclassified-error", refusal?.childExitCode ?? null);
+}
+
+function fixtureRefusal(failureCode: ForegroundFixtureFailure, message: string, childExitCode: number | null = null): Error {
+  const error = new Error(message);
+  if (fixtureCLI.foregroundLong) {
+    foregroundRefusals.set(error, { failureCode, childExitCode });
+    recordForegroundRefusal(error);
+  }
+  return error;
+}
+
+if (fixtureCLI.foregroundLong) {
+  markForegroundStage("input-check");
+  // Monitor only. Normal uncaught-error handling and the failing exit are unchanged.
+  process.on("uncaughtExceptionMonitor", recordForegroundRefusal);
+}
+
 for (const required of [
   join(REPO, ".git"),
   join(REPO, "server", "package.json"),
   join(REPO, "server", "src", "app.ts"),
   join(REPO, "web", "dist", "index.html"),
 ]) {
-  if (!existsSync(required)) throw new Error(`The checkout is missing a required input: ${basename(required)}`);
+  if (!existsSync(required)) throw fixtureRefusal("input-missing", `The checkout is missing a required input: ${basename(required)}`);
 }
 const WEB_DIST = join(REPO, "web", "dist");
 const MEDIA_DIR = join(ARTIFACT_DIR, "media");
@@ -160,8 +223,8 @@ function runFfmpeg(label: string, args: string[]): void {
     maxBuffer: 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  if (result.error != null) throw new Error(`${label} could not execute the installed ffmpeg.`);
-  if (result.status !== 0) throw new Error(`${label} failed with exit ${String(result.status)}.`);
+  if (result.error != null) throw fixtureRefusal("ffmpeg-execution", `${label} could not execute the installed ffmpeg.`);
+  if (result.status !== 0) throw fixtureRefusal("ffmpeg-exit", `${label} failed with exit ${String(result.status)}.`, result.status);
 }
 
 function writeMediaProbe(): void {
@@ -176,15 +239,19 @@ function writeMediaProbe(): void {
     maxBuffer: 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  if (result.error != null || result.status !== 0) {
-    throw new Error("ffprobe could not inspect the synthetic MP4.");
-  }
-  const probe = JSON.parse(result.stdout) as {
+  if (result.error != null) throw fixtureRefusal("probe-execution", "ffprobe could not inspect the synthetic MP4.");
+  if (result.status !== 0) throw fixtureRefusal("probe-exit", "ffprobe could not inspect the synthetic MP4.", result.status);
+  let probe: {
     streams?: Array<Record<string, unknown>>;
     format?: Record<string, unknown>;
   };
+  try { probe = JSON.parse(result.stdout); }
+  catch (error) {
+    if (fixtureCLI.foregroundLong && error instanceof Error) foregroundRefusals.set(error, { failureCode: "probe-json", childExitCode: null });
+    throw error;
+  }
   if (!Array.isArray(probe.streams) || probe.streams.length !== 2 || probe.format == null) {
-    throw new Error("ffprobe did not report exactly the expected bounded audio/video streams.");
+    throw fixtureRefusal("probe-streams", "ffprobe did not report exactly the expected bounded audio/video streams.");
   }
   const video = probe.streams.find((stream) => stream.codec_type === "video");
   const audio = probe.streams.find((stream) => stream.codec_type === "audio");
@@ -193,12 +260,13 @@ function writeMediaProbe(): void {
     video.width !== 1280 || video.height !== 720 || video.r_frame_rate !== "30/1" ||
     audio?.codec_name !== "aac" || audio.sample_rate !== "48000"
   ) {
-    throw new Error("Synthetic MP4 codec probe did not match the Android compatibility fixture.");
+    throw fixtureRefusal("probe-codecs", "Synthetic MP4 codec probe did not match the Android compatibility fixture.");
   }
   writeFileSync(MEDIA_PROBE_PATH, `${JSON.stringify(probe, null, 2)}\n`, { mode: 0o600 });
 }
 
 function generateFixtureMedia(): void {
+  markForegroundStage("media-preflight");
   const filterInventory = spawnSync("ffmpeg", ["-nostdin", "-hide_banner", "-filters"], {
     encoding: "utf8",
     maxBuffer: 1024 * 1024,
@@ -209,14 +277,16 @@ function generateFixtureMedia(): void {
     filterInventory.status !== 0 ||
     !/(?:^|\n)\s*[.A-Z]+\s+drawtext\s/m.test(filterInventory.stdout ?? "")
   ) {
-    throw new Error("The installed ffmpeg lacks the required drawtext filter for visible elapsed-time evidence.");
+    const code = filterInventory.error != null ? "ffmpeg-execution" : filterInventory.status !== 0 ? "ffmpeg-exit" : "ffmpeg-filter-missing";
+    throw fixtureRefusal(code, "The installed ffmpeg lacks the required drawtext filter for visible elapsed-time evidence.",
+      code === "ffmpeg-exit" ? filterInventory.status : null);
   }
   const fonts = [
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
   ];
   const font = fonts.find((candidate) => existsSync(candidate));
-  if (font == null) throw new Error("A known local bold font is required for the visible elapsed-time overlay.");
+  if (font == null) throw fixtureRefusal("font-missing", "A known local bold font is required for the visible elapsed-time overlay.");
   mkdirSync(MEDIA_DIR, { mode: 0o700 });
   const videoFilter = [
     `drawtext=fontfile='${ffmpegFilterPath(font)}'`,
@@ -228,58 +298,38 @@ function generateFixtureMedia(): void {
     "x=(w-text_w)/2",
     "y=h-text_h-80",
   ].join(":");
-  runFfmpeg("Synthetic MP4 generation", [
-    "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=36",
-    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=36",
-    "-vf", videoFilter,
-    "-t", "36",
-    "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-pix_fmt", "yuv420p",
-    "-g", "90",
-    "-keyint_min", "90",
-    "-sc_threshold", "0",
-    "-force_key_frames", "expr:gte(t,n_forced*3)",
-    "-c:a", "aac",
-    "-b:a", "128k",
-    "-movflags", "+faststart",
-    MOVIE_PATH,
-  ]);
-  runFfmpeg("Synthetic HLS generation", [
-    "-i", MOVIE_PATH,
-    "-map", "0:v:0",
-    "-map", "0:a:0",
-    "-c", "copy",
-    "-f", "hls",
-    "-hls_time", "3",
-    "-hls_list_size", "0",
-    "-hls_playlist_type", "vod",
-    "-hls_flags", "independent_segments",
-    "-hls_segment_type", "mpegts",
-    "-start_number", "0",
-    "-hls_segment_filename", join(MEDIA_DIR, "segment%03d.ts"),
-    join(MEDIA_DIR, "index.m3u8"),
-  ]);
-  writeMediaProbe();
+  const plan = buildFixtureMediaPlan({ foregroundLong: fixtureCLI.foregroundLong, videoFilter,
+    moviePath: MOVIE_PATH, segmentPattern: join(MEDIA_DIR, "segment%03d.ts"), playlistPath: join(MEDIA_DIR, "index.m3u8") });
+  for (const step of plan) {
+    markForegroundStage(step.stage);
+    switch (step.kind) {
+      case "ffmpeg": runFfmpeg(step.label, step.args); break;
+      case "probe": writeMediaProbe(); break;
+      case "layout": assertStaticMediaLayout(); break;
+      default: throw fixtureRefusal("input-invalid", "Unknown fixture media plan step.");
+    }
+  }
+}
 
+function assertStaticMediaLayout(): void {
   const expectedSegments = Array.from({ length: 12 }, (_, index) =>
     `segment${String(index).padStart(3, "0")}.ts`);
   const actualSegments = readdirSync(MEDIA_DIR)
     .filter((name) => /^segment\d{3}\.ts$/.test(name))
     .sort();
   if (JSON.stringify(actualSegments) !== JSON.stringify(expectedSegments)) {
-    throw new Error(`Generated HLS must contain exactly segment000.ts through segment011.ts; got ${actualSegments.length}.`);
+    throw fixtureRefusal("media-layout", `Generated HLS must contain exactly segment000.ts through segment011.ts; got ${actualSegments.length}.`);
   }
   const manifestSegments = readFileSync(join(MEDIA_DIR, "index.m3u8"), "utf8")
     .split(/\r?\n/)
     .filter((line) => /^segment\d{3}\.ts$/.test(line));
   if (JSON.stringify(manifestSegments) !== JSON.stringify(expectedSegments)) {
-    throw new Error("Generated HLS manifest did not name the exact bounded 12-segment set.");
+    throw fixtureRefusal("media-layout", "Generated HLS manifest did not name the exact bounded 12-segment set.");
   }
   for (const name of ["synthetic.mp4", "index.m3u8", ...expectedSegments]) {
     const mediaPath = join(MEDIA_DIR, name);
     if (!lstatSync(mediaPath).isFile() || statSync(mediaPath).size <= 0) {
-      throw new Error(`Generated media is missing or empty: ${name}`);
+      throw fixtureRefusal("media-file", `Generated media is missing or empty: ${name}`);
     }
   }
 }
@@ -288,7 +338,7 @@ function boundedPort(raw: string | undefined, fallback: number): number {
   if (raw == null) return fallback;
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 1024 || value > 65535) {
-    throw new Error("Fixture ports must be integers from 1024 through 65535.");
+    throw fixtureRefusal("input-invalid", "Fixture ports must be integers from 1024 through 65535.");
   }
   return value;
 }
@@ -450,7 +500,7 @@ function assertFixtureInputs(): void {
       .filter((name) => name.endsWith(".ts"))
       .map((name) => join(MEDIA_DIR, name)),
   ]) {
-    if (!existsSync(required)) throw new Error(`Missing fixture input: ${required}`);
+    if (!existsSync(required)) throw fixtureRefusal("input-missing", `Missing fixture input: ${required}`);
   }
 }
 
@@ -682,7 +732,7 @@ async function inject(app: any, client: FixtureClient, options: {
   }
   if (options.csrf) {
     const csrf = client.cookies.get("ds_csrf");
-    if (csrf == null) throw new Error(`Missing CSRF cookie for ${options.method} ${options.url}`);
+    if (csrf == null) throw fixtureRefusal("csrf-missing", `Missing CSRF cookie for ${options.method} ${options.url}`);
     headers["x-csrf-token"] = csrf;
   }
   const response = await app.inject({
@@ -699,15 +749,20 @@ async function inject(app: any, client: FixtureClient, options: {
 function expectStatus(response: any, status: number, label: string): void {
   if (response.statusCode !== status) {
     const body = String(response.body ?? "").slice(0, 500);
-    throw new Error(`${label} returned ${response.statusCode}, expected ${status}: ${body}`);
+    throw fixtureRefusal("http-status", `${label} returned ${response.statusCode}, expected ${status}: ${body}`);
   }
 }
 
 function parseJSON<T>(response: any): T {
-  return JSON.parse(response.body) as T;
+  try { return JSON.parse(response.body) as T; }
+  catch (error) {
+    if (fixtureCLI.foregroundLong && error instanceof Error) foregroundRefusals.set(error, { failureCode: "json-response", childExitCode: null });
+    throw error;
+  }
 }
 
 async function seed(app: any): Promise<void> {
+  markForegroundStage("seed-owner");
   const owner: FixtureClient = { cookies: new Map() };
   const setup = await inject(app, owner, {
     method: "POST",
@@ -716,6 +771,7 @@ async function seed(app: any): Promise<void> {
   });
   expectStatus(setup, 200, "setup owner");
 
+  markForegroundStage("seed-credentials");
   for (const credential of [
     { provider: "tmdb", label: "Synthetic TMDB", value: "fixture-tmdb-key" },
     { provider: "real_debrid", label: "Synthetic Real-Debrid", value: "fixture-rd-token" },
@@ -729,6 +785,7 @@ async function seed(app: any): Promise<void> {
     expectStatus(response, 200, `seed ${credential.provider}`);
   }
 
+  markForegroundStage("seed-settings");
   const indexers = await inject(app, owner, {
     method: "PUT",
     url: "/api/settings/profile",
@@ -755,6 +812,7 @@ async function seed(app: any): Promise<void> {
   });
   expectStatus(builtIns, 200, "disable built-in indexers");
 
+  markForegroundStage("seed-watchlist");
   const watchlist = await inject(app, owner, {
     method: "PUT",
     url: "/api/library/watchlist/tmdb-600",
@@ -776,29 +834,33 @@ async function seed(app: any): Promise<void> {
 }
 
 async function smoke(app: any): Promise<Record<string, unknown>> {
+  markForegroundStage("smoke-media");
   const hlsManifest = await fetch(`${MEDIA_ORIGIN}/media/index.m3u8`);
   if (hlsManifest.status !== 200 || !(await hlsManifest.text()).includes("segment000.ts")) {
-    throw new Error("Generated HLS manifest was not served from the restricted loopback media origin.");
+    throw fixtureRefusal("smoke-assertion", "Generated HLS manifest was not served from the restricted loopback media origin.");
   }
   const hlsSegment = await fetch(`${MEDIA_ORIGIN}/media/segment000.ts`, {
     headers: { range: "bytes=0-1023" },
   });
   if (hlsSegment.status !== 206 || (await hlsSegment.arrayBuffer()).byteLength !== 1024) {
-    throw new Error("Generated HLS segment range was not served from the restricted loopback media origin.");
+    throw fixtureRefusal("smoke-assertion", "Generated HLS segment range was not served from the restricted loopback media origin.");
   }
+  markForegroundStage("smoke-addon");
   const manifest = await fetch("https://fixture.invalid/manifest.json");
   const manifestBody = await manifest.json() as { id?: string };
   if (manifest.status !== 200 || manifestBody.id !== "fixture.synthetic") {
-    throw new Error("Synthetic Stremio manifest route did not return the fixture manifest.");
+    throw fixtureRefusal("smoke-assertion", "Synthetic Stremio manifest route did not return the fixture manifest.");
   }
+  markForegroundStage("smoke-outbound");
   let unexpectedBlocked = false;
   try {
     await fetch("https://unexpected.invalid/should-not-leave-host");
   } catch {
     unexpectedBlocked = true;
   }
-  if (!unexpectedBlocked) throw new Error("Unexpected outbound request was not blocked.");
+  if (!unexpectedBlocked) throw fixtureRefusal("smoke-assertion", "Unexpected outbound request was not blocked.");
 
+  markForegroundStage("smoke-login");
   const client: FixtureClient = { cookies: new Map() };
   const login = await inject(app, client, {
     method: "POST",
@@ -807,28 +869,33 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
   });
   expectStatus(login, 200, "login");
 
+  markForegroundStage("smoke-bootstrap");
   const bootstrap = await inject(app, client, { method: "GET", url: "/api/bootstrap" });
   expectStatus(bootstrap, 200, "bootstrap");
   const bootstrapBody = parseJSON<{ transcodeAvailable: boolean; directTorrentAvailable: boolean; session: unknown }>(bootstrap);
-  if (bootstrapBody.transcodeAvailable || bootstrapBody.directTorrentAvailable || bootstrapBody.session == null) {
-    throw new Error("Bootstrap did not preserve disabled transcoding and Direct P2P with an authenticated session.");
+  if ((fixtureCLI.foregroundLong ? bootstrapBody.transcodeAvailable !== true : bootstrapBody.transcodeAvailable) || bootstrapBody.directTorrentAvailable || bootstrapBody.session == null) {
+    throw fixtureRefusal("smoke-assertion", "Bootstrap did not preserve disabled transcoding and Direct P2P with an authenticated session.");
   }
 
+  markForegroundStage("smoke-watchlist");
   const watchlist = await inject(app, client, { method: "GET", url: "/api/library/watchlist" });
   expectStatus(watchlist, 200, "watchlist");
   const watchlistBody = parseJSON<{ items: Array<{ mediaId: string }> }>(watchlist);
-  if (watchlistBody.items[0]?.mediaId !== "tmdb-600") throw new Error("Synthetic watchlist item is missing.");
+  if (watchlistBody.items[0]?.mediaId !== "tmdb-600") throw fixtureRefusal("smoke-assertion", "Synthetic watchlist item is missing.");
 
+  markForegroundStage("smoke-discover");
   const discover = await inject(app, client, { method: "GET", url: "/api/discover/home" });
   expectStatus(discover, 200, "bounded empty discover catalogs");
 
+  markForegroundStage("smoke-detail");
   const detail = await inject(app, client, { method: "GET", url: "/api/media/detail?id=tmdb-600&type=movie" });
   expectStatus(detail, 200, "metadata detail");
   const detailBody = parseJSON<{ item: { id: string; tmdbId: number; title: string }; imdbId: string | null }>(detail);
   if (detailBody.item.id !== "tt0000600" || detailBody.item.tmdbId !== 600 || detailBody.imdbId !== "tt0000600") {
-    throw new Error("Synthetic TMDB detail did not map to tt0000600.");
+    throw fixtureRefusal("smoke-assertion", "Synthetic TMDB detail did not map to tt0000600.");
   }
 
+  markForegroundStage("smoke-streams");
   const streams = await inject(app, client, {
     method: "GET",
     url: `/api/streams/tt0000600?type=movie&title=${encodeURIComponent(TITLE)}&year=2026`,
@@ -836,9 +903,10 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
   expectStatus(streams, 200, "stream search");
   const streamBody = parseJSON<{ rows: Array<{ result: { infoHash: string } }>; hasDebrid: boolean; hasIndexers: boolean }>(streams);
   if (!streamBody.hasDebrid || !streamBody.hasIndexers || streamBody.rows[0]?.result.infoHash !== HASH) {
-    throw new Error("Synthetic Stremio source was not returned with a debrid service.");
+    throw fixtureRefusal("smoke-assertion", "Synthetic Stremio source was not returned with a debrid service.");
   }
 
+  markForegroundStage("smoke-resolve");
   const resolve = await inject(app, client, {
     method: "POST",
     url: "/api/streams/resolve",
@@ -856,25 +924,27 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
     session: { id: string; playbackUrl: string; playbackAuthorization: string };
   }>(resolve);
   if (resolved.stream.debridService !== "RD" || resolved.stream.streamURL !== resolved.session.playbackUrl) {
-    throw new Error("Resolved stream did not use the Server Mode proxy session.");
+    throw fixtureRefusal("smoke-assertion", "Resolved stream did not use the Server Mode proxy session.");
   }
   if (resolved.stream.playbackAuthorization !== resolved.session.playbackAuthorization) {
-    throw new Error("Resolved stream did not retain its session-scoped playback authorization.");
+    throw fixtureRefusal("smoke-assertion", "Resolved stream did not retain its session-scoped playback authorization.");
   }
   const capability = /^Bearer\s+([A-Za-z0-9_-]{32,128})$/.exec(resolved.session.playbackAuthorization)?.[1];
   if (capability == null || !/^[A-Za-z0-9_-]{1,120}$/.test(resolved.session.id)) {
-    throw new Error("Resolved stream did not provide a bounded external-player capability.");
+    throw fixtureRefusal("smoke-assertion", "Resolved stream did not provide a bounded external-player capability.");
   }
   const externalPath = `/api/external-stream/${encodeURIComponent(resolved.session.id)}/${encodeURIComponent(capability)}`;
 
+  markForegroundStage("smoke-proxy-full");
   const full = await inject(app, client, { method: "GET", url: resolved.stream.streamURL });
   expectStatus(full, 200, "full proxy response");
   const expected = readFileSync(MOVIE_PATH);
   const actual = full.rawPayload as Buffer;
   if (actual.length !== expected.length || createHash("sha256").update(actual).digest("hex") !== createHash("sha256").update(expected).digest("hex")) {
-    throw new Error("Full proxy response differs from synthetic.mp4.");
+    throw fixtureRefusal("smoke-assertion", "Full proxy response differs from synthetic.mp4.");
   }
 
+  markForegroundStage("smoke-proxy-range");
   const range = await inject(app, client, {
     method: "GET",
     url: resolved.stream.streamURL,
@@ -882,11 +952,12 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
   });
   expectStatus(range, 206, "range proxy response");
   if (range.rawPayload.length !== 1024 || range.headers["content-range"] !== `bytes 0-1023/${expected.length}`) {
-    throw new Error("Range proxy response did not preserve byte boundaries.");
+    throw fixtureRefusal("smoke-assertion", "Range proxy response did not preserve byte boundaries.");
   }
 
   // Exercise the exact cookie-free route handed to external players without
   // persisting or logging its session-scoped capability value.
+  markForegroundStage("smoke-external-full");
   const externalClient: FixtureClient = { cookies: new Map() };
   const externalFull = await inject(app, externalClient, { method: "GET", url: externalPath });
   expectStatus(externalFull, 200, "external capability full response");
@@ -896,15 +967,16 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
     externalFull.headers["content-length"] !== String(expected.length) ||
     externalFull.headers["content-disposition"] != null
   ) {
-    throw new Error("External capability full response did not preserve the exact playable MP4 headers.");
+    throw fixtureRefusal("smoke-assertion", "External capability full response did not preserve the exact playable MP4 headers.");
   }
   if (
     externalFull.rawPayload.length !== expected.length ||
     createHash("sha256").update(externalFull.rawPayload as Buffer).digest("hex") !==
       createHash("sha256").update(expected).digest("hex")
   ) {
-    throw new Error("External capability full response differs from synthetic.mp4.");
+    throw fixtureRefusal("smoke-assertion", "External capability full response differs from synthetic.mp4.");
   }
+  markForegroundStage("smoke-external-range");
   const externalRange = await inject(app, externalClient, {
     method: "GET",
     url: externalPath,
@@ -916,13 +988,14 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
     externalRange.headers["content-range"] !== `bytes 1024-2047/${expected.length}` ||
     !Buffer.from(externalRange.rawPayload as Buffer).equals(expected.subarray(1024, 2048))
   ) {
-    throw new Error("External capability range response did not preserve byte identity or boundaries.");
+    throw fixtureRefusal("smoke-assertion", "External capability range response did not preserve byte identity or boundaries.");
   }
 
+  markForegroundStage("smoke-web");
   const root = await inject(app, client, { method: "GET", url: "/" });
   expectStatus(root, 200, "compiled web root");
   if (!String(root.headers["content-type"] ?? "").includes("text/html")) {
-    throw new Error("Compiled web root did not return HTML.");
+    throw fixtureRefusal("smoke-assertion", "Compiled web root did not return HTML.");
   }
 
   return {
@@ -956,8 +1029,10 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
 
 async function main(): Promise<void> {
   generateFixtureMedia();
+  markForegroundStage("input-check");
   assertFixtureInputs();
-  if (APP_PORT === MEDIA_PORT) throw new Error("Fixture app and media ports must differ.");
+  if (APP_PORT === MEDIA_PORT) throw fixtureRefusal("input-invalid", "Fixture app and media ports must differ.");
+  markForegroundStage("runtime-init");
   const runtimeDir = mkdtempSync(join(tmpdir(), "ds-server-ui-fixture-"));
   const originalFetch = globalThis.fetch;
   const mediaServer = createServer(serveMedia);
@@ -974,6 +1049,7 @@ async function main(): Promise<void> {
   };
 
   try {
+    markForegroundStage("media-listen");
     await new Promise<void>((resolve, reject) => {
       mediaServer.once("error", reject);
       mediaServer.listen(MEDIA_PORT, HOST, () => {
@@ -983,6 +1059,7 @@ async function main(): Promise<void> {
     });
     installFailClosedFetch(originalFetch);
 
+    markForegroundStage("server-build");
     const { buildApp } = await import(`${REPO}/server/src/app.ts`);
     app = await buildApp({
       config: {
@@ -1001,9 +1078,23 @@ async function main(): Promise<void> {
         updateCheck: false,
         allowRawStreamUrls: true,
         enableDirectTorrent: false,
-        enableTranscode: false,
+        enableTranscode: fixtureCLI.foregroundLong,
       },
     });
+    if (fixtureCLI.foregroundLong) {
+      writeFileSync(join(ARTIFACT_DIR, "foreground-runtime.json"), JSON.stringify({ runtimeDir }), { mode: 0o600 });
+      app.addHook("onRequest", async (request: any, reply: any) => {
+        const path = new URL(request.raw.url ?? "/", APP_ORIGIN).pathname;
+        if (request.method !== "GET" || !/^\/api\/stream\/[^/]+\/480p_seg_\d{5}\.ts$/.test(path) ||
+            !existsSync(join(ARTIFACT_DIR, "hold-segments"))) return;
+        writeFileSync(join(ARTIFACT_DIR, "segment-held"), "held\n", { mode: 0o600 });
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 120_000);
+          reply.raw.once("close", () => { clearTimeout(timer); resolve(); });
+        });
+        if (!reply.raw.destroyed) await reply.code(503).send();
+      });
+    }
     app.addHook("onRequest", async (request: any, reply: any) => {
       recordExternalCapabilityRequest(request, reply);
     });
@@ -1013,6 +1104,7 @@ async function main(): Promise<void> {
 
     await seed(app);
     const result = await smoke(app);
+    markForegroundStage("smoke-receipt");
     externalSmokeCompleted = true;
     externalReceiptPhase = "live";
     externalLivePhaseStartedAtMs = monotonicElapsedMs();
@@ -1025,7 +1117,9 @@ async function main(): Promise<void> {
       return;
     }
 
+    markForegroundStage("server-listen");
     await app.listen({ host: HOST, port: APP_PORT });
+    markForegroundStage("ready");
     console.log("[fixture] READY server-mode-ui loopback");
     console.log(`[fixture] Server Mode UI: ${APP_ORIGIN}`);
     console.log(`[fixture] login username: ${USERNAME}`);
@@ -1038,9 +1132,11 @@ async function main(): Promise<void> {
       });
     }
   } catch (error) {
+    recordForegroundRefusal(error);
     await close();
     throw error;
   }
 }
 
-await main();
+try { await main(); }
+catch (error) { recordForegroundRefusal(error); throw error; }
