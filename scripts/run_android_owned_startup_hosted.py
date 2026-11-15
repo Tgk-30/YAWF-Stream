@@ -280,10 +280,14 @@ def main():
                      "--package", "system-images;android-36;google_apis;x86_64", "--path", str(avd)], 45,
                     input=b"no\n")
         adb = sdk / "platform-tools/adb"
-        server, server_birth = launch([str(adb), "-L", "tcp:127.0.0.1:5142", "--one-device", "emulator-5568", "server", "nodaemon"], "adb-server")
+        # ADB's listener accepts tcp:port, not tcp:hostname:port. Without -a it
+        # binds loopback; confirm the actual socket owner/address before use.
+        server, server_birth = launch([str(adb), "-L", "tcp:5142", "--one-device", "emulator-5568", "server", "nodaemon"], "adb-server")
         until = time.monotonic() + 15
-        while not module.System().port_owned(server.pid, 5142):
+        while True:
             alive(server, server_birth)
+            if module.System().port_owned(server.pid, 5142):
+                break
             resource_check()
             require(time.monotonic() < until, "ADB_PRIVATE_LISTENER_TIMEOUT")
             time.sleep(0.2)

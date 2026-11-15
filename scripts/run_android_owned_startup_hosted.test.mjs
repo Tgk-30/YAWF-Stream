@@ -83,4 +83,7 @@ test("recipe retains provenance gates, subreaper and a ledger-owned controller",
   assert.match(text, /controller, controller_birth = launch\(/);
   assert.match(text, /collect_descendants\(\)[\s\S]+"ROOT_CONTROLLER_TIMEOUT"/);
   assert.match(text, /signal\.signal\(signal\.SIGTERM, interrupted\)/);
+  assert.match(text, /"-L", "tcp:5142", "--one-device", "emulator-5568"/);
+  assert.doesNotMatch(text, /"-L", "tcp:127\.0\.0\.1:5142"/);
+  assert.match(text, /port_owned\(server\.pid, 5142\)/);
 });
