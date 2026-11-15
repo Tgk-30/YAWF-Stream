@@ -212,6 +212,7 @@ finally:os.close(child.w1);os.close(child.w2)
 test('fixed instrumentation signals survive missing evidence without retaining arbitrary output',()=>run(String.raw`
 private='https://private.invalid/path?token=private-value /private/owner/file PRIVATE_MESSAGE'
 expected={'NoClassDefFoundError','ClassNotFoundException','UnsatisfiedLinkError','VerifyError','SecurityException','IllegalStateException','RuntimeException','instrumentationRunFailed','processCrashed','junitStarted','ownedTestClassMentioned','ownedRunnerClassMentioned'}
+expected|={'missingAndroidxTest','missingAndroidxAppcompat','missingAndroidxCore','missingTauri','missingKotlin','missingOwnedTest','missingOwnedTarget','missingOther','androidJUnitRunnerMentioned','instrumentationRegistryMentioned','androidJUnit4ClassRunnerMentioned','appCompatActivityMentioned','coreComponentFactoryMentioned','pluginMentioned','pluginManagerMentioned','pluginHandleMentioned'}
 text=('java.lang.NoClassDefFoundError: '+private+'\n'+m.TEST_CLASS+'\n'+m.RUNNER+'\nInstrumentation run failed\nProcess crashed.\nINSTRUMENTATION_STATUS: class='+m.TEST_CLASS+'\nINSTRUMENTATION_STATUS_CODE: 1\n').encode()
 facts=m.instrumentation_signals(text,b'java.lang.SecurityException: '+private.encode())
 assert set(facts)==expected and all(type(x)is bool for x in facts.values())
@@ -237,4 +238,30 @@ unknown=m.instrumentation_signals(('com.private.SecretException: '+private+'\n a
 assert set(unknown)==expected and not any(unknown.values());assert private not in json.dumps(unknown)
 # Diagnostics never replace the exact evidence or JUnit qualification gate.
 rejects(lambda:m.evidence(text.decode()),'EVIDENCE_COUNT')
+`));
+
+
+test('missing-class namespaces require JVM formats and never serialize class names or messages',()=>run(String.raw`
+buckets={'missingAndroidxTest','missingAndroidxAppcompat','missingAndroidxCore','missingTauri','missingKotlin','missingOwnedTest','missingOwnedTarget','missingOther'}
+cases=[('androidx.test.internal.runner.HiddenRunner','missingAndroidxTest'),('androidx.appcompat.app.AppCompatActivity','missingAndroidxAppcompat'),('androidx.core.app.CoreComponentFactory','missingAndroidxCore'),('app.tauri.plugin.PluginHandle','missingTauri'),('kotlin.jvm.internal.Intrinsics','missingKotlin'),('kotlinx.coroutines.Job','missingKotlin'),('com.yawf.ownedstartup.PrivateTest','missingOwnedTest'),(m.TARGET+'.PrivateActivity','missingOwnedTarget'),('private.person.CustomerName','missingOther')]
+for name,bucket in cases:
+ for line in ['java.lang.NoClassDefFoundError: Failed resolution of: L'+name.replace('.','/')+';', 'Caused by: java.lang.ClassNotFoundException: Didn\'t find class "'+name+'" on path: /private/owner/data?secret=value', 'ClassNotFoundException: '+name, 'INSTRUMENTATION_RESULT: longMsg=java.lang.NoClassDefFoundError: Failed resolution of: L'+name.replace('.','/')+';']:
+  facts=m.instrumentation_signals(line.encode(),b'');assert {k for k in buckets if facts[k]}=={bucket}
+  serialized=json.dumps(facts);assert name not in serialized and '/private'not in serialized and 'secret=value'not in serialized;assert all(type(x)is bool for x in facts.values())
+for line in ['androidx.test.internal.runner.HiddenRunner','ordinary message Failed resolution of: Landroidx/test/Hidden;','ClassNotFoundException: https://private.invalid/token','ClassNotFoundException: private.person.Name secret-value', 'Failed resolution of: Landroidx/test/'+('A'*65)+';', 'ClassNotFoundException: private..Name', 'ClassNotFoundException: private/person/Name', 'Didn\'t find class "private.person.Name?token=value" on path: /private']:
+ facts=m.instrumentation_signals(line.encode(),b'');assert not any(facts[k]for k in buckets),line
+required={'androidx.test.runner.AndroidJUnitRunner':'androidJUnitRunnerMentioned','androidx.test.platform.app.InstrumentationRegistry':'instrumentationRegistryMentioned','androidx.test.internal.runner.junit4.AndroidJUnit4ClassRunner':'androidJUnit4ClassRunnerMentioned','androidx.appcompat.app.AppCompatActivity':'appCompatActivityMentioned','androidx.core.app.CoreComponentFactory':'coreComponentFactoryMentioned','app.tauri.plugin.Plugin':'pluginMentioned','app.tauri.plugin.PluginManager':'pluginManagerMentioned','app.tauri.plugin.PluginHandle':'pluginHandleMentioned'}
+for name,key in required.items():
+ for text in [name,'L'+name.replace('.','/')+';']:
+  facts=m.instrumentation_signals(text.encode(),b'');assert facts[key]is True;assert not any(facts[k]for k in buckets)
+# The new discrimination also survives the real receipt path with no Bundle.
+f=Fixture()
+try:
+ f.fake.instrument_output=b'java.lang.NoClassDefFoundError: Failed resolution of: Landroidx/test/internal/runner/HiddenRunner;';f.fake.instrument_stderr=b'ClassNotFoundException: private.person.CustomerName'
+ argv=['controller']
+ for key,value in vars(f.args).items():argv+=['--'+key.replace('_','-'),str(value)]
+ with mock.patch.object(m,'System',return_value=f.fake),mock.patch.object(sys,'argv',argv),mock.patch('sys.stdout',new_callable=io.StringIO):assert m.main()==1
+ saved=json.loads((pathlib.Path(f.args.evidence_dir)/'OWNED_STARTUP.json').read_text());assert saved['code']=='EVIDENCE_COUNT'and saved['qualification']is False
+ assert saved['instrumentationSignals']['missingAndroidxTest']and saved['instrumentationSignals']['missingOther'];assert 'CustomerName'not in json.dumps(saved)and 'HiddenRunner'not in json.dumps(saved)
+finally:f.close()
 `));

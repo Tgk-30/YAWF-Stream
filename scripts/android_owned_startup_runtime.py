@@ -156,6 +156,53 @@ def instrumentation_signals(stdout, stderr):
         ownedTestClassMentioned=re.search(r"(?<![A-Za-z0-9_.$])" + re.escape(TEST_CLASS) + r"(?![A-Za-z0-9_$])", text) is not None,
         ownedRunnerClassMentioned=re.search(r"(?<![A-Za-z0-9_.$])" + re.escape(RUNNER) + r"(?![A-Za-z0-9_$])", text) is not None,
     )
+    missing = {key: False for key in ("missingAndroidxTest", "missingAndroidxAppcompat", "missingAndroidxCore",
+               "missingTauri", "missingKotlin", "missingOwnedTest", "missingOwnedTarget", "missingOther")}
+    # Only known JVM missing-class line formats admit a private temporary name.
+    # Names/messages never become receipt keys or values, including their hashes.
+    segment = r"[A-Za-z_$][A-Za-z0-9_$]{0,63}"
+    dotted = segment + r"(?:\." + segment + r"){0,31}"
+    internal = segment + r"(?:/" + segment + r"){0,31}"
+    envelope = r"(?:(?:INSTRUMENTATION_(?:STATUS|RESULT): (?:stream|shortMsg|longMsg|stack)=))?(?:Caused by: )?"
+    exception = r"(?:java\.lang\.)?(?:NoClassDefFoundError|ClassNotFoundException): "
+    patterns = (
+        envelope + r"(?:" + exception + r")?Failed resolution of: L(" + internal + r");[ \t]*",
+        envelope + r"(?:" + exception + r")?Didn't find class \"(" + dotted + r")\"(?: on path: [^\r\n]*)?",
+        envelope + r"(?:java\.lang\.)?ClassNotFoundException: \"?(" + dotted + r")\"?[ \t]*",
+    )
+    for line in text.splitlines():
+        if len(line) > 8192:
+            continue
+        for pattern in patterns:
+            match = re.fullmatch(pattern, line.strip())
+            if match is None or len(match[1]) > 512:
+                continue
+            name = match[1].replace("/", ".")
+            bucket = next((key for prefixes, key in (
+                (("androidx.test.",), "missingAndroidxTest"),
+                (("androidx.appcompat.",), "missingAndroidxAppcompat"),
+                (("androidx.core.",), "missingAndroidxCore"),
+                (("app.tauri.",), "missingTauri"),
+                (("kotlin.", "kotlinx."), "missingKotlin"),
+                (("com.yawf.ownedstartup.", "com.yawf.ownedstartupinstrumentation."), "missingOwnedTest"),
+                ((TARGET + ".",), "missingOwnedTarget"),
+            ) if name.startswith(prefixes)), "missingOther")
+            missing[bucket] = True
+            break
+    facts.update(missing)
+    public_types = {
+        "androidJUnitRunnerMentioned": "androidx.test.runner.AndroidJUnitRunner",
+        "instrumentationRegistryMentioned": "androidx.test.platform.app.InstrumentationRegistry",
+        "androidJUnit4ClassRunnerMentioned": "androidx.test.internal.runner.junit4.AndroidJUnit4ClassRunner",
+        "appCompatActivityMentioned": "androidx.appcompat.app.AppCompatActivity",
+        "coreComponentFactoryMentioned": "androidx.core.app.CoreComponentFactory",
+        "pluginMentioned": "app.tauri.plugin.Plugin",
+        "pluginManagerMentioned": "app.tauri.plugin.PluginManager",
+        "pluginHandleMentioned": "app.tauri.plugin.PluginHandle",
+    }
+    for key, name in public_types.items():
+        slash = re.escape(name.replace(".", "/"))
+        facts[key] = re.search(r"(?<![A-Za-z0-9_.$/])(?:" + re.escape(name) + r"|L" + slash + r";|" + slash + r")(?![A-Za-z0-9_$/])", text) is not None
     return facts
 
 
