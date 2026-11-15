@@ -1533,19 +1533,28 @@ describe("recordResume", () => {
     expect(cookie).toBe("new-profile");
   });
 
-  it("resumes old-profile progress after a switch request fails before changing cookies", async () => {
+  it("keeps progress fenced when a switch response fails after changing cookies, then resumes after retry", async () => {
     const { result } = await renderStore();
+    let cookie = "old-profile";
     await expect(result.current.runProfileTransition(async () => {
-      throw new Error("switch rejected");
-    })).rejects.toThrow("switch rejected");
+      cookie = "new-profile"; // server committed the switch before body-read failure
+      throw new Error("switch response failed");
+    })).rejects.toThrow("switch response failed");
 
-    act(() => result.current.recordResume(media("still-old-profile"), 12, 100));
+    act(() => result.current.recordResume(media("blocked-after-uncertain-switch"), 12, 100));
+    expect(storeRecordHistory).not.toHaveBeenCalled();
+    await result.current.runProfileTransition(async (markProfileChanged) => {
+      markProfileChanged();
+      await result.current.reloadProfileData();
+    });
+    act(() => result.current.recordResume(media("new-profile-resume"), 15, 100));
     await waitFor(() => expect(storeRecordHistory).toHaveBeenCalledWith(
-      expect.objectContaining({ mediaId: "still-old-profile", progressSeconds: 12 }),
+      expect.objectContaining({ mediaId: "new-profile-resume", progressSeconds: 15 }),
     ));
+    expect(cookie).toBe("new-profile");
   });
 
-  it("keeps progress fenced after active deletion succeeds but fallback convergence fails", async () => {
+  it("keeps progress fenced after active deletion commits but its response body fails", async () => {
     let finishActive!: () => void;
     let cookie = "deleted-profile";
     const writes: Array<{ mediaId: string; cookie: string }> = [];
@@ -1564,16 +1573,17 @@ describe("recordResume", () => {
     });
 
     let deleteStarted = false;
-    const transition = result.current.runProfileTransition(async (markProfileChanged) => {
+    const transition = result.current.runProfileTransition(async () => {
       deleteStarted = true;
       cookie = "server-default-after-delete";
-      markProfileChanged();
-      throw new Error("fallback switch failed");
+      // Simulate the server committing DELETE but response.text() rejecting,
+      // before the caller can observe a successful response or mark ownership.
+      throw new Error("delete response body failed");
     });
     expect(deleteStarted).toBe(false);
     await act(async () => {
       finishActive();
-      await expect(transition).rejects.toThrow("fallback switch failed");
+      await expect(transition).rejects.toThrow("delete response body failed");
     });
     expect(writes).toEqual([
       { mediaId: "active-before-delete", cookie: "deleted-profile" },

@@ -162,7 +162,8 @@ export function ProfilePicker({ onClose }: { onClose: () => void }) {
         }
       } catch (err) {
         // A post-delete convergence failure is intentionally quiet: the delete
-        // stands, and the transition fence remains closed if ownership changed.
+        // stands, and the transition fence remains closed because a failed
+        // response does not prove whether the server changed active ownership.
         if (!deleted) {
           setError(err instanceof Error ? err.message : "Could not delete.");
         }
@@ -257,6 +258,9 @@ export function ProfilePicker({ onClose }: { onClose: () => void }) {
       });
       onClose();
     } catch (err) {
+      // A rejected switch response may follow a server-side cookie change. The
+      // store keeps progress fenced until a successful retry/reload establishes
+      // which profile owns the current session.
       setBusyId(null);
       throw err;
     }

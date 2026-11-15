@@ -802,23 +802,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     const wasBlocked = resumeWritesBlockedRef.current;
     resumeWritesBlockedRef.current = true;
     const generation = profileReadGenerationRef.current;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const drained = resumeWriteQueueRef.current?.flush() ?? Promise.resolve();
-    const timedOut = await Promise.race([
-      drained.then(() => false),
-      new Promise<boolean>((resolve) => {
-        timeout = setTimeout(() => resolve(true), PROFILE_PROGRESS_DRAIN_TIMEOUT_MS);
-      }),
-    ]);
-    if (timeout != null) clearTimeout(timeout);
-    if (timedOut) {
-      // A stuck old-profile request must not hold account switching forever or
-      // dispatch its pending closure after the cookie changes. Remote progress
-      // writes have their own shorter aborting deadline.
-      resumeWriteQueueRef.current?.cancelGeneration(generation);
-      await resumeWriteQueueRef.current?.flush();
-    }
     let profileChanged = false;
+    let operationStarted = false;
     let succeeded = false;
     const markProfileChanged = () => {
       if (profileChanged) return;
@@ -826,14 +811,31 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       invalidateProfileReads();
     };
     try {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const drained = resumeWriteQueueRef.current?.flush() ?? Promise.resolve();
+      const timedOut = await Promise.race([
+        drained.then(() => false),
+        new Promise<boolean>((resolve) => {
+          timeout = setTimeout(() => resolve(true), PROFILE_PROGRESS_DRAIN_TIMEOUT_MS);
+        }),
+      ]);
+      if (timeout != null) clearTimeout(timeout);
+      if (timedOut) {
+        // A stuck old-profile request must not hold account switching forever or
+        // dispatch its pending closure after the cookie changes. Remote progress
+        // writes have their own shorter aborting deadline.
+        resumeWriteQueueRef.current?.cancelGeneration(generation);
+        await resumeWriteQueueRef.current?.flush();
+      }
+      operationStarted = true;
       const result = await operation(markProfileChanged);
       succeeded = true;
       return result;
     } finally {
-      // If the switch request itself failed, the old cookie/profile remains
-      // valid and writes can resume. If the cookie changed but rehydration
-      // failed, fail closed rather than writing old progress under new auth.
-      if (succeeded || (!profileChanged && !wasBlocked)) {
+      // Once an operation that may mutate auth has begun, a rejection does not
+      // prove that the cookie/profile stayed unchanged. Only successful
+      // completion or a pre-operation barrier failure may reopen progress.
+      if (succeeded || (!operationStarted && !wasBlocked)) {
         resumeWritesBlockedRef.current = false;
       }
     }
