@@ -22,14 +22,21 @@ interface FixtureCLI {
   repo: string;
   output: string;
   smokeOnly: boolean;
+  foregroundLong: boolean;
 }
 
 function parseFixtureCLI(argv: string[]): FixtureCLI {
   let repo: string | null = null;
   let output: string | null = null;
   let smokeOnly = false;
+  let foregroundLong = false;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
+    if (argument === "--foreground-long") {
+      if (foregroundLong) throw new Error("Duplicate --foreground-long argument.");
+      foregroundLong = true;
+      continue;
+    }
     if (argument === "--smoke-only") {
       if (smokeOnly) throw new Error("Duplicate --smoke-only argument.");
       smokeOnly = true;
@@ -54,7 +61,7 @@ function parseFixtureCLI(argv: string[]): FixtureCLI {
   if (repo == null || output == null) {
     throw new Error("Usage: server-ui-fixture.mts --repo <absolute-checkout> --output <absolute-empty-directory> [--smoke-only]");
   }
-  return { repo, output, smokeOnly };
+  return { repo, output, smokeOnly, foregroundLong };
 }
 
 function canonicalAbsoluteDirectory(raw: string, label: string, create: boolean): string {
@@ -229,10 +236,11 @@ function generateFixtureMedia(): void {
     "y=h-text_h-80",
   ].join(":");
   runFfmpeg("Synthetic MP4 generation", [
-    "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=36",
-    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=36",
+    "-f", "lavfi", "-i", `testsrc2=size=1280x720:rate=30:duration=${fixtureCLI.foregroundLong ? 600 : 36}`,
+    "-f", "lavfi", "-i", `sine=frequency=440:sample_rate=48000:duration=${fixtureCLI.foregroundLong ? 600 : 36}`,
     "-vf", videoFilter,
-    "-t", "36",
+    "-t", fixtureCLI.foregroundLong ? "600" : "36",
+    ...(fixtureCLI.foregroundLong ? ["-b:v", "700k", "-maxrate", "900k", "-bufsize", "1400k"] : []),
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-pix_fmt", "yuv420p",
@@ -247,6 +255,7 @@ function generateFixtureMedia(): void {
   ]);
   runFfmpeg("Synthetic HLS generation", [
     "-i", MOVIE_PATH,
+    ...(fixtureCLI.foregroundLong ? ["-t", "36"] : []),
     "-map", "0:v:0",
     "-map", "0:a:0",
     "-c", "copy",
@@ -810,7 +819,7 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
   const bootstrap = await inject(app, client, { method: "GET", url: "/api/bootstrap" });
   expectStatus(bootstrap, 200, "bootstrap");
   const bootstrapBody = parseJSON<{ transcodeAvailable: boolean; directTorrentAvailable: boolean; session: unknown }>(bootstrap);
-  if (bootstrapBody.transcodeAvailable || bootstrapBody.directTorrentAvailable || bootstrapBody.session == null) {
+  if ((fixtureCLI.foregroundLong ? bootstrapBody.transcodeAvailable !== true : bootstrapBody.transcodeAvailable) || bootstrapBody.directTorrentAvailable || bootstrapBody.session == null) {
     throw new Error("Bootstrap did not preserve disabled transcoding and Direct P2P with an authenticated session.");
   }
 
@@ -1001,9 +1010,23 @@ async function main(): Promise<void> {
         updateCheck: false,
         allowRawStreamUrls: true,
         enableDirectTorrent: false,
-        enableTranscode: false,
+        enableTranscode: fixtureCLI.foregroundLong,
       },
     });
+    if (fixtureCLI.foregroundLong) {
+      writeFileSync(join(ARTIFACT_DIR, "foreground-runtime.json"), JSON.stringify({ runtimeDir }), { mode: 0o600 });
+      app.addHook("onRequest", async (request: any, reply: any) => {
+        const path = new URL(request.raw.url ?? "/", APP_ORIGIN).pathname;
+        if (request.method !== "GET" || !/^\/api\/stream\/[^/]+\/480p_seg_\d{5}\.ts$/.test(path) ||
+            !existsSync(join(ARTIFACT_DIR, "hold-segments"))) return;
+        writeFileSync(join(ARTIFACT_DIR, "segment-held"), "held\n", { mode: 0o600 });
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 120_000);
+          reply.raw.once("close", () => { clearTimeout(timer); resolve(); });
+        });
+        if (!reply.raw.destroyed) await reply.code(503).send();
+      });
+    }
     app.addHook("onRequest", async (request: any, reply: any) => {
       recordExternalCapabilityRequest(request, reply);
     });
