@@ -10,6 +10,7 @@
   public <init>(...);
 
   void setWebView({{package-unescaped}}.RustWebView);
+  void notifyOwnedWebViewStored(android.webkit.WebView);
   boolean destroyOwnedWebView(android.webkit.WebView, boolean);
   java.lang.Class getAppClass(...);
   int getId();

@@ -269,6 +269,15 @@ fn queue_storage_proof(
                 {
                     if attached {
                         COMMITTED.store(true, Ordering::Release);
+                        // Optional UI activation follows real dispatch and commit.
+                        // Its failure cannot undo storage or change the worker ACK.
+                        let _ = call(
+                            env,
+                            &helper,
+                            "constructionCommitted",
+                            "(JLandroid/webkit/WebView;)V",
+                            &[JValue::Long(ticket), JValue::Object(webview)],
+                        );
                     }
                 } else {
                     bootstrap_failed(&exit_app);

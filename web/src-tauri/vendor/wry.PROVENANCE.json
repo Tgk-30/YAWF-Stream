@@ -172,7 +172,7 @@
     "src/wkwebview/drag_drop.rs": "10bf1524a41d586810cae18d318629da3768e69a1b0ab59ad04dfd69840d83c7",
     "src/wkwebview/mod.rs": "a466a6d6a5fa75013876492a2074c3693601bcac63716de0c9cc54bceab5bf6b",
     "src/wkwebview/navigation.rs": "1898665e051edf10124178aa596b02dd121b33e1ccf7bb48b54d859d46e73aae",
-    "src/android/main_pipe.rs": "8132286663bc820c3f0706fd840423466728896f37381f636145fdf6340b5d97",
+    "src/android/main_pipe.rs": "51c37545cd478a516198b3cced2eaff8bd3976b28a588c40ff6f206e674ada8e",
     "src/android/mod.rs": "fd046d38e419a1e2b481f44d93f16484a962337ee3b71d438e93f95832e44d13",
     "src/android/binding.rs": "66a2376077a4e81b64f8d726b708626c2a1b77aa889547870df928357611559a",
     "src/android/kotlin/RustWebViewClient.kt": "1e5ec43b3ae2315aeaa4d5721435076c3a26b84276ac9e83fe3b331f4277f4f8",
@@ -184,8 +184,8 @@
     "src/android/kotlin/RustWebChromeClient.kt": "5e225fc1a85e769e4a666b7cd47946356e742190060803ecb31a12a68bf1ce06",
     "src/android/kotlin/Logger.kt": "6ef1209ea4a45ef236fd4e2b0d1c2b086bc99ddb31a4e1d9da171f45c06a51fe",
     "src/android/kotlin/Ipc.kt": "80232ae2df8264b7855ef21aafff772d8563aae6b2374c49394421cb085c0b10",
-    "src/android/owned/WryActivity.kt": "475236fccd6acd172097fbe8928154f8ab6dae42f2eeac82eb9c6a1ba511c327",
-    "src/android/owned/proguard-wry.pro": "345390298139a59ceac19aaa6044932c06f5694d2a281d142031cc6ec388fea5",
+    "src/android/owned/WryActivity.kt": "595836eed86e9051f20a74b3ca7d6f8e740a48d6612b3e9e45b9b8ed48a5dd72",
+    "src/android/owned/proguard-wry.pro": "7e562d8007a86cd6f325a35a2646b4e9fa437718ee8ea20dfc368e0ced06fb47",
     "src/wkwebview/ios/WKWebView.rs": "4ff8588c4d8773c244c228e5aa1cce3af8d62e4de1fb08cb80dfb31ae9a2dbb0",
     "src/wkwebview/ios/mod.rs": "03823ce7c572f1ed345ae4ef6ec63e8ce4df1f0a7d3ad0efebb36dd6a7c18dd1",
     "src/wkwebview/class/wry_web_view_ui_delegate.rs": "931ad3ca6e303963e4d2c4267e2cd9fb94a0eef1ac8af8e6602b30cdcc324cc3",
@@ -203,8 +203,8 @@
     "examples/custom_protocol/wasm.wasm": "2cb1a33779de77d7cc016d934f91262b0984ec695e1f8dda9ba3c33725f5ef1b",
     "examples/custom_protocol/script.js": "6e08b96e8e1e0a3acb924a4ea63d45f45544ed82b253b8b9e33aace1e323656e"
   },
-  "patchedTreeSha256": "6feec215173ea5e574741128c4065a4363f0131f1364d5e9548e0c4f0f4efa1a",
+  "patchedTreeSha256": "73f904462094c3087bf11892c2c692e656d3d0ebdae43fd08af58fa60a3ad99b",
   "verification": "Official cached archive matched exact original lock checksum; secure regular-file-only inventory matched cached source. Only two manifests and Android main_pipe delta; no download.",
   "contract": "Android opt-in only: CreateWebView errors clear pending exception and keep FIFO; failed app/plugin hook skips storage. Exact-object app acknowledgement is mandatory.",
-  "ownedDestroyContract": "Android opt-in only; exact-object bounded multi-owner journal, queued UI cleanup, nonce-fenced Tao completion. Default templates/rules remain upstream bytes."
+  "ownedDestroyContract": "Android opt-in only; exact-object bounded multi-owner journal, queued UI cleanup, nonce-fenced Tao completion. Default templates/rules remain upstream bytes. Exact post-plugin storage notification is outside ownership locks and cannot change the cold creation acknowledgement."
 }

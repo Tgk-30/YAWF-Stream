@@ -28,9 +28,11 @@ const handlers = between(android, 'fn destroy_owned_handlers(', '\n/// Sets up t
 // Reuse only the explicit JNI scaffold, not its fake destruction ack/main.
 const scaffold = /const source=String.raw`([\s\S]*?)`;/.exec(read('scripts/android_creation_completion.test.mjs'))[1];
 const create = between(pipe, '      WebViewMessage::CreateWebView(attrs) => {', '      #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]\n      WebViewMessage::DestroyOwned');
+const storedNotification = between(create, '        #[cfg(all(\n          target_os = "android",\n          feature = "android-app-owned-window-destroy",\n          feature = "android-app-create-webview-completion"\n        ))]', '        #[cfg(not(all(target_os = "android", feature = "android-app-owned-window-destroy")))]');
 const recv = between(pipe, '  pub fn recv(&mut self)', '\n  #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]\n  fn on_owned_activity_destroy');
 const jni = between(pipe, '      WebViewMessage::Jni(f) => {', '      WebViewMessage::LoadUrl(');
 const callback = between(app, '        platform.jni_handle().exec(move |env, _activity, webview| {', '        });').split('\n').slice(1).join('\n');
+const callBody = between(app, '    let result = env.call_static_method(helper, method, signature, args);', '\n}\n\nfn connect_helper');
 
 // Execute Tauri's unchanged manager cleanup method, not a substitute label ack.
 // The cached public crate is already required by the preceding real Cargo CI step.
@@ -48,7 +50,7 @@ function compile(mutation='none') {
  if (binaries.has(mutation)) return binaries.get(mutation);
  let code=scaffold.slice(0,scaffold.indexOf('fn main(){'));
  code=code.replace('let exact=IDENTITY;', 'let exact=view.id==ACCEPTED.load(Ordering::SeqCst);');
- code=code.replace('RECV',recv).replace('CREATE',create).replace('\nJNI\n','\n#[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]\n'+uiArm+jni+onDestroyArm+'\n').replace('CALLBACK',callback).replace('\nDESTROY\n','\n');
+ code=code.replace('RECV',recv).replace('CREATE',create).replace('\nJNI\n','\n#[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]\n'+uiArm+jni+onDestroyArm+'\n').replace('CALLBACK',callback).replace('CALL_HELPER',callBody).replace('\nDESTROY\n','\n');
  code=code.replace('WebViewMessage::Other=>{', '#[cfg(not(all(target_os = "android", feature = "android-app-owned-window-destroy")))] WebViewMessage::DestroyOwned{..}=>unreachable!("disabled control never enqueues owned cleanup"),WebViewMessage::Other=>{');
  code=code.replace('impl MainPipe {', 'impl MainPipe {pub(crate) fn send(id:i32,m:WebViewMessage){QUEUE.lock().unwrap().push_back((id,m));}pub(crate) fn try_send_owned(id:i32,m:WebViewMessage)->bool{QUEUE.lock().unwrap().push_back((id,m));true}');
  code=code.replace('fn handle_message(&mut self', '#[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]\n'+destroy.replaceAll('WebviewId','String')+'\nfn handle_message(&mut self');
@@ -57,6 +59,17 @@ function compile(mutation='none') {
  code=code.replace('enum WebViewMessage{CreateWebView(CreateWebViewAttributes),', 'enum WebViewMessage{OnDestroy{activity_id:i32,webview_id:String,is_changing_configurations:bool,#[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]owned_activity:GlobalRef},DestroyOwned{webview_id:String,callback:Box<dyn FnOnce(bool)+Send>},CreateWebView(CreateWebViewAttributes),');
  code=code.replace('fn new_global_ref(&mut self,v:JObject)->Result<JObject>{self.fail("globalref")?;Ok(v)}', 'fn new_global_ref<V:std::borrow::Borrow<JObject>>(&mut self,v:V)->Result<JObject>{self.fail("globalref")?;Ok(v.borrow().clone())}\n fn is_same_object(&self,a:&JObject,b:&JObject)->Result<bool>{Ok(a.id==b.id)}');
  code=code.replace('fn call_method<S:AsRef<str>>(&mut self,_:&JObject,name:&str,_:S,args:&[JValue])->Result<Value>{', `fn call_method<S:AsRef<str>>(&mut self,owner:&JObject,name:&str,_:S,args:&[JValue])->Result<Value>{
+ if name=="notifyOwnedWebViewStored" {
+  assert!(PENDING_OWNED.try_lock().is_ok(),"notification cannot hold pending lock");
+  let proxies=ACTIVITY_PROXY.try_lock();assert!(proxies.is_ok(),"notification cannot hold proxy lock");let proxies=proxies.unwrap();
+  let JValue::Object(view)=args[0]else{panic!()};let proxy=&proxies[&1];
+  assert!(proxy.webview.is_some()&&proxy.webview_activity.is_some(),"notification requires completed proxy storage");
+  assert_eq!(proxy.activity.id,owner.id);assert_eq!(proxy.webview_activity.as_ref().unwrap().id,owner.id);
+  assert_eq!(proxy.webview.as_ref().unwrap().id,view.id);assert_eq!(proxy.webview_generation,Some(1));
+  assert_eq!(JAVA_VIEWS.lock().unwrap().get(&owner.id),Some(&view.id));assert_eq!(PARENTS.lock().unwrap().get(&view.id),Some(&owner.id));
+  drop(proxies);NOTIFY_ATTEMPTS.fetch_add(1,Ordering::SeqCst);self.fail("notify")?;
+  NOTIFICATIONS.lock().unwrap().push((owner.id,view.id));return Ok(Value{object:JObject::null(),boolean:false});
+ }
  if name=="isChangingConfigurations"{return Ok(Value{object:JObject::null(),boolean:CHANGING.load(Ordering::SeqCst)});}
  if name=="isDestroyed" {return Ok(Value{object:JObject::null(),boolean:DEAD.lock().unwrap().contains(&owner.id)});}
  if name=="destroyOwnedWebView" {
@@ -72,7 +85,8 @@ function compile(mutation='none') {
   return Ok(Value{object:JObject::null(),boolean:true});
  }
  if name=="setWebView" { let JValue::Object(v)=args[0] else {panic!()};JAVA_VIEWS.lock().unwrap().insert(owner.id,v.id); if !RETRY.load(Ordering::SeqCst)&&FAIL.get().unwrap()=="pre-hook" {return Err("hook refusal");} }
- if name=="setContentView" {let JValue::Object(v)=args[0] else {panic!()};PARENTS.lock().unwrap().insert(v.id,owner.id);}`);
+ if name=="setContentView" {let JValue::Object(v)=args[0] else {panic!()};PARENTS.lock().unwrap().insert(v.id,owner.id);if FAIL.get().unwrap()=="stored-conflict"{ACTIVITY_PROXY.lock().unwrap().get_mut(&1).unwrap().activity=JObject{id:9,name:"foreign".into()};}}`);
+ code=code.replace('static FAIL:', 'static NOTIFY_ATTEMPTS:AtomicI64=AtomicI64::new(0);static NOTIFICATIONS:Mutex<Vec<(i64,i64)>>=Mutex::new(Vec::new());static FAIL:');
  code=code.replace('static FAIL:', 'static CHANGING:AtomicBool=AtomicBool::new(false);static JAVA_VIEWS:Mutex<BTreeMap<i64,i64>>=Mutex::new(BTreeMap::new());static PARENTS:Mutex<BTreeMap<i64,i64>>=Mutex::new(BTreeMap::new());static DEAD:Mutex<Vec<i64>>=Mutex::new(Vec::new());static DISPOSED:Mutex<Vec<i64>>=Mutex::new(Vec::new());static DESTROYED_OBJECT:AtomicI64=AtomicI64::new(0);\nstatic FAIL:');
  // Preserve actual Rust/JNI error branches with a representable fake error type.
  code=code.replace(' assert_eq!(method,"constructionStored");',' if method=="constructionCleared" {assert!(TAURI_LABEL_REMOVED.load(Ordering::SeqCst),"Tauri manager labels removed before worker clear");let JValue::Long(ticket)=args[0]else{panic!()};CLEARED_TICKET.store(ticket,Ordering::SeqCst);return Ok(Value{object:JObject::null(),boolean:true});}STORED_CALLS.fetch_add(1,Ordering::SeqCst);assert_eq!(method,"constructionStored");');
@@ -153,6 +167,25 @@ fn main(){
  QUEUE.lock().unwrap().push_back((1,WebViewMessage::CreateWebView(attrs())));
  let mut ui=pipe::MainPipe{env:Env{pending:false}};assert!(ui.recv().is_ok());
  let mut allocated=NEXT.load(Ordering::SeqCst)-1;
+ if ["pre-hook","post-hook","load","ipc","content","plugin","early-globalref","stored-conflict"].contains(&scenario.as_str()) {
+  assert_eq!(NOTIFY_ATTEMPTS.load(Ordering::SeqCst),0,"failed creation never notifies storage");
+ }
+ if scenario=="stored-conflict" {assert!(ACTIVITY_PROXY.lock().unwrap()[&1].webview.is_none());return;}
+ if scenario=="stored-notification"||scenario=="notify"||scenario=="stored-warm" {
+  assert_eq!(NOTIFY_ATTEMPTS.load(Ordering::SeqCst),1);assert!(!ui.env.pending,"notification exception must be cleared without losing storage");
+  assert!(ACTIVITY_PROXY.lock().unwrap()[&1].webview.is_some());
+  assert_eq!(*NOTIFICATIONS.lock().unwrap(),if scenario=="notify"{vec![]}else{vec![(1,allocated)]});
+  let(tx,rx)=mpsc::channel();EVENTS.set(tx).unwrap();enqueue_proof(1);assert!(ui.recv().is_ok());
+  assert!(COMMITTED.load(Ordering::SeqCst),"notification success/failure cannot replace cold storage ACK");assert_eq!(rx.try_iter().collect::<Vec<_>>(),vec![(ATTACHED,1)]);
+  if scenario=="stored-warm" {
+   DEAD.lock().unwrap().push(1);ACTIVITY_PROXY.lock().unwrap().get_mut(&1).unwrap().activity=JObject{id:2,name:"warm owner".into()};
+   QUEUE.lock().unwrap().push_back((1,WebViewMessage::CreateWebView(attrs())));assert!(ui.recv().is_ok());
+   let next=ACTIVITY_PROXY.lock().unwrap()[&1].webview.as_ref().unwrap().id;assert_ne!(next,allocated);
+   assert_eq!(*NOTIFICATIONS.lock().unwrap(),vec![(1,allocated),(2,next)],"warm recreation has its own exact storage notification");
+   assert_eq!(STORED_CALLS.load(Ordering::SeqCst),1,"warm notification does not fabricate another cold ACK");
+  }
+  return;
+ }
  if scenario=="dead-owner-cleared-error"||scenario=="already-disposed-old" {
   let old=ACTIVITY_PROXY.lock().unwrap()[&1].webview.as_ref().unwrap().clone();
   if scenario=="already-disposed-old" {assert!(ui.env.call_method(&JObject{id:1,name:"old Activity".into()},"destroyOwnedWebView","(Landroid/webkit/WebView;Z)Z",&[JValue::Object(&old),JValue::Bool(true)]).unwrap().z().unwrap());}
@@ -242,6 +275,11 @@ fn main(){
  if(mutation==='old-ondestroy') {const start=code.indexOf('          let result = self.on_owned_activity_destroy(');const end=code.indexOf('          if result.is_err()',start);assert.ok(start>0&&end>start);code=code.slice(0,start)+'          let result:Result<()> = {if !is_changing_configurations {super::destroy_webview(activity_id,&webview_id);remove_activity_proxy(activity_id);}Ok(())};\n'+code.slice(end);}
  if(mutation==='retire-live') code=code.replace('      if !self\n        .env\n        .call_method(owned.activity.as_obj(), "isDestroyed"', '      if false && !self\n        .env\n        .call_method(owned.activity.as_obj(), "isDestroyed"');
  if(mutation==='drop-cleanup') code+='\nimpl Drop for WebviewWrapper {fn drop(&mut self){QUEUE.lock().unwrap().push_back((1,WebViewMessage::DestroyOwned{webview_id:"owned".into(),callback:Box::new(|_|{})}));}}\n';
+ if(mutation==='stored-omitted')code=code.replace('"notifyOwnedWebViewStored",','"omittedStorageNotification",');
+ if(mutation==='stored-before-proxy')code=code.replace(storedNotification,'').replace('        #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]\n        {\n          let mut pending = PENDING_OWNED.lock().unwrap();',storedNotification+'        #[cfg(all(target_os = "android", feature = "android-app-owned-window-destroy"))]\n        {\n          let mut pending = PENDING_OWNED.lock().unwrap();');
+ if(mutation==='stored-with-locks')code=code.replace(storedNotification,'').replace('          proxy.webview = Some(next.object);','          proxy.webview = Some(next.object);\n'+storedNotification);
+ if(mutation==='stored-exception-retained')code=code.replace(storedNotification,storedNotification.replace('self.env.exception_clear()?;','// unsafe retained exception'));
+ if(mutation==='stored-foreign-owner')code=code.replace('            || !self\n              .env\n              .is_same_object(proxy.activity.as_obj(), activity.as_obj())?','');
  if(mutation==='sync-wait') code=code.replace('  let proxy = proxy.clone();', '  let (_tx,rx)=mpsc::channel::<bool>();rx.recv_timeout(std::time::Duration::from_millis(20)).expect("Tao cannot wait for undrained UI");\n  let proxy = proxy.clone();');
  code+='\n#[allow(non_snake_case)]fn NO_JOURNAL(_: (i32,String),_:OwnedWebView){}\n';
  code=platform(code);
@@ -253,6 +291,13 @@ fn main(){
 const run=(bin,scenario)=>spawnSync(bin,[scenario],{encoding:'utf8',timeout:5000});
 for (const scenario of ['success','pre-hook','post-hook','load','ipc','content','plugin','cleanup','foreign-proxy','foreign-pending','wrong-attributes','missing-proxy','missing-window','multi','stale','rotation','overlap','bound','changed-generation','null-proof','stale-proof','early-globalref','dead-owner-cleared-error','already-disposed-old','binding-late-owner','binding-new-owner-dead','binding-config','binding-nonconfig','binding-cleared-failure','binding-early-back']) test(`actual Tao request, Wry UI cleanup, later Tao completion: ${scenario}`,()=>{const r=run(compile(),scenario);assert.equal(r.status,0,r.stdout+r.stderr);});
 for(const [mutation,scenario] of [['logical-only','success'],['premature-map','success'],['premature-ack','cleanup'],['no-journal','pre-hook'],['no-proxy-id','foreign-proxy'],['stale-nonce','stale'],['sync-wait','success'],['drop-cleanup','success'],['retire-live','overlap'],['old-ondestroy','binding-late-owner'],['null-shortcircuit','null-proof'],['combined-live-fences','success']]) test(`compiled unsafe owned-destroy mutant refuses behavior: ${mutation}`,()=>{const r=run(compile(mutation),scenario);assert.notEqual(r.status,0,'compiled mutant must fail the same behavior assertions');assert.equal(r.signal,null,r.stderr);});
+for(const scenario of ['stored-notification','notify','stored-warm','stored-conflict'])test(`actual post-storage notification leaves native ACK independent: ${scenario}`,()=>{
+ const positive=run(compile(),scenario);assert.equal(positive.status,0,positive.stdout+positive.stderr);
+});
+for(const [mutation,scenario]of [['stored-omitted','stored-warm'],['stored-before-proxy','stored-notification'],['stored-with-locks','stored-notification'],['stored-exception-retained','notify'],['stored-foreign-owner','stored-conflict']])test(`individual causal post-storage notification mutant: ${mutation}`,()=>{
+ const positive=run(compile(),scenario);assert.equal(positive.status,0,positive.stdout+positive.stderr);
+ const negative=run(compile(mutation),scenario);assert.equal(negative.signal,null);assert.equal(negative.status,101);assert.match(negative.stderr,/panicked/);
+});
 
 test('actual build.rs Kotlin generation keeps default templates/rules exact and selects only opt-in alternatives',()=>{
  const build=read('web/src-tauri/vendor/wry/build.rs');
@@ -273,6 +318,7 @@ test('actual build.rs Kotlin generation keeps default templates/rules exact and 
    assert.equal(readFileSync(join(output,entry),'utf8'),expected);
   }
   assert.equal(readFileSync(join(output,'proguard-wry.pro'),'utf8').includes('boolean destroyOwnedWebView(android.webkit.WebView, boolean);'),enabled,'release/R8 JNI method pinned only for this opt-in');
+  assert.equal(readFileSync(join(output,'proguard-wry.pro'),'utf8').includes('void notifyOwnedWebViewStored(android.webkit.WebView);'),enabled,'stored notification survives R8 only for this opt-in');
   const unused=join(work,`not-android-${enabled}`);mkdirSync(unused);
   const nonAndroid=spawnSync(bin,[],{env:{...env,CARGO_CFG_TARGET_OS:'linux',WRY_ANDROID_KOTLIN_FILES_OUT_DIR:unused},encoding:'utf8',timeout:5000});assert.equal(nonAndroid.status,0);assert.deepEqual(readdirSync(unused),[]);
  }

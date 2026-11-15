@@ -46,6 +46,9 @@ internal object YawfWebViewStartup {
   private var acceptedTicket = 0L
   private var acceptedGate: YawfWebViewStartupGate? = null
   private var acceptedOwnerKey: Any? = null
+  private var storedWebView: WeakReference<WebView>? = null
+  private var acknowledgedWebView: WeakReference<WebView>? = null
+  private var processCommittedTicket = 0L
 
   @Keep @JvmStatic private external fun nativeSignal(kind: Int, ticket: Long)
 
@@ -57,6 +60,8 @@ internal object YawfWebViewStartup {
     gate.deactivate(ownerKey)
     owner = WeakReference(activity)
     ownerKey = Any()
+    storedWebView = null
+    acknowledgedWebView = null
     resumed = false
     firstFrame = false
     retryRequested = false
@@ -94,6 +99,8 @@ internal object YawfWebViewStartup {
     if (attachedTicket == 0L) interruptQueued(activity)
     gate.deactivate(ownerKey)
     owner.clear()
+    storedWebView = null
+    acknowledgedWebView = null
     resumed = false
     if (attachedTicket == 0L && !activity.isChangingConfigurations) {
       // A later normal user entry gets a fresh native session, never a stale callback.
@@ -104,6 +111,41 @@ internal object YawfWebViewStartup {
 
   fun isResumed(activity: MainActivity): Boolean = owns(activity) && resumed
   fun isAttachedTo(activity: MainActivity): Boolean = owns(activity) && attachedTicket != 0L
+
+  fun isUpdaterReady(activity: MainActivity): Boolean {
+    val webView = storedWebView?.get() ?: return false
+    return updaterReady(activity, webView)
+  }
+
+  fun onOwnedWebViewStored(activity: MainActivity, webView: WebView) {
+    checkMain()
+    if (!owns(activity) || activity.isFinishing || activity.isDestroyed) return
+    if (attachedTicket == 0L && (acceptedWebView !== webView || acceptedActivity?.get() !== activity ||
+      acceptedTicket != ticket || acceptedGate !== gate || acceptedOwnerKey !== ownerKey ||
+      queuedTicket != ticket || cleanupTicket != 0L)) return
+    val previous = storedWebView?.get()
+    if (previous != null && previous !== webView) return
+    storedWebView = WeakReference(webView)
+    postUpdaterActivation(activity, webView)
+  }
+
+  private fun updaterReady(activity: MainActivity, webView: WebView): Boolean =
+    owns(activity) && resumed && attachedTicket != 0L && storedWebView?.get() === webView &&
+      processCommittedTicket == attachedTicket &&
+      !activity.isFinishing && !activity.isDestroyed && activity.isOwnedWebViewStored(webView)
+
+  private fun postUpdaterActivation(activity: MainActivity, webView: WebView) {
+    val expectedOwner = ownerKey
+    val expectedView = WeakReference(webView)
+    try {
+      main.post {
+        val current = expectedView.get() ?: return@post
+        if (ownerKey === expectedOwner && updaterReady(activity, current)) activity.resumeAndroidUpdaterAfterStartup()
+      }
+    } catch (_: RuntimeException) {
+      // Optional foreground work cannot change the native storage acknowledgement.
+    }
+  }
 
   fun onWebViewCreate(activity: MainActivity, webView: WebView): Boolean {
     checkMain()
@@ -135,8 +177,19 @@ internal object YawfWebViewStartup {
       !gate.claimHandoff(ownerKey, gate.generation, now())) return false
     attachedTicket = request
     queuedTicket = 0L
+    acknowledgedWebView = acceptedWebView?.let { WeakReference(it) }
     clearAccepted(request)
     return true
+  }
+
+  @Keep @JvmStatic fun constructionCommitted(request: Long, webView: WebView?) {
+    checkMain()
+    val activity = owner.get() ?: return
+    if (request <= 0L || request != attachedTicket || processCommittedTicket != 0L ||
+      webView == null || acknowledgedWebView?.get() !== webView || activity.isFinishing || activity.isDestroyed) return
+    processCommittedTicket = request
+    acknowledgedWebView = null
+    postUpdaterActivation(activity, webView)
   }
 
   fun onOwnedWebViewDestroy(activity: MainActivity, webView: WebView) {
@@ -144,6 +197,8 @@ internal object YawfWebViewStartup {
     // The Activity owns the exact object even after owner loss. Only release
     // this reference; the worker clears tickets/quarantine after real Destroyed.
     if (acceptedActivity?.get() === activity && acceptedWebView === webView) clearAccepted(acceptedTicket)
+    if (owns(activity) && storedWebView?.get() === webView) storedWebView = null
+    if (owns(activity) && acknowledgedWebView?.get() === webView) acknowledgedWebView = null
   }
 
   private fun clearAccepted(request: Long) {

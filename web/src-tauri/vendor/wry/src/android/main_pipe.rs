@@ -829,6 +829,28 @@ impl<'a> MainPipe<'a> {
           proxy.webview_generation = Some(next.generation);
           proxy.webview = Some(next.object);
         }
+        #[cfg(all(
+          target_os = "android",
+          feature = "android-app-owned-window-destroy",
+          feature = "android-app-create-webview-completion"
+        ))]
+        {
+          // Observe exact storage only after both ownership locks have dropped.
+          // This optional notification is not the app's cold construction ACK.
+          if self
+            .env
+            .call_method(
+              &activity,
+              "notifyOwnedWebViewStored",
+              "(Landroid/webkit/WebView;)V",
+              &[(&webview).into()],
+            )
+            .is_err()
+            && self.env.exception_check()?
+          {
+            self.env.exception_clear()?;
+          }
+        }
         #[cfg(not(all(target_os = "android", feature = "android-app-owned-window-destroy")))]
         {
           let webview = self.env.new_global_ref(webview)?;

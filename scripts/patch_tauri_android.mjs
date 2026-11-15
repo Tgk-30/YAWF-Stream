@@ -2,6 +2,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const generatedAndroidRelativePath = "web/src-tauri/gen/android";
@@ -1176,7 +1177,7 @@ function preAsyncStartupMainActivity(packageName) {
 
 // Native startup keeps Main/Tauri lifecycle synchronous, but defers the configured
 // Android window until the process coordinator observes real asynchronous readiness.
-function patchedMainActivity(packageName) {
+function preCommittedUpdaterMainActivity(packageName) {
   let activity = preAsyncStartupMainActivity(packageName);
   const replacements = [
     ['  override fun onCreate(savedInstanceState: Bundle?) {\n    webViewCompatibility = inspectWebViewCompatibility()',
@@ -1221,11 +1222,66 @@ function patchedMainActivity(packageName) {
   return activity;
 }
 
+function patchedMainActivity(packageName) {
+  let activity = preCommittedUpdaterMainActivity(packageName);
+  const replacements = [
+    ['  private lateinit var androidUpdater: YawfAndroidUpdater',
+     '  private lateinit var androidUpdater: YawfAndroidUpdater\n  private var androidUpdaterResumed = false'],
+    [`    if (YawfWebViewStartup.isResumed(this)) {
+      showWebViewCompatibilityDialog()
+      if (::androidUpdater.isInitialized) androidUpdater.onResume()
+    }`,
+     `    if (YawfWebViewStartup.isResumed(this)) {
+      showWebViewCompatibilityDialog()
+    }`],
+    [`    if (YawfWebViewStartup.isAttachedTo(this)) {
+      showWebViewCompatibilityDialog()
+      if (::androidUpdater.isInitialized) androidUpdater.onResume()
+    }`,
+     `    if (YawfWebViewStartup.isAttachedTo(this)) {
+      showWebViewCompatibilityDialog()
+    }
+    resumeAndroidUpdaterAfterStartup()`],
+    ['    if (::androidUpdater.isInitialized) androidUpdater.onPause()',
+     '    pauseAndroidUpdaterAfterStartup()'],
+    ['    YawfWebViewStartup.onDestroy(this)',
+     '    YawfWebViewStartup.onDestroy(this)\n    androidUpdaterResumed = false'],
+    ['    YawfWebViewStartup.onOwnedWebViewDestroy(this, webView)',
+     '    YawfWebViewStartup.onOwnedWebViewDestroy(this, webView)\n    pauseAndroidUpdaterAfterStartup()'],
+    ['  override fun onOwnedWebViewDestroy(webView: WebView) {',
+     `  override fun onOwnedWebViewStored(webView: WebView) {
+    YawfWebViewStartup.onOwnedWebViewStored(this, webView)
+  }
+
+  fun resumeAndroidUpdaterAfterStartup() {
+    if (!::androidUpdater.isInitialized || androidUpdaterResumed || !YawfWebViewStartup.isUpdaterReady(this)) return
+    androidUpdaterResumed = true
+    androidUpdater.onResume()
+  }
+
+  private fun pauseAndroidUpdaterAfterStartup() {
+    androidUpdaterResumed = false
+    if (::androidUpdater.isInitialized) androidUpdater.onPause()
+  }
+
+  override fun onOwnedWebViewDestroy(webView: WebView) {`],
+  ];
+  for (const [before, after] of replacements) {
+    if (activity.split(before).length !== 2) throw new Error("Unsupported committed Android updater Activity template.");
+    activity = activity.replace(before, after);
+  }
+  return activity;
+}
+
 export function previousStartupActivitiesForTest(packageName) {
   return [expectedMainActivity, legacyPatchedMainActivity, darkSystemBarPatchedMainActivity,
     safeAreaPatchedMainActivity, serverPlayerPatchedMainActivity, previousPatchedMainActivity,
     preFullscreenMainActivity, preImeMainActivity, preGestureMainActivity,
-    preColdRecoveryMainActivity, preAsyncStartupMainActivity].map((build) => build(packageName));
+    preColdRecoveryMainActivity, preAsyncStartupMainActivity, preCommittedUpdaterMainActivity].map((build) => build(packageName));
+}
+
+export function currentStartupMainActivityForTest(packageName) {
+  return patchedMainActivity(packageName);
 }
 
 export function previousAsyncStartupMainActivityForTest(packageName) {
@@ -1468,7 +1524,8 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
     activity === preImeMainActivity(packageName) ||
     activity === preGestureMainActivity(packageName) ||
     activity === preColdRecoveryMainActivity(packageName) ||
-    activity === preAsyncStartupMainActivity(packageName);
+    activity === preAsyncStartupMainActivity(packageName) ||
+    activity === preCommittedUpdaterMainActivity(packageName);
   if (!activityChanged && activity !== replacementActivity) {
     throw new Error(
       "Generated Android MainActivity.kt does not match the supported Tauri Android template. Refusing to patch generated sources.",
@@ -1549,10 +1606,14 @@ export function patchTauriAndroidProject({ root = repositoryRoot } = {}) {
     const path = join(dirname(mainActivityPath), name);
     const source = readFileSync(new URL("./android/" + name, import.meta.url), "utf8")
       .replace(/^package com\.tgk30\.debridstreamer$/m, `package ${packageName}`);
-    if (existsSync(path) && readFileSync(path, "utf8") !== source) {
-      throw new Error("Generated Android startup helper has unrecognized changes. Refusing to overwrite.");
+    const previous = existsSync(path) ? readFileSync(path, "utf8") : null;
+    if (previous !== null && previous !== source) {
+      const normalized = previous.replace(/^package [^\n]+$/m, 'package com.tgk30.debridstreamer');
+      const knownPrevious = name === "YawfWebViewStartup.kt" && previous.startsWith(`package ${packageName}\n`) &&
+        createHash("sha256").update(normalized).digest("hex") === "e1f383b14b0efb28316c2b61f9a8e40a6b103a026f35e85f9dac984f209f73a6";
+      if (!knownPrevious) throw new Error("Generated Android startup helper has unrecognized changes. Refusing to overwrite.");
     }
-    return { path, source, changed: !existsSync(path) };
+    return { path, source, changed: previous !== source };
   });
   const startupChanged = startupSources.some((entry) => entry.changed);
 

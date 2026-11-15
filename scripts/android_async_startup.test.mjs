@@ -4,6 +4,7 @@ import {existsSync,mkdtempSync,mkdirSync,readFileSync,readdirSync,rmSync,writeFi
 import {tmpdir} from 'node:os';
 import {dirname,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
+import {createHash} from 'node:crypto';
 const reference=await import(new URL('./patch_tauri_android.mjs',import.meta.url));
 const patcher=process.env.ANDROID_STARTUP_PATCHER?await import(pathToFileURL(process.env.ANDROID_STARTUP_PATCHER)):reference;
 const pkg='com.tgk30.debridstreamer';
@@ -51,7 +52,7 @@ test('current107 migration adds stable async coordinator and defers every provid
  const result=patcher.patchTauriAndroidProject({root:f.root});assert.equal(result.changed,true);const source=readFileSync(f.main,'utf8');const create=method(source,'onCreate');assert.ok(create.includes('YawfWebViewStartup.bind(this)'));assert.ok(create.indexOf('super.onCreate(savedInstanceState)')<create.indexOf('YawfWebViewStartup.showLoadingIfNeeded(this)'));assert.doesNotMatch(create,/inspectWebViewCompatibility|YawfAndroidUpdater.attach|WebViewCompat\./);const hook=method(source,'onWebViewCreate');assert.ok(hook.indexOf('YawfWebViewStartup.onWebViewCreate(this, webView)')<hook.indexOf('inspectWebViewCompatibility()'));assert.ok(existsSync(join(f.java,'YawfWebViewStartup.kt')));assert.ok(existsSync(join(f.java,'YawfWebViewStartupGate.kt')));assert.match(readFileSync(f.gradle,'utf8'),/webkit:1\.16\.0/);assert.equal(patcher.patchTauriAndroidProject({root:f.root}).changed,false);
 }));
 test('every previously accepted Activity template upgrades strictly and remains idempotent',()=>{
- assert.equal(accepted.length,11);for(const source of accepted)withFixture(f=>{patcher.patchTauriAndroidProject({root:f.root});assert.ok(readFileSync(f.main,'utf8').includes('YawfWebViewStartup.showLoadingIfNeeded(this)'));assert.equal(patcher.patchTauriAndroidProject({root:f.root}).changed,false);},source);
+ assert.equal(accepted.length,12);for(const source of accepted)withFixture(f=>{patcher.patchTauriAndroidProject({root:f.root});assert.ok(readFileSync(f.main,'utf8').includes('YawfWebViewStartup.showLoadingIfNeeded(this)'));assert.equal(patcher.patchTauriAndroidProject({root:f.root}).changed,false);},source);
 });
 test('startup keeps launcher/deep-link filters, public Main/singleTask, opaque delivery and ordinary synchronous lifecycle intact',()=>withFixture(f=>{
  const original=readFileSync(f.manifest,'utf8');patcher.patchTauriAndroidProject({root:f.root});const changed=readFileSync(f.manifest,'utf8');const filters=x=>[...x.matchAll(/<intent-filter\b[\s\S]*?<\/intent-filter>/g)].map(x=>x[0]);assert.deepEqual(filters(changed),filters(original));assert.equal((changed.match(/android:name="\.MainActivity"/g)||[]).length,1);assert.ok(changed.includes('android:exported="true"'));assert.ok(changed.includes('android:launchMode="singleTask"'));assert.doesNotMatch(changed,/Bootstrap|noHistory|excludeFromRecents|finishOnTaskLaunch/);const source=readFileSync(f.main,'utf8');assert.doesNotMatch(source,/override fun onNewIntent|intent\.extras|intent\.data/);assert.equal((method(source,'onCreate').match(/super\.onCreate\(savedInstanceState\)/g)||[]).length,1);assert.ok(method(source,'onResume').indexOf('super.onResume()')<method(source,'onResume').indexOf('YawfWebViewStartup.onResume(this)'));assert.ok(method(source,'onResume').includes('if (YawfWebViewStartup.isAttachedTo(this))'));
@@ -75,3 +76,53 @@ test('private helper keeps one executor, current application context, native fir
  const hook=s.slice(s.indexOf('  fun onWebViewCreate('),s.indexOf('  @Keep @JvmStatic fun constructionStored'));assert.doesNotMatch(hook,/attachedTicket =|claimHandoff|signal\(ATTACHED/);
 assert.ok(s.includes('gate.claimHandoff(ownerKey, gate.generation, now())'));assert.doesNotMatch(s,/JavascriptInterface|WebViewFeature|CookieManager|WebSettings|\bWebView\(|getCurrentWebViewPackage|Intent|SharedPreferences|Log\./);
 });
+
+test('generated updater foreground wiring preserves native manual entry and revokes readiness before pause or destroy',()=>withFixture(f=>{
+ patcher.patchTauriAndroidProject({root:f.root});const source=readFileSync(f.main,'utf8');
+ const wiring=code=>{
+  const hook=method(code,'onWebViewCreate'),resume=method(code,'onResume'),pause=method(code,'onPause'),destroy=method(code,'onDestroy');
+  const ordered=(body,first,second)=>body.indexOf(first)>=0&&body.indexOf(second)>body.indexOf(first);
+  return !hook.includes('androidUpdater.onResume()') && hook.includes('YawfAndroidUpdater.attach(this)') &&
+   resume.includes('resumeAndroidUpdaterAfterStartup()') &&
+   code.includes('if (!::androidUpdater.isInitialized || androidUpdaterResumed || !YawfWebViewStartup.isUpdaterReady(this)) return') &&
+   code.includes('androidUpdaterResumed = true\n    androidUpdater.onResume()') &&
+   code.includes('androidUpdaterResumed = false\n    if (::androidUpdater.isInitialized) androidUpdater.onPause()') &&
+   ordered(pause,'YawfWebViewStartup.onPause(this)','pauseAndroidUpdaterAfterStartup()') &&
+   ordered(pause,'pauseAndroidUpdaterAfterStartup()','super.onPause()') &&
+   ordered(destroy,'YawfWebViewStartup.onDestroy(this)','androidUpdater.onDestroy()') &&
+   code.includes('runOnUiThread { if (::androidUpdater.isInitialized) androidUpdater.checkManually() }') &&
+   code.includes('YawfWebViewStartup.onOwnedWebViewDestroy(this, webView)\n    pauseAndroidUpdaterAfterStartup()\n    super.onOwnedWebViewDestroy(webView)');
+ };
+ assert.equal(wiring(source),true);
+ for(const [before,after]of [
+  ['!YawfWebViewStartup.isUpdaterReady(this)','false'],
+  ['androidUpdaterResumed = true\n    androidUpdater.onResume()','androidUpdater.onResume()'],
+  ['YawfWebViewStartup.onPause(this)','Unit'],
+  ['YawfWebViewStartup.onDestroy(this)','Unit'],
+  ['androidUpdater.checkManually()','Unit'],
+ ]){assert.equal(source.split(before).length,2);assert.equal(wiring(source.replace(before,after)),false);}
+}));
+
+test('only exact prior committed-updater helper migrates and remains idempotent',()=>withFixture(f=>{
+ const currentHelper=readFileSync(new URL('./android/YawfWebViewStartup.kt',import.meta.url),'utf8');
+ const start=currentHelper.indexOf('  fun isUpdaterReady('),end=currentHelper.indexOf('  fun onWebViewCreate(',start);
+ assert.ok(start>0&&end>start);
+ let previous=currentHelper.slice(0,start)+currentHelper.slice(end);
+ const commitStart=previous.indexOf('  @Keep @JvmStatic fun constructionCommitted('),commitEnd=previous.indexOf('  fun onOwnedWebViewDestroy(',commitStart);
+ assert.ok(commitStart>0&&commitEnd>commitStart);previous=previous.slice(0,commitStart)+previous.slice(commitEnd);
+ for(const addition of [
+  '  private var storedWebView: WeakReference<WebView>? = null\n',
+  '  private var acknowledgedWebView: WeakReference<WebView>? = null\n',
+  '  private var processCommittedTicket = 0L\n',
+  '    storedWebView = null\n', '    acknowledgedWebView = null\n',
+  '    acknowledgedWebView = acceptedWebView?.let { WeakReference(it) }\n',
+  '    if (owns(activity) && storedWebView?.get() === webView) storedWebView = null\n',
+  '    if (owns(activity) && acknowledgedWebView?.get() === webView) acknowledgedWebView = null\n',
+ ]){assert.ok(previous.includes(addition));previous=previous.replaceAll(addition,'');}
+ assert.equal(createHash('sha256').update(previous).digest('hex'),'e1f383b14b0efb28316c2b61f9a8e40a6b103a026f35e85f9dac984f209f73a6','fixture reconstructs exact former source, not an accepted approximation');
+ const helper=join(f.java,'YawfWebViewStartup.kt');writeFileSync(helper,previous);
+ assert.equal(patcher.patchTauriAndroidProject({root:f.root}).changed,true);assert.equal(readFileSync(helper,'utf8'),currentHelper);
+ assert.equal(patcher.patchTauriAndroidProject({root:f.root}).changed,false);
+ writeFileSync(helper,previous+'\n// unrecognized change\n');const before=snapshot(f.root);
+ assert.throws(()=>patcher.patchTauriAndroidProject({root:f.root}));assert.deepEqual(snapshot(f.root),before);
+},accepted.at(-1)));

@@ -53,7 +53,7 @@ export function checkAndroidCreationVendor(root=resolve(dirname(fileURLToPath(im
   assert.equal(p.schema,1);assert.equal(p.crate,'wry');assert.equal(p.version,'0.57.0');
   assert.equal(p.upstreamArchiveSha256,'a819957a01b3119af85e638a38d242af76dbc87d130dca67bfd0441072e21ff0');
   assert.equal(p.upstreamTreeSha256,'81150226bcaee84520d6e2c79e0b0925d2430c461e81ba18d36dfb81140c6906');
-  assert.equal(p.patchedTreeSha256,'6feec215173ea5e574741128c4065a4363f0131f1364d5e9548e0c4f0f4efa1a');
+  assert.equal(p.patchedTreeSha256,'73f904462094c3087bf11892c2c692e656d3d0ebdae43fd08af58fa60a3ad99b');
   assert.deepEqual(p.patchFiles,['Cargo.toml','Cargo.toml.orig','build.rs','src/android/binding.rs','src/android/main_pipe.rs','src/android/mod.rs','src/android/owned/WryActivity.kt','src/android/owned/proguard-wry.pro','src/lib.rs']);
   assert.equal(tree(p.upstreamFiles),p.upstreamTreeSha256);assert.equal(tree(p.patchedFiles),p.patchedTreeSha256);
   const current=inventory(vendor);assert.deepEqual(current,p.patchedFiles,'Entire Wry patch inventory/content drift');

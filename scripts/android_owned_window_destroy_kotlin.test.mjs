@@ -111,7 +111,13 @@ object Rust {
 }
 class Owned:WryActivity(){
  var accepted:WebView?=null;var refuse=false;var failHook=false;var hookCount=0
+ var storedHooks=0;var failStored=false
  override fun onWebViewCreate(webView:WebView){check(!refuse){"pre-hook refusal"};accepted=webView}
+ override fun onOwnedWebViewStored(webView:WebView){
+  check(!isOwnedWebViewStored(webView)){"receipt cannot precede successful hook return"}
+  check(accepted===webView){"only exact assigned object reaches stored hook"}
+  storedHooks++;check(!failStored){"injected stored hook failure"}
+ }
  override fun onOwnedWebViewDestroy(webView:WebView){
   check(webView.parent==null){"detach before app cleanup"}
   val prior=(webView as RustWebView).pauses;onPause();check(webView.pauses==prior){"mWebView must be cleared before app hook"}
@@ -122,6 +128,23 @@ fun main(args:Array<String>){
  val scenario=args.single();val a=Owned();val v=RustWebView(a);val parent=android.view.ViewGroup(a)
  if(scenario=="pre-hook")a.refuse=true
  if(scenario!="unassigned"&&scenario!="unassigned-mounted"){try{a.setWebView(v)}catch(e:IllegalStateException){check(scenario=="pre-hook")};v.parent=parent}
+ if(scenario.startsWith("stored-")){
+  check(!a.isOwnedWebViewStored(v)){"assignment is not storage"}
+  if(scenario=="stored-foreign"){
+   val foreign=RustWebView(a);a.notifyOwnedWebViewStored(foreign);check(a.storedHooks==0);check(!a.isOwnedWebViewStored(foreign));check(!a.isOwnedWebViewStored(v));return
+  }
+  if(scenario=="stored-hook-failure"){
+   a.failStored=true;var failed=false;try{a.notifyOwnedWebViewStored(v)}catch(e:IllegalStateException){failed=true}
+   check(failed&&a.storedHooks==1);check(!a.isOwnedWebViewStored(v)){"throwing observer never publishes readiness"}
+   failed=false;try{a.notifyOwnedWebViewStored(v)}catch(e:IllegalStateException){failed=true}
+   check(failed&&a.storedHooks==2);check(!a.isOwnedWebViewStored(v)){"duplicate failed observer remains unavailable"};return
+  }
+  a.notifyOwnedWebViewStored(v);check(a.isOwnedWebViewStored(v));check(a.storedHooks==1)
+  a.notifyOwnedWebViewStored(v);check(a.storedHooks==1){"duplicate notification is inert"}
+  check(a.destroyOwnedWebView(v,true));check(!a.isOwnedWebViewStored(v)){"exact cleanup revokes storage receipt"}
+  val next=RustWebView(a);a.setWebView(next);check(!a.isOwnedWebViewStored(next));a.notifyOwnedWebViewStored(v);check(a.storedHooks==1)
+  a.notifyOwnedWebViewStored(next);check(a.isOwnedWebViewStored(next));check(a.storedHooks==2);return
+ }
  if(scenario=="foreign"){
   val foreign=RustWebView(a);check(!a.destroyOwnedWebView(foreign,true));check(foreign.destroyed==0);check(v.destroyed==0);check(v.parent===parent);check(a.accepted===v);check(a.onBackPressedDispatcher.active()==1){"foreign target cannot remove healthy Back callback"};return
  }
@@ -148,6 +171,9 @@ function compile(t,mutation='none') {
  if(mutation==='premature-disposed-ack')text=text.replace('        target.destroy()\n        mOwnedDisposed = WeakReference(target)', '        mOwnedDisposed = WeakReference(target)\n        target.destroy()');
  if(mutation==='retained-back-callback')text=text.replace('            mOwnedBackCallback?.remove()\n            mOwnedBackCallback = null','');
  if(mutation==='foreign-object')text=text.replace('            if (mWebView !== target) return false','');
+ if(mutation==='stored-foreign')text=text.replace('mWebView !== webView || mStoredWebView?.get() === webView','mStoredWebView?.get() === webView');
+ if(mutation==='stored-duplicate')text=text.replace('mWebView !== webView || mStoredWebView?.get() === webView','mWebView !== webView');
+ if(mutation==='stored-premature')text=text.replace('        onOwnedWebViewStored(webView)','        mStoredWebView = WeakReference(webView)\n        onOwnedWebViewStored(webView)');
  const files=[];for(const [name,body]of Object.entries({...stubs,'WryActivity.kt':text})){const p=join(dir,name);writeFileSync(p,body);files.push(p);}
  const output=join(dir,'template.jar');
  const r=spawnSync(tools.java,[`-Djava.io.tmpdir=${work}`,'-cp',tools.runtime,'org.jetbrains.kotlin.cli.jvm.K2JVMCompiler','-no-stdlib','-no-reflect','-jvm-target','17','-classpath',[tools.stdlib,tools.annotations].join(delimiter),'-d',output,...files],{encoding:'utf8',timeout:60000});
@@ -156,3 +182,7 @@ function compile(t,mutation='none') {
 function run(tools,scenario){return spawnSync(tools.java,[`-Djava.io.tmpdir=${work}`,'-cp',[tools.output,tools.stdlib].join(delimiter),'com.tgk30.debridstreamer.OwnedKt',scenario],{encoding:'utf8',timeout:10000});}
 for(const scenario of ['success','pre-hook','unassigned','foreign','unassigned-mounted','hook-error','destroy-error'])test(`actual alternate WryActivity exact-object cleanup: ${scenario}`,t=>{const c=compile(t);if(!c)return;const r=run(c,scenario);assert.equal(r.status,0,r.stdout+r.stderr);});
 for(const [mutation,scenario]of [['retained-mWebView','success'],['no-detach','success'],['foreign-object','foreign'],['premature-disposed-ack','destroy-error'],['retained-back-callback','success']])test(`compiled Kotlin cleanup mutant fails behavior: ${mutation}`,t=>{const c=compile(t,mutation);if(!c)return;const r=run(c,scenario);assert.notEqual(r.status,0);assert.match(r.stderr,/IllegalStateException/);});
+for(const [scenario,mutation]of [['stored-success','stored-duplicate'],['stored-foreign','stored-foreign'],['stored-hook-failure','stored-premature']])test(`actual Wry storage notification and individual causal mutant: ${scenario}`,t=>{
+ const original=compile(t);if(!original)return;const positive=run(original,scenario);assert.equal(positive.status,0,positive.stdout+positive.stderr);
+ const changed=compile(t,mutation);const negative=run(changed,scenario);assert.equal(negative.signal,null);assert.equal(negative.status,1);assert.match(negative.stderr,/IllegalStateException/);
+});

@@ -35,6 +35,7 @@ abstract class WryActivity : AppCompatActivity() {
     private var mWebView: RustWebView? = null
     private var mOwnedBackCallback: OnBackPressedCallback? = null
     private var mOwnedDisposed: WeakReference<WebView>? = null
+    private var mStoredWebView: WeakReference<WebView>? = null
     private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
     private lateinit var activityLauncher: ActivityResultLauncher<Intent>
     private var permissionListener: ((Boolean?) -> Unit)? = null
@@ -56,6 +57,7 @@ abstract class WryActivity : AppCompatActivity() {
 
     fun setWebView(webView: RustWebView) {
         check(mWebView == null) { "Owned WebView already assigned" }
+        mStoredWebView = null
         mWebView = webView
 
         if (handleBackNavigation) {
@@ -80,6 +82,21 @@ abstract class WryActivity : AppCompatActivity() {
         onWebViewCreate(webView)
     }
 
+    // Native calls this only after plugin completion and exact proxy storage.
+    fun notifyOwnedWebViewStored(webView: WebView) {
+        check(android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
+        if (mWebView !== webView || mStoredWebView?.get() === webView) return
+        mStoredWebView = null
+        onOwnedWebViewStored(webView)
+        // A throwing hook must never leave a successful notification receipt.
+        if (mWebView === webView) mStoredWebView = WeakReference(webView)
+    }
+
+    open fun onOwnedWebViewStored(webView: WebView) { }
+
+    fun isOwnedWebViewStored(webView: WebView): Boolean =
+        mWebView === webView && mStoredWebView?.get() === webView
+
     // Only the native exact-id journal can call this method. No JS interface.
     open fun onOwnedWebViewDestroy(webView: WebView) { }
 
@@ -92,6 +109,7 @@ abstract class WryActivity : AppCompatActivity() {
             if (mWebView !== target) return false
             // Clear first so lifecycle and Back callbacks cannot retain/use it.
             mWebView = null
+            mStoredWebView = null
             mOwnedBackCallback?.remove()
             mOwnedBackCallback = null
         } else if (mWebView != null || target.parent != null) {

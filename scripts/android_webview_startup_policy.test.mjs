@@ -5,6 +5,7 @@ import {homedir,tmpdir} from 'node:os';
 import {basename,delimiter,join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
+import {currentStartupMainActivityForTest} from './patch_tauri_android.mjs';
 
 function below(root,predicate) {
   if (!existsSync(root)) return [];
@@ -81,6 +82,22 @@ for(const [name,old,replacement,scenario] of mutations)test(`individual causal K
 });
 
 const coordinatorSource=fileURLToPath(new URL('./android/YawfWebViewStartup.kt',import.meta.url));
+const activitySource=currentStartupMainActivityForTest('com.tgk30.debridstreamer');
+const wrySource=readFileSync(new URL('../web/src-tauri/vendor/wry/src/android/owned/WryActivity.kt',import.meta.url),'utf8');
+function kotlinMethod(source,signature) {
+ const start=source.indexOf(signature),open=source.indexOf('{',start);assert.ok(start>=0&&open>start,signature);
+ let depth=1,end=open+1;for(;depth&&end<source.length;end++){if(source[end]==='{')depth++;else if(source[end]==='}')depth--;}
+ assert.equal(depth,0,signature);return source.slice(start,end);
+}
+function updaterLifecycle(source) {
+ return ['fun resumeAndroidUpdaterAfterStartup()', 'private fun pauseAndroidUpdaterAfterStartup()',
+  'override fun onResume()', 'override fun onPause()', 'override fun onOwnedWebViewStored(webView: WebView)',
+  'override fun onOwnedWebViewDestroy(webView: WebView)', 'fun checkAndroidUpdates()']
+  .map(signature=>kotlinMethod(source,signature)).join('\n');
+}
+const notifyStored=kotlinMethod(wrySource,'fun notifyOwnedWebViewStored(webView: WebView)');
+const storedPredicate=/fun isOwnedWebViewStored\(webView: WebView\): Boolean =\n[^\n]+/.exec(wrySource)?.[0];
+assert.ok(storedPredicate);
 const nativeStubs={
  'context.kt':`package android.content
 open class Context
@@ -164,10 +181,33 @@ class WebView(context: Context) : View(context)
  'main.kt':`package com.tgk30.debridstreamer
 import android.content.Context
 import android.view.View
-class MainActivity : Context() {
+import android.webkit.WebView
+import java.lang.ref.WeakReference
+open class ActivityBoundary : Context() {
+ open fun onResume() {}; open fun onPause() {}
+ open fun onOwnedWebViewStored(webView: WebView) {}; open fun onOwnedWebViewDestroy(webView: WebView) {}
+}
+class UpdaterBoundary {
+ var resumes=0;var pauses=0;var pendingManual=false;var foreground=false
+ fun onResume(){resumes++;foreground=true};fun onPause(){pauses++;foreground=false}
+ fun checkManually(){pendingManual=true}
+}
+class MainActivity : ActivityBoundary() {
  val applicationContext = Context()
  var isFinishing = false; var isDestroyed = false; var isChangingConfigurations = false
  var content: View? = null
+ private lateinit var androidUpdater: UpdaterBoundary
+ private var androidUpdaterResumed=false
+ private var mWebView:WebView?=null
+ private var mStoredWebView:WeakReference<WebView>?=null
+ val updater:UpdaterBoundary get()=androidUpdater
+ fun assign(view:WebView){mWebView=view;mStoredWebView=null;if(!::androidUpdater.isInitialized)androidUpdater=UpdaterBoundary()}
+ fun dispose(view:WebView){check(mWebView===view);mWebView=null;mStoredWebView=null;onOwnedWebViewDestroy(view)}
+ fun showWebViewCompatibilityDialog() {};fun dismissRemoteRecoveryDialog() {}
+ fun runOnUiThread(block:()->Unit){block()}
+ ${notifyStored}
+ ${storedPredicate}
+ ACTUAL_UPDATER_LIFECYCLE
  fun setContentView(view: View) { content = view }
  fun finish() { isFinishing = true }
 }
@@ -200,6 +240,17 @@ private fun authorize(ticket: Long) { YawfWebViewStartup.authorizeConstruction(t
 private fun retry(activity: MainActivity) {
  val button = (activity.content as LinearLayout).children.filterIsInstance<Button>().single { it.text == "Retry startup" }
  expect(button.isEnabled, "explicit Retry available"); button.click(); draw(activity)
+}
+private fun accept(activity:MainActivity,view:WebView) {
+ activity.assign(view);expect(YawfWebViewStartup.onWebViewCreate(activity,view),"exact Activity hook accepted")
+}
+private fun receiptCleared():Boolean {
+ val field=YawfWebViewStartup.javaClass.getDeclaredField("storedWebView");field.isAccessible=true
+ return field.get(YawfWebViewStartup)==null
+}
+private fun processCommitTicket():Long {
+ val field=YawfWebViewStartup.javaClass.getDeclaredField("processCommittedTicket");field.isAccessible=true
+ return field.getLong(YawfWebViewStartup)
 }
 fun main(args: Array<String>) {
  SystemClock.clock = 1L
@@ -246,6 +297,107 @@ fun main(args: Array<String>) {
    expect(YawfWebViewStartup.isAttached(ticket), "post-storage proof commits once")
    expect(!YawfWebViewStartup.constructionStored(ticket, webView), "duplicate proof cannot commit")
    expect(StartupHarness.events.none { it.first == 3 }, "Java hook never signals premature completion")
+  }
+  "updater-cold-ack" -> {
+   val ticket=ready();authorize(ticket);val view=WebView(activity);accept(activity,view)
+   activity.checkAndroidUpdates();expect(activity.updater.pendingManual,"existing native manual intent retained")
+   activity.notifyOwnedWebViewStored(view);Handler.flush()
+   expect(activity.updater.resumes==0,"native storage notification alone is not cold ACK")
+   expect(YawfWebViewStartup.constructionStored(ticket,view),"actual cold storage proof commits")
+   Handler.flush();expect(activity.updater.resumes==0,"Java storage ACK alone cannot activate before native dispatch commits")
+   YawfWebViewStartup.constructionCommitted(ticket,view)
+   expect(activity.updater.resumes==0,"updater work cannot run inside post-send receipt")
+   Handler.flush();expect(activity.updater.resumes==1&&activity.updater.pendingManual,"successful cold startup forwards readiness without losing manual intent")
+   expect(!YawfWebViewStartup.constructionStored(ticket,view),"duplicate proof remains refused")
+   YawfWebViewStartup.constructionCommitted(ticket,view)
+   activity.notifyOwnedWebViewStored(view);activity.resumeAndroidUpdaterAfterStartup();Handler.flush()
+   expect(activity.updater.resumes==1,"one foreground activation despite duplicate edges")
+   activity.onPause();expect(!activity.updater.foreground,"pause forwarded after revocation")
+   activity.onResume();Handler.flush();expect(activity.updater.resumes==2,"real later resume still forwarded")
+  }
+  "updater-failed-retry" -> {
+   val ticket=ready();authorize(ticket);val first=WebView(activity);accept(activity,first)
+   expect(!YawfWebViewStartup.constructionStored(ticket,null),"failed plugin/storage cannot commit")
+   YawfWebViewStartup.constructionFailed(ticket);Handler.flush();activity.dispose(first)
+   YawfWebViewStartup.constructionCleared(ticket);Handler.flush();draw(activity)
+   expect(activity.updater.resumes==0,"failed construction never starts updater foreground UI")
+   retry(activity);val nextTicket=ready();authorize(nextTicket);val next=WebView(activity);accept(activity,next)
+   activity.notifyOwnedWebViewStored(next);Handler.flush();expect(activity.updater.resumes==0,"retry also waits for actual ACK")
+   expect(YawfWebViewStartup.constructionStored(nextTicket,next),"retry exact storage commits")
+   YawfWebViewStartup.constructionCommitted(nextTicket,next)
+   Handler.flush();expect(activity.updater.resumes==1,"successful retry enables unchanged updater consent flow")
+  }
+  "updater-notification-failed" -> {
+   val ticket=ready();authorize(ticket);val view=WebView(activity);accept(activity,view)
+   // The observer ran, but the final Wry hook did not return successfully.
+   YawfWebViewStartup.onOwnedWebViewStored(activity,view)
+   expect(YawfWebViewStartup.constructionStored(ticket,view),"observer failure does not replace valid cold ACK")
+   YawfWebViewStartup.constructionCommitted(ticket,view)
+   Handler.flush();activity.resumeAndroidUpdaterAfterStartup()
+   expect(YawfWebViewStartup.isAttached(ticket)&&activity.updater.resumes==0,"native storage stays committed but failed observer is unavailable")
+  }
+  "updater-paused-publication" -> {
+   val ticket=ready();authorize(ticket);val view=WebView(activity);accept(activity,view);activity.notifyOwnedWebViewStored(view)
+   expect(YawfWebViewStartup.constructionStored(ticket,view),"storage commits before pause")
+   YawfWebViewStartup.constructionCommitted(ticket,view)
+   activity.onPause();Handler.flush();expect(activity.updater.resumes==0,"queued activation cannot cross pause")
+   activity.onResume();Handler.flush();expect(activity.updater.resumes==1,"current stored view can activate after real resume")
+  }
+  "updater-warm-owner" -> {
+   val ticket=ready();authorize(ticket);val first=WebView(activity);accept(activity,first);activity.notifyOwnedWebViewStored(first)
+   expect(YawfWebViewStartup.constructionStored(ticket,first),"old owner stores before replacement")
+   YawfWebViewStartup.constructionCommitted(ticket,first)
+   val next=MainActivity();YawfWebViewStartup.bind(next);next.onResume()
+   expect(receiptCleared(),"owner rebind drops prior stored receipt")
+   expect(processCommitTicket()==ticket,"legitimate native process commit survives warm rebind")
+   Handler.flush();expect(activity.updater.resumes==0,"late old-owner activation is inert")
+   val view=WebView(next);accept(next,view);next.resumeAndroidUpdaterAfterStartup()
+   expect(next.updater.resumes==0,"warm process attachment is not new-owner storage")
+   next.notifyOwnedWebViewStored(view);expect(next.updater.resumes==0,"warm observer only queues foreground work")
+   Handler.flush();expect(next.updater.resumes==1,"warm recreation activates its own committed object")
+   YawfWebViewStartup.onOwnedWebViewDestroy(activity,first);next.resumeAndroidUpdaterAfterStartup()
+   expect(next.updater.resumes==1&&YawfWebViewStartup.isUpdaterReady(next),"old cleanup cannot revoke replacement readiness")
+  }
+  "updater-destroyed-publication" -> {
+   val ticket=ready();authorize(ticket);val view=WebView(activity);accept(activity,view);activity.notifyOwnedWebViewStored(view)
+   expect(YawfWebViewStartup.constructionStored(ticket,view),"storage before destroy")
+   YawfWebViewStartup.constructionCommitted(ticket,view)
+   activity.isDestroyed=true;Handler.flush();expect(activity.updater.resumes==0,"destroyed owner cannot receive queued activation")
+   YawfWebViewStartup.onDestroy(activity);expect(receiptCleared(),"destroy releases stored receipt")
+  }
+  "updater-disposed-publication" -> {
+   val ticket=ready();authorize(ticket);val view=WebView(activity);accept(activity,view);activity.notifyOwnedWebViewStored(view)
+   expect(YawfWebViewStartup.constructionStored(ticket,view),"storage before exact cleanup")
+   YawfWebViewStartup.constructionCommitted(ticket,view)
+   activity.dispose(view);expect(receiptCleared(),"exact owned destruction releases stored receipt")
+   Handler.flush();expect(activity.updater.resumes==0,"disposed view cannot activate updater")
+  }
+  "updater-foreign-receipt" -> {
+   val ticket=ready();authorize(ticket);val view=WebView(activity);accept(activity,view)
+   YawfWebViewStartup.onOwnedWebViewStored(activity,WebView(activity))
+   expect(receiptCleared(),"foreign object cannot establish owner receipt")
+   activity.notifyOwnedWebViewStored(view);expect(YawfWebViewStartup.constructionStored(ticket,view),"correct later receipt still commits")
+   YawfWebViewStartup.constructionCommitted(ticket,view)
+   Handler.flush();expect(activity.updater.resumes==1,"foreign notification cannot poison valid activation")
+  }
+  "updater-fatal-dispatch-rebind" -> {
+   val ticket=ready();authorize(ticket);val view=WebView(activity);accept(activity,view);activity.notifyOwnedWebViewStored(view)
+   expect(YawfWebViewStartup.constructionStored(ticket,view),"Java storage can precede fatal native dispatch failure")
+   Handler.flush();expect(activity.updater.resumes==0,"no post-send receipt means no foreground activation")
+   val next=MainActivity();YawfWebViewStartup.bind(next);next.onResume();val warm=WebView(next);accept(next,warm);next.notifyOwnedWebViewStored(warm)
+   YawfWebViewStartup.constructionCommitted(ticket,view)
+   Handler.flush();expect(next.updater.resumes==0,"warm owner cannot convert missing process commit into readiness")
+   expect(processCommitTicket()==0L,"old owner receipt cannot retroactively qualify replacement")
+  }
+  "updater-postcommit-exact" -> {
+   val ticket=ready();authorize(ticket);val view=WebView(activity);accept(activity,view);activity.notifyOwnedWebViewStored(view)
+   YawfWebViewStartup.constructionCommitted(ticket,view);Handler.flush();expect(activity.updater.resumes==0,"notification before Java ACK refuses")
+   expect(YawfWebViewStartup.constructionStored(ticket,view),"exact Java ACK")
+   YawfWebViewStartup.constructionCommitted(ticket+1,view);Handler.flush();expect(activity.updater.resumes==0&&processCommitTicket()==0L,"wrong commit ticket refuses")
+   YawfWebViewStartup.constructionCommitted(ticket,null);Handler.flush();expect(activity.updater.resumes==0&&processCommitTicket()==0L,"null commit object refuses")
+   YawfWebViewStartup.constructionCommitted(ticket,WebView(activity));Handler.flush();expect(activity.updater.resumes==0&&processCommitTicket()==0L,"wrong commit object refuses")
+   YawfWebViewStartup.constructionCommitted(ticket,view);Handler.flush();expect(activity.updater.resumes==1,"exact post-send proof activates")
+   YawfWebViewStartup.constructionCommitted(ticket,view);Handler.flush();expect(activity.updater.resumes==1,"duplicate commit receipt is inert")
   }
   "failure-manual-retry" -> {
    WebViewCompat.callbacks.single().onError(WebViewStartupException()); Handler.flush(); draw(activity)
@@ -344,15 +496,15 @@ fun main(args: Array<String>) {
 `,
 };
 let coordinatorCompiled;
-function compileCoordinator(t,helperText) {
+function compileCoordinator(t,helperText,activityText) {
  const tools=toolchain(t);if(!tools)return null;
- if(coordinatorCompiled&&!helperText)return {...tools,output:coordinatorCompiled};
- const dir=mkdtempSync(join(work,'coordinator-'));const paths=Object.entries(nativeStubs).map(([name,text])=>{const p=join(dir,name);writeFileSync(p,text);return p;});
+ if(coordinatorCompiled&&!helperText&&!activityText)return {...tools,output:coordinatorCompiled};
+ const dir=mkdtempSync(join(work,'coordinator-'));const paths=Object.entries(nativeStubs).map(([name,text])=>{const p=join(dir,name);writeFileSync(p,text.replace('ACTUAL_UPDATER_LIFECYCLE',updaterLifecycle(activityText||activitySource)));return p;});
  const helper=join(dir,'YawfWebViewStartup.kt');let source=helperText||readFileSync(coordinatorSource,'utf8');
  const native='@Keep @JvmStatic private external fun nativeSignal(kind: Int, ticket: Long)';
  assert.ok(source.includes(native),'exact private JNI boundary only');source=source.replace(native,'@Keep @JvmStatic private fun nativeSignal(kind: Int, ticket: Long) { StartupHarness.signal(kind, ticket) }');writeFileSync(helper,source);
  const output=join(dir,'behavior.jar');const built=spawnSync(tools.java,[`-Djava.io.tmpdir=${work}`,'-cp',tools.runtime,'org.jetbrains.kotlin.cli.jvm.K2JVMCompiler','-no-stdlib','-no-reflect','-jvm-target','17','-classpath',[tools.stdlib,tools.annotations].join(delimiter),'-d',output,production,helper,...paths],{encoding:'utf8',timeout:60000});
- assert.equal(built.status,0,built.stdout+built.stderr);if(!helperText)coordinatorCompiled=output;return {...tools,output};
+ assert.equal(built.status,0,built.stdout+built.stderr);if(!helperText&&!activityText)coordinatorCompiled=output;return {...tools,output};
 }
 function runCoordinator(tools,scenario) {return spawnSync(tools.java,[`-Djava.io.tmpdir=${work}`,'-cp',[tools.output,tools.stdlib].join(delimiter),'com.tgk30.debridstreamer.CoordinatorBehaviorKt',scenario],{encoding:'utf8',timeout:10000});}
 for(const scenario of ['native-first-frame','callback-only-completion','failure-manual-retry','deadline-and-late-callback','configuration-owner-rebind','back-and-same-process-reentry','queued-owner-loss-quarantine','deadline-between-queue-and-hook','paused-success-no-launch','late-native-listener','bridge-after-early-back','stored-null','stored-stale','owner-loss-after-hook','storage-failure-retry','owned-cleanup-reference'])test(`actual Kotlin startup coordinator with fake platform/JNI boundary: ${scenario}`,t=>{
@@ -361,7 +513,7 @@ for(const scenario of ['native-first-frame','callback-only-completion','failure-
 
 const coordinatorMutations=[
  ['owned-cleanup-retains-reference','if (acceptedActivity?.get() === activity && acceptedWebView === webView) clearAccepted(acceptedTicket)','if (false) clearAccepted(acceptedTicket)','owned-cleanup-reference'],
- ['stored-object-identity','acceptedWebView !== webView','false','stored-stale'],
+ ['stored-object-identity','webView == null || acceptedWebView !== webView || request != acceptedTicket','webView == null || false || request != acceptedTicket','stored-stale'],
  ['stored-null-proof','webView == null || acceptedWebView !== webView','false || false','stored-null'],
  ['post-hook-owner-loss-combined-fences','!usable(activity) || queuedTicket != request || cleanupTicket != 0L || attachedTicket != 0L ||\n      !gate.claimHandoff(ownerKey, gate.generation, now())','false','owner-loss-after-hook'],
  ['first-frame-required','|| !firstFrame ||','|| false ||','native-first-frame'],
@@ -381,4 +533,34 @@ for(const [name,old,replacement,scenario] of coordinatorMutations)test(`${name =
  const source=readFileSync(coordinatorSource,'utf8');assert.ok(source.includes(old),name);
  const tools=compileCoordinator(t,source.replace(old,replacement));if(!tools)return;
  const result=runCoordinator(tools,scenario);assert.notEqual(result.status,0,'Unsafe in-memory coordinator mutant must fail');assert.match(result.stderr,/IllegalStateException/);
+});
+
+const updaterMutations=[
+ ['cold-ack-required','updater-cold-ack','helper','owns(activity) && resumed && attachedTicket != 0L && storedWebView?.get() === webView &&','owns(activity) && resumed && storedWebView?.get() === webView &&'],
+ ['commit-readiness-edge','updater-failed-retry','helper','    processCommittedTicket = request\n    acknowledgedWebView = null\n    postUpdaterActivation(activity, webView)','    processCommittedTicket = request\n    acknowledgedWebView = null'],
+ ['successful-observer-return','updater-notification-failed','helper',' && activity.isOwnedWebViewStored(webView)',''],
+ ['foreground-required','updater-paused-publication','helper','owns(activity) && resumed && attachedTicket != 0L &&','owns(activity) && attachedTicket != 0L &&'],
+ ['rebind-clears-receipt','updater-warm-owner','helper','    ownerKey = Any()\n    storedWebView = null','    ownerKey = Any()'],
+ ['warm-storage-edge','updater-warm-owner','helper','    val previous = storedWebView?.get()','    if (attachedTicket != 0L) return\n    val previous = storedWebView?.get()'],
+ ['destroyed-owner-refused','updater-destroyed-publication','helper','!activity.isFinishing && !activity.isDestroyed && activity.isOwnedWebViewStored(webView)','!activity.isFinishing && activity.isOwnedWebViewStored(webView)'],
+ ['exact-cleanup-releases-receipt','updater-disposed-publication','helper','    if (owns(activity) && storedWebView?.get() === webView) storedWebView = null',''],
+ ['foreign-object-refused','updater-foreign-receipt','helper','if (attachedTicket == 0L && (acceptedWebView !== webView || acceptedActivity?.get() !== activity ||','if (attachedTicket == 0L && (acceptedActivity?.get() !== activity ||'],
+ ['single-foreground-forward','updater-cold-ack','activity','androidUpdaterResumed || ',''],
+ ['pause-resets-forwarding','updater-cold-ack','activity','private fun pauseAndroidUpdaterAfterStartup() {\n    androidUpdaterResumed = false','private fun pauseAndroidUpdaterAfterStartup() {'],
+ ['native-process-commit-required','updater-fatal-dispatch-rebind','helper','      processCommittedTicket == attachedTicket &&\n',''],
+ ['rebind-drops-pending-ack','updater-fatal-dispatch-rebind','helper','    ownerKey = Any()\n    storedWebView = null\n    acknowledgedWebView = null','    ownerKey = Any()\n    storedWebView = null'],
+ ['warm-retains-native-commit','updater-warm-owner','helper','    ownerKey = Any()\n    storedWebView = null\n    acknowledgedWebView = null','    ownerKey = Any()\n    storedWebView = null\n    acknowledgedWebView = null\n    processCommittedTicket = 0L'],
+ ['postcommit-request-identity','updater-postcommit-exact','helper','request <= 0L || request != attachedTicket || processCommittedTicket != 0L','request <= 0L || processCommittedTicket != 0L'],
+ ['postcommit-object-identity','updater-postcommit-exact','helper','webView == null || acknowledgedWebView?.get() !== webView || activity.isFinishing','webView == null || activity.isFinishing'],
+];
+const postActivation=kotlinMethod(readFileSync(coordinatorSource,'utf8'),'private fun postUpdaterActivation(activity: MainActivity, webView: WebView)');
+updaterMutations.push(['observer-not-inline','updater-cold-ack','helper',postActivation,postActivation.replace('main.post {','run inline@ {').replace('return@post','return@inline')]);
+for(const [name,scenario,target,before,after]of updaterMutations)test(`actual committed-updater lifecycle with individual causal mutant: ${name}`,t=>{
+ const original=compileCoordinator(t);if(!original)return;
+ const positive=runCoordinator(original,scenario);assert.equal(positive.status,0,positive.stdout+positive.stderr);assert.match(positive.stdout,/Startup coordinator passed/);
+ const source=target==='activity'?activitySource:readFileSync(coordinatorSource,'utf8');assert.equal(source.split(before).length,2,'unique actual-source mutation '+name);
+ const changed=source.replace(before,after);
+ const mutant=target==='activity'?compileCoordinator(t,undefined,changed):compileCoordinator(t,changed);
+ const negative=runCoordinator(mutant,scenario);assert.equal(negative.signal,null);assert.equal(negative.status,1);assert.match(negative.stderr,/IllegalStateException/);
+ assert.doesNotMatch(negative.stderr,/NoClassDefFoundError|ExceptionInInitializerError|OutOfMemoryError/);
 });

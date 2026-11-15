@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 import {join} from 'node:path';
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 const bytes=readFileSync(new URL('./android_owned_destroy_vendor_patch.json',import.meta.url));
-assert.equal(sha(bytes),'810f9742c9c8cc2a634b99911b3eac49e1fb132b5334fe5c084928cb7317c599','Reviewed owned-destroy inverse patch drift');
+assert.equal(sha(bytes),'48864b23bebd1912ee12beeeb29d82d083cde627e2bac48703a46c61a4f6829f','Reviewed owned-destroy inverse patch drift');
 const reviewed=JSON.parse(bytes);
 /** Undo only the reviewed additive correction before prior upstream reconstruction. */
 export function inverseAndroidOwnedDestroy(crate,vendor,current) {
