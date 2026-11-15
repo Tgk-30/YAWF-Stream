@@ -5,9 +5,38 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { selectAndVerify480p, captureFailureUi, copyFailureScreenshot, isBoundedViewportJpeg, sanitizeUiFailureDiagnostic, classifyBrowserLaunchFailure, classifyFixtureBootstrapLog, classifyResponse, collectBrowserPrerequisites, collectFixtureDiagnostic, evaluateProgress, parseKernelUsernsFlag, runCasesAfterPublicBootstrap, runPublicBrowserBootstrap, sanitizeBrowserLaunchDiagnostic, sanitizeBrowserPrerequisiteDiagnostic, sanitizeFixtureDiagnostic, sanitizePublicBrowserBootstrap, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
+import { sanitizeHlsMetadata, selectAndVerify480p, captureFailureUi, copyFailureScreenshot, isBoundedViewportJpeg, sanitizeUiFailureDiagnostic, classifyBrowserLaunchFailure, classifyFixtureBootstrapLog, classifyResponse, collectBrowserPrerequisites, collectFixtureDiagnostic, evaluateProgress, parseKernelUsernsFlag, runCasesAfterPublicBootstrap, runPublicBrowserBootstrap, sanitizeBrowserLaunchDiagnostic, sanitizeBrowserPrerequisiteDiagnostic, sanitizeFixtureDiagnostic, sanitizePublicBrowserBootstrap, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
 import { buildFixtureMediaPlan } from './foreground_fixture_media_plan.mjs';
 const baseline = { time: 10, frames: 300, paused: false, seeking: false, rate: 1, hidden: false, error: null, source: 'one', wall: 1000, presented: { frames: 300 } };
+const hlsMetadata = '#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:3\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:3.000000,\n480p_seg_00000.ts\n#EXT-X-ENDLIST';
+test('actual HLS sanitizer preserves real safe tags and strips every secret-bearing field or reference', () => {
+  assert.equal(sanitizeHlsMetadata(hlsMetadata), hlsMetadata);
+  assert.equal(sanitizeHlsMetadata(hlsMetadata.replaceAll('\n', '\r\n')), hlsMetadata);
+  const input = '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,CODECS="avc1.64001f,mp4a.40.2",URI="https://secret.invalid/?token=SECRET",RESOLUTION=640x360,FRAME-RATE=30.000,VIDEO-RANGE=SDR,CLOSED-CAPTIONS=NONE\n480p.m3u8?generation=SECRET';
+  assert.equal(sanitizeHlsMetadata(input), '#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,FRAME-RATE=30.000,VIDEO-RANGE=SDR,CLOSED-CAPTIONS=NONE\n480p.m3u8');
+  const rejected = ['#EXT-X-KEY:METHOD=AES-128,URI="https://secret.invalid/SECRET"', '#EXT-X-MAP:URI="SECRET"',
+    '#EXTINF:3.0,SECRET', '#EXT-X-VERSION:6?token=SECRET', '#EXT-X-ENDLIST:SECRET', '#EXT-X-PLAYLIST-TYPE:SECRET',
+    '#EXT-X-STREAM-INF:BANDWIDTH=SECRET', '#EXT-X-STREAM-INF:BANDWIDTH=1,BANDWIDTH=2',
+    '#EXT-X-STREAM-INF:URI="SECRET,BANDWIDTH=123"', '#EXT-X-STREAM-INF:BANDWIDTH=1,URI="SECRET',
+    '#EXT-X-STREAM-INF:BANDWIDTH=1,', '# arbitrary SECRET', 'https://secret.invalid/480p.m3u8?token=SECRET',
+    '/api/stream/SECRET/480p.m3u8', '../480p.m3u8', '480p_seg_000000.ts', 'segment000.ts'];
+  assert.equal(sanitizeHlsMetadata(rejected.join('\n')), '');
+  assert.equal(sanitizeHlsMetadata('480p_seg_00001.ts?token=SECRET'), '480p_seg_00001.ts');
+  assert.equal(sanitizeHlsMetadata('x'.repeat(65537)), '');
+  const source = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  assert.match(source, /playlist: playlist == null \? null : sanitizeHlsMetadata\(playlist\)/);
+  assert.match(source, /row\.sanitizedBody = sanitizeHlsMetadata\(body\.toString\('utf8'\)\)/);
+  assert.match(source, /row\.bytes = body\.length; row\.sha256 = sha\(body\)/);
+  assert.match(source, /playlistSha256: playlist == null \? null : sha\(playlist\)/);
+});
+test('missing EXT-X separator mutation loses real metadata in the actual sanitizer', async () => {
+  assert.equal(sanitizeHlsMetadata(hlsMetadata), hlsMetadata);
+  const source = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  const from = '#EXT-X-(?:VERSION|TARGETDURATION|MEDIA-SEQUENCE)';
+  assert.equal(source.split(from).length, 2);
+  const mutant = await import(`data:text/javascript;base64,${Buffer.from(source.replace(from, '#EXTX-(?:VERSION|TARGETDURATION|MEDIA-SEQUENCE)')).toString('base64')}`);
+  assert.throws(() => assert.equal(mutant.sanitizeHlsMetadata(hlsMetadata), hlsMetadata), { code: 'ERR_ASSERTION' });
+});
 test('verified Node xz archive has its extraction prerequisite in the image bootstrap', () => {
   const dockerfile = readFileSync(new URL('./foreground-playback/Dockerfile', import.meta.url), 'utf8');
   const beforeExtraction = dockerfile.split('COPY node-v24.22.3-linux-x64.tar.xz')[0];

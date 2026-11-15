@@ -186,6 +186,40 @@ export function classifyResponse(path) {
   return /^\/api\/stream\/[^/]+$/.test(path) ? 'direct-proxy' : null;
 }
 
+export function sanitizeHlsMetadata(manifest) {
+  if (typeof manifest !== 'string' || manifest.length > 65536) return '';
+  const safeAttributes = {
+    BANDWIDTH: /^(?:0|[1-9]\d{0,9})$/, 'AVERAGE-BANDWIDTH': /^(?:0|[1-9]\d{0,9})$/,
+    RESOLUTION: /^[1-9]\d{0,4}x[1-9]\d{0,4}$/, 'FRAME-RATE': /^(?:0|[1-9]\d{0,2})(?:\.\d{1,3})?$/,
+    'VIDEO-RANGE': /^(?:SDR|HLG|PQ)$/, 'CLOSED-CAPTIONS': /^NONE$/,
+  };
+  const output = [], streamPrefix = '#EXT-X-STREAM-INF:';
+  for (const line of manifest.split(/\r?\n/)) {
+    if (!/^[\x20-\x7e]+$/.test(line)) continue;
+    if (/^(?:#EXTM3U|#EXTINF:(?:0|[1-9]\d{0,9})(?:\.\d{1,6})?,|#EXT-X-(?:VERSION|TARGETDURATION|MEDIA-SEQUENCE):(?:0|[1-9]\d{0,9})|#EXT-X-PLAYLIST-TYPE:(?:EVENT|VOD)|#EXT-X-ENDLIST)$/.test(line)) {
+      output.push(line); continue;
+    }
+    const owned = /^(480p\.m3u8|480p_seg_\d{5}\.ts)(?:\?[^#]*)?$/.exec(line);
+    if (owned) { output.push(owned[1]); continue; }
+    if (!line.startsWith(streamPrefix)) continue;
+    const raw = line.slice(streamPrefix.length), tokens = raw.match(/(?:[^",]|"[^"]*")+/g) ?? [];
+    if (tokens.join(',') !== raw) continue;
+    const attributes = [], seen = new Set(); let valid = true;
+    for (const token of tokens) {
+      const pair = /^([A-Z][A-Z0-9-]*)=("[^"]*"|[^",]+)$/.exec(token);
+      if (!pair || seen.has(pair[1])) { valid = false; break; }
+      seen.add(pair[1]);
+      const allowed = safeAttributes[pair[1]];
+      if (allowed) {
+        if (!allowed.test(pair[2])) { valid = false; break; }
+        attributes.push(`${pair[1]}=${pair[2]}`);
+      }
+    }
+    if (valid && attributes.length) output.push(streamPrefix + attributes.join(','));
+  }
+  return output.join('\n');
+}
+
 const PUBLIC_BOOTSTRAP_MESSAGE_LIMIT = 16 * 1024;
 const PUBLIC_BROWSER_ENV = Object.freeze({
   PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', HOME: '/tmp', TMPDIR: '/qa/tmp',
@@ -498,7 +532,7 @@ function producer(runtimeDir) {
     if (playlist != null && playlist.length > 65536) throw new Error('Playlist evidence exceeds limit');
     return { generation: sha(name), count: segments.length, frontier: segments.at(-1) ?? null,
       playlistSha256: playlist == null ? null : sha(playlist),
-      playlist: playlist == null ? null : playlist.split('\n').filter((line) => /^#EXT(?:INF|M3U|VERSION|X-TARGETDURATION|X-MEDIA-SEQUENCE|X-PLAYLIST-TYPE|X-ENDLIST)/.test(line) || /^480p_seg_\d{5}\.ts$/.test(line)).join('\n') };
+      playlist: playlist == null ? null : sanitizeHlsMetadata(playlist) };
   });
 }
 function realHlsProducer() {
@@ -598,8 +632,7 @@ async function runCase(chromium, name, output) {
           if (asset.endsWith('.m3u8')) {
             if (body.length > 65536) throw new Error('Manifest exceeds evidence limit');
             row.endlist = body.includes(Buffer.from('#EXT-X-ENDLIST'));
-            row.sanitizedBody = body.toString('utf8').split('\n').map((line) => line.split('?')[0])
-              .filter((line) => /^#EXT(?:INF|M3U|VERSION|X-TARGETDURATION|X-MEDIA-SEQUENCE|X-PLAYLIST-TYPE|X-ENDLIST|X-STREAM-INF)/.test(line) || /^(?:480p\.m3u8|480p_seg_\d{5}\.ts)$/.test(line)).join('\n');
+            row.sanitizedBody = sanitizeHlsMetadata(body.toString('utf8'));
           }
         }
         boundedAppend(evidence.requests, row);
