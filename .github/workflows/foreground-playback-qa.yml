@@ -40,7 +40,8 @@ jobs:
   foreground-chromium:
     needs: validate
     if: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'branch' && github.repository == 'Tgk-30/YAWF-Stream' && github.actor == github.repository_owner }}
-    runs-on: ubuntu-24.04
+    # Controlled host variation; all container/browser security guards stay identical.
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -54,11 +55,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/foreground-evidence"
           trap 'status=$?; if (( status != 0 )); then printf "{\"phase\":\"bootstrap\",\"failureCode\":\"Error\"}\n" > "$RUNNER_TEMP/foreground-evidence/status.json"; fi' EXIT
           test "$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')" -ge 18874368 || { echo 'Requires 12 GiB plus 6 GiB reserve'; exit 1; }
+          test "${ImageOS:-}" = ubuntu22 || { echo "Unexpected foreground host image"; exit 1; }
           mkdir -p "$RUNNER_TEMP/foreground-build"
           {
             printf 'source=%s\n' "$(git rev-parse HEAD)"
             echo 'browserImage=mcr.microsoft.com/playwright@sha256:766137e2d9caad4744187e53cdc89320ba6f2eb57cff097374020944b44dd0a9'
             echo 'scope=synthetic-desktop-chromium-not-native-ipad'
+            printf 'hostRunner=ubuntu-22.04\nhostImageOS=%s\nhostImageVersion=%s\n' "$ImageOS" "${ImageVersion:-unavailable}"
           } > "$RUNNER_TEMP/foreground-evidence/binding.txt"
           cp scripts/foreground-playback/Dockerfile "$RUNNER_TEMP/foreground-build/Dockerfile"
           curl --fail --silent --show-error --location --max-time 120 https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-x64.tar.xz -o "$RUNNER_TEMP/foreground-build/node-v24.22.3-linux-x64.tar.xz"
