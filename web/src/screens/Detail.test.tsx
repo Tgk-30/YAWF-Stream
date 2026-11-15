@@ -16,6 +16,7 @@ import { createPortal } from "react-dom";
 import { readFileSync } from "node:fs";
 import type { MediaPreview, MediaItem } from "../models/media";
 import type { DetailState } from "../data/detail";
+import { createProgressWriteQueue } from "../store/progressWriteQueue";
 import type { StreamsState } from "../data/streams";
 import { defaultSettings } from "../data/settings";
 import { TorrentResult } from "../services/indexers/models";
@@ -1543,8 +1544,18 @@ describe("Detail base render", () => {
 
     await userEvent.click(screen.getByText("report-progress"));
     expect(recordResume).toHaveBeenCalledWith(
+      createProgressWriteQueue,
       mockDetailItem,
       80,
+      100,
+      null,
+      undefined,
+    );
+    await userEvent.click(screen.getByText("report-ended"));
+    expect(recordResume).toHaveBeenLastCalledWith(
+      createProgressWriteQueue,
+      mockDetailItem,
+      100,
       100,
       null,
       undefined,

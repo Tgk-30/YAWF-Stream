@@ -78,7 +78,7 @@ export function ProfilePicker({ onClose }: { onClose: () => void }) {
   const profiles = useServerProfiles();
   const setSession = useSetServerSession();
   const setProfiles = useSetServerProfiles();
-  const { reloadProfileData } = useAppActions();
+  const { reloadProfileData, runProfileTransition } = useAppActions();
   const pickerRef = useModalA11y<HTMLDivElement>(onClose);
 
   const [editing, setEditing] = useState(false);
@@ -118,43 +118,59 @@ export function ProfilePicker({ onClose }: { onClose: () => void }) {
     setError(null);
     setBusyId(profileId);
     const wasActive = profileId === activeId;
-    void deleteAccountProfile(profileId)
-      .then(async (res) => {
-        // The delete already succeeded server-side: refresh the list FIRST so
-        // the deleted tile is dropped even if the follow-up switch fails.
-        await refreshAfterMutation(res.profiles);
-        if (wasActive) {
-          // Converge the client onto the server's fallback (default) profile so
-          // it isn't left pointed at a now-deleted one. Any failure here is
-          // isolated: the delete stands and the next load reconciles the
-          // session, so we must NOT surface "Could not delete.".
-          const fallback =
-            res.profiles.find((p) => p.isDefault) ?? res.profiles[0];
-          if (fallback != null) {
-            try {
-              const sw = await switchAccountProfile(fallback.id);
-              await reloadProfileData();
-              if (sw.session != null) {
-                setSession({
-                  profileId: sw.session.profileId,
-                  username: sw.session.username,
-                  displayName: sw.session.displayName,
-                  role: sw.session.role,
-                  avatarColor: sw.session.avatarColor,
-                  simpleMode: sw.session.simpleMode,
-                  isKid: sw.session.isKid ?? fallback.isKid,
-                });
-              }
-            } catch {
-              // Convergence-only failure; delete still stands.
+    void (async () => {
+      let deleted = false;
+      try {
+        const finishDelete = async (
+          res: Awaited<ReturnType<typeof deleteAccountProfile>>,
+        ) => {
+          // The delete already succeeded server-side: refresh the list FIRST so
+          // the deleted tile is dropped even if the follow-up switch fails.
+          await refreshAfterMutation(res.profiles);
+          if (wasActive) {
+            // Converge onto the server's fallback while the transition fence
+            // remains held. Failure leaves writes closed under uncertain auth.
+            const fallback = res.profiles.find((p) => p.isDefault) ?? res.profiles[0];
+            if (fallback == null) throw new Error("No active fallback profile.");
+            const sw = await switchAccountProfile(fallback.id);
+            await reloadProfileData();
+            if (sw.session != null) {
+              setSession({
+                profileId: sw.session.profileId,
+                username: sw.session.username,
+                displayName: sw.session.displayName,
+                role: sw.session.role,
+                avatarColor: sw.session.avatarColor,
+                simpleMode: sw.session.simpleMode,
+                isKid: sw.session.isKid ?? fallback.isKid,
+              });
             }
           }
+        };
+
+        if (wasActive) {
+          await runProfileTransition(async (markProfileChanged) => {
+            const res = await deleteAccountProfile(profileId);
+            deleted = true;
+            markProfileChanged();
+            await finishDelete(res);
+          });
+        } else {
+          const res = await deleteAccountProfile(profileId);
+          deleted = true;
+          await finishDelete(res);
         }
-      })
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : "Could not delete."),
-      )
-      .finally(() => setBusyId(null));
+      } catch (err) {
+        // A post-delete convergence failure is intentionally quiet: the delete
+        // stands, and the transition fence remains closed because a failed
+        // response does not prove whether the server changed active ownership.
+        if (!deleted) {
+          setError(err instanceof Error ? err.message : "Could not delete.");
+        }
+      } finally {
+        setBusyId(null);
+      }
+    })();
   }
 
   // Refresh the list from the server on open so a profile added on another
@@ -218,27 +234,33 @@ export function ProfilePicker({ onClose }: { onClose: () => void }) {
     setBusyId(profile.id);
     setError(null);
     try {
-      const result = await switchAccountProfile(profile.id, password);
-      // Load the new profile's data BEFORE flipping the UI session. If the
-      // refetch fails we stay on the old profile (the catch re-throws), instead
-      // of leaving the new - possibly kid - session over the old profile's
-      // already-rendered (possibly over-cap) rails. The server has already
-      // switched the session cookie, so these loaders return the new profile's data.
-      await reloadProfileData();
-      if (result.session != null) {
-        setSession({
-          profileId: result.session.profileId,
-          username: result.session.username,
-          displayName: result.session.displayName,
-          role: result.session.role,
-          avatarColor: result.session.avatarColor,
-          simpleMode: result.session.simpleMode,
-          isKid: result.session.isKid ?? profile.isKid,
-        });
-      }
-      if (result.profiles != null) setProfiles(result.profiles.profiles);
+      await runProfileTransition(async (markProfileChanged) => {
+        const result = await switchAccountProfile(profile.id, password);
+        markProfileChanged();
+        // Load the new profile's data BEFORE flipping the UI session. If the
+        // refetch fails we stay on the old profile (the catch re-throws), instead
+        // of leaving the new - possibly kid - session over the old profile's
+        // already-rendered (possibly over-cap) rails. The server has already
+        // switched the session cookie, so these loaders return the new profile's data.
+        await reloadProfileData();
+        if (result.session != null) {
+          setSession({
+            profileId: result.session.profileId,
+            username: result.session.username,
+            displayName: result.session.displayName,
+            role: result.session.role,
+            avatarColor: result.session.avatarColor,
+            simpleMode: result.session.simpleMode,
+            isKid: result.session.isKid ?? profile.isKid,
+          });
+        }
+        if (result.profiles != null) setProfiles(result.profiles.profiles);
+      });
       onClose();
     } catch (err) {
+      // A rejected switch response may follow a server-side cookie change. The
+      // store keeps progress fenced until a successful retry/reload establishes
+      // which profile owns the current session.
       setBusyId(null);
       throw err;
     }

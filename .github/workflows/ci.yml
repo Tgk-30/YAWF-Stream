@@ -341,8 +341,66 @@ jobs:
       - name: Web - build (typecheck + vite), test
         working-directory: web
         run: |
-          npm run build
-          npx vitest run
+          build_status=0
+          npm run build || build_status=$?
+          test_status=0
+          npx vitest run || test_status=$?
+          causal_status=0
+          node ../scripts/check_progress_write_regressions.mjs || causal_status=$?
+          test "$build_status" -eq 0 && test "$test_status" -eq 0 && test "$causal_status" -eq 0
+
+      - name: Retain progress regression causality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: progress-write-regression-causality
+          path: |
+            ${{ runner.temp }}/progress-write-regressions.json
+            ${{ runner.temp }}/progress-write-regressions-*/*.json
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Retain exact app bundle diagnostics
+        if: always()
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import crypto from 'node:crypto';
+          import {gzipSync} from 'node:zlib';
+          import {measureBundle} from './scripts/check_bundle_budgets.mjs';
+          if (!fs.existsSync('web/dist/index.html')) {
+            console.log('No generated app bundle to measure. This is not a passing build.');
+          } else {
+            const metrics = measureBundle('web');
+            const files = new Set(metrics.initialFiles);
+            for (const name of fs.readdirSync(path.join(metrics.dist, 'assets'))) {
+              if (name.endsWith('.js')) files.add('assets/'+name);
+            }
+            const assets = [...files].sort().map(name => {
+              const bytes = fs.readFileSync(path.join(metrics.dist, name));
+              const text = bytes.toString('utf8');
+              const imports = [...text.matchAll(/(?:from\s*|import\s*)["'](\.\/[^"']+\.js)["']/g)].map(match => match[1]);
+              return {name, initial: metrics.initialFiles.includes(name), raw: bytes.length,
+                gzip: gzipSync(bytes, {level:9}).length, sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+                imports: [...new Set(imports)], containsProgressTimeout: text.includes('Progress write timed out.'),
+                containsProgressCancelled: text.includes('Progress write cancelled')};
+            });
+            const report = {...metrics, dist:'web/dist', assets, source:process.env.GITHUB_SHA,
+              runId:process.env.GITHUB_RUN_ID, scope:'BUILD_BYTE_DIAGNOSTICS_NOT_RUNTIME_OR_PUBLICATION'};
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'web-bundle-diagnostics.json'), JSON.stringify(report,null,2)+'\n');
+            console.log(JSON.stringify({initialFiles:metrics.initialFiles, initialRaw:metrics.initialRaw, initialGzip:metrics.initialGzip}));
+          }
+          JS
+
+      - name: Upload app bundle diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-bundle-diagnostics
+          path: ${{ runner.temp }}/web-bundle-diagnostics.json
+          if-no-files-found: warn
+          retention-days: 3
 
       - name: Smoke packaged desktop server resources
         run: |

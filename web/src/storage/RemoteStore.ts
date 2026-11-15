@@ -22,7 +22,6 @@ import type {
   Store,
   WatchHistoryUpsert,
 } from "./types";
-
 import { notifyUnauthorized, readCsrfToken } from "../lib/serverSession";
 
 type JsonObject = Record<string, unknown>;
@@ -54,8 +53,12 @@ class ServerAPI {
     return this.request<T>("GET", path);
   }
 
-  async put<T>(path: string, body: unknown): Promise<T> {
-    return this.request<T>("PUT", path, body);
+  async put<T>(
+    path: string,
+    body: unknown,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return this.request<T>("PUT", path, body, signal);
   }
 
   async post<T>(path: string, body: unknown): Promise<T> {
@@ -70,6 +73,7 @@ class ServerAPI {
     method: string,
     path: string,
     body?: unknown,
+    signal?: AbortSignal,
   ): Promise<T> {
     const headers: Record<string, string> = {};
     const unsafe = method !== "GET" && method !== "HEAD";
@@ -84,6 +88,7 @@ class ServerAPI {
       credentials: "include",
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
+      ...(signal == null ? {} : { signal }),
     });
 
     const text = await response.text();
@@ -361,7 +366,14 @@ export class RemoteStore implements Store, SecretStore {
     throw unsupportedRemoteWrite("assignWatchlistFolder");
   }
 
-  async recordHistory(entry: WatchHistoryUpsert): Promise<WatchHistoryRecord> {
+  /** Only the lazy playback queue supplies cancellation and a write deadline. */
+  async recordHistory(
+    entry: WatchHistoryUpsert,
+    signal?: AbortSignal,
+  ): Promise<WatchHistoryRecord> {
+    if (signal?.aborted) {
+      throw new DOMException("Progress write cancelled", "AbortError");
+    }
     const episodeId = entry.episodeId ?? null;
     const progressSeconds = entry.progressSeconds ?? 0;
     const durationSeconds = entry.durationSeconds ?? null;
@@ -369,10 +381,7 @@ export class RemoteStore implements Store, SecretStore {
     const queuedNext = entry.queuedNext ?? false;
     const streamQuality = entry.streamQuality ?? null;
     const lastWatched = entry.lastWatched ?? nowISO();
-    const response = await this.api.put<{
-      ok?: boolean;
-      item?: ServerHistoryResponse["items"][number];
-    }>(`/api/history/${encodeURIComponent(entry.mediaId)}`, {
+    const body = {
       episodeId,
       progressSeconds,
       durationSeconds,
@@ -393,7 +402,13 @@ export class RemoteStore implements Store, SecretStore {
         ? {} : { subtitleDelay: entry.subtitleDelay }),
       ...(entry.subtitlePosition === undefined
         ? {} : { subtitlePosition: entry.subtitlePosition }),
-    });
+    };
+    const path = `/api/history/${encodeURIComponent(entry.mediaId)}`;
+    type Response = {
+      ok?: boolean;
+      item?: ServerHistoryResponse["items"][number];
+    };
+    const response = await this.api.put<Response>(path, body, signal);
     if (response.item != null) return mapHistory(response.item);
     // Older servers return only { ok: true }. Keep that response compatible by
     // building the submitted record locally rather than re-fetching up to 500
