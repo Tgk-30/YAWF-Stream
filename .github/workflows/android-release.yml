@@ -492,6 +492,14 @@ jobs:
           binding['finalTestApk'] = {'sha256': hashlib.sha256(apk.read_bytes()).hexdigest(), 'bytes': apk.stat().st_size}
           binding['finalTestFaultCodeSha256'] = hashlib.sha256(code).hexdigest()
           binding['finalTestAliasAndLoadDefined'] = True
+          kotlin_code = subprocess.check_output(['apkanalyzer', 'dex', 'code', '--class',
+              'kotlin.jvm.internal.Intrinsics', str(apk)], timeout=90)
+          assert len(kotlin_code) <= 131072, 'TEST_KOTLIN_RUNTIME_CODE_BOUND'
+          assert re.search(rb'^\.class .* Lkotlin/jvm/internal/Intrinsics;$', kotlin_code, re.M), 'TEST_KOTLIN_RUNTIME_DEFINITION_REQUIRED'
+          assert re.search(rb'^\.method public static (?:final )?checkNotNullParameter\(Ljava/lang/Object;Ljava/lang/String;\)V$', kotlin_code, re.M), 'TEST_KOTLIN_RUNTIME_METHOD_REQUIRED'
+          binding['testKotlinRuntimeDefined'] = True
+          binding['testKotlinRuntimeCodeSha256'] = hashlib.sha256(kotlin_code).hexdigest()
+          (root / 'test-kotlin-runtime-code.txt').write_bytes(kotlin_code)
           sdk = Path(os.environ.get('ANDROID_SDK_ROOT', os.environ['ANDROID_HOME']))
           badging = subprocess.check_output([str(sdk/'build-tools/36.0.0/aapt'), 'dump', 'badging', str(apk)], timeout=30)
           assert len(badging) <= 131072, 'TEST_APK_BADGING_BOUND'

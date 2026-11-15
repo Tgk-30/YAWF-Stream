@@ -55,6 +55,8 @@ val verifyTauriApiInput = tasks.register("verifyTauriAndroidApiInput") {
 }
 
 android {
+    // Java-only empty main model must not absorb the test APK's Kotlin runtime.
+    enableKotlin = false
     namespace = "com.yawf.ownedstartupinstrumentation"
     compileSdk = 36
 
@@ -91,6 +93,8 @@ dependencies {
     // Plugin's public API signatures mention AppCompatActivity. Keep this
     // ordinary AndroidX dependency in the instrumentation APK, never compileOnly.
     androidTestImplementation("androidx.appcompat:appcompat:1.6.0")
+    // Installed target is minified; tests need their own ordinary Kotlin classes.
+    androidTestImplementation("org.jetbrains.kotlin:kotlin-stdlib:2.3.21")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test:core:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")

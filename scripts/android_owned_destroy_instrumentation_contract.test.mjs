@@ -145,3 +145,19 @@ test('reported artifact is fixed-schema, redacted, and scoped to this selected r
   assert.doesNotMatch(testSource.replace('selected_first_plugin_load_failure_then_one_native_retry', 'startup_success'),
     /selected_first_plugin_load_failure_then_one_native_retry/);
 });
+
+
+test('Java-only module keeps ordinary Kotlin runtime in the test APK, not its empty main target', async () => {
+  const gradle = await read('app/build.gradle.kts');
+  const properties = await read('gradle.properties');
+  const moduleKotlinDisabled = (source) => /android \{\n    \/\/[^\n]*\n    enableKotlin = false\n/.test(source);
+  const testKotlinRuntime = (source) => /^    androidTestImplementation\("org\.jetbrains\.kotlin:kotlin-stdlib:2\.3\.21"\)$/m.test(source);
+  assert.equal(moduleKotlinDisabled(gradle), true);
+  assert.equal(testKotlinRuntime(gradle), true);
+  assert.equal(moduleKotlinDisabled(gradle.replace('enableKotlin = false', '')), false);
+  assert.equal(testKotlinRuntime(gradle.replace('androidTestImplementation("org.jetbrains.kotlin:kotlin-stdlib:2.3.21")', '')), false);
+  assert.equal(testKotlinRuntime(gradle.replace('androidTestImplementation("org.jetbrains.kotlin:kotlin-stdlib:2.3.21")', 'compileOnly("org.jetbrains.kotlin:kotlin-stdlib:2.3.21")')), false);
+  assert.doesNotMatch(properties, /android\.(?:builtInKotlin|newDsl)\s*=\s*false/);
+  assert.match(gradle, /compileOnly\(files\(apiClassesJar\)\)/);
+  assert.match(gradle, /androidTestCompileOnly\(files\(apiClassesJar\)\)/);
+});

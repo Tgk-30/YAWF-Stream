@@ -25,8 +25,8 @@ METHOD = "(Landroid/webkit/WebView;)V"
 CLASSES = ("app.tauri.plugin.PluginManager", "app.tauri.plugin.PluginHandle")
 CRATE = "f316751027fc2644221d1a448564d519efb07067fda584879d9cda966391d212"
 MODULE_FILES = {
-    "README.md": "d6b45d0e950c182c471367699ffc18dfe5b26ae2a202615426f282531fbf1833",
-    "app/build.gradle.kts": "513aa65877de1649e035c607df03c4830d2e9e71e7dedc354c4883e8642ea70b",
+    "README.md": "7be8d39d3583b2443cbd3e3936717af6350157cf516c5d9055c113f3421ea566",
+    "app/build.gradle.kts": "a08e4fd5f9489f45662ecd1bb665d3a7db89d1e6a0f97a781d036288e52b6101",
     "app/src/androidTest/AndroidManifest.xml": "bb1c618c5a517eba63d8c2355b1470a355b2baca85e393695b2e05dcc96001d3",
     "app/src/androidTest/java/com/yawf/ownedstartup/FaultOncePlugin.java": "14c3fb04da8343d19b4392b8b3c6eb31cf4cdfcea33776ba10ce36cdf18f1369",
     "app/src/androidTest/java/com/yawf/ownedstartup/OwnedDestroyInstrumentationRunner.java": "746ad475010a9fc0ec067325c6c43ba4f339d626f6f50e5cb50d25c652ac372c",

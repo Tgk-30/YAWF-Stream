@@ -16,6 +16,12 @@ The receipt producer must build from the checksum-verified crate source and extr
 
 AndroidX AppCompat appears only as a regular `androidTestImplementation` because Tauri's `Plugin` API signatures mention `AppCompatActivity`; it is not a `compileOnly` AAR. The only `compileOnly` inputs are the checksum-bound Tauri API JAR in the app and instrumentation compile classpaths.
 
+## Test-only Kotlin runtime isolation
+
+This Java-only module sets `android { enableKotlin = false }` using AGP9's module-local built-in Kotlin control. It explicitly packages `org.jetbrains.kotlin:kotlin-stdlib:2.3.21` with `androidTestImplementation`, not in the empty main model. Tauri API classes remain checksum-bound `compileOnly` and `androidTestCompileOnly` JAR inputs, never packaged Tauri definitions. No global built-in Kotlin opt-out or legacy DSL mode is used.
+
+The hosted pre-JUnit failure reported only the privacy-safe missing-Kotlin namespace bucket. The working inference is that AGP's automatic main Kotlin dependency allowed test dependency deduplication against an empty compile-only target model, while the actual installed target has a minified runtime. This source correction is not proof of that cause or of runtime success. Root must verify required ordinary Kotlin classes in the built test DEX, retain the dependency receipt, and qualify the actual minified APK instrumentation run. Product dependencies, APK bytes and Java test behavior are unchanged by this module-only correction.
+
 ## Test protocol and refusal behavior
 
 The custom runner injects the test plugin after the target Activity's `onCreate` returns and before its first resume/draw. The test plugin's first `load(WebView)` callback inspects the live Tauri `HashMap` and proceeds only when its own key is actually first in the current iteration order. Otherwise the run refuses with `FAULT_NOT_FIRST`; it never assumes the map's order. First callback captures the old WebView and throws once. A second callback records a distinct new WebView; any further callback refuses.
