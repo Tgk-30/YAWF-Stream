@@ -5,6 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { classifyResponse, evaluateProgress, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
 const baseline = { time: 10, frames: 300, paused: false, seeking: false, rate: 1, hidden: false, error: null, source: 'one', wall: 1000, presented: { frames: 300 } };
+test('verified Node xz archive has its extraction prerequisite in the image bootstrap', () => {
+  const dockerfile = readFileSync(new URL('./foreground-playback/Dockerfile', import.meta.url), 'utf8');
+  const beforeExtraction = dockerfile.split('COPY node-v24.22.3-linux-x64.tar.xz')[0];
+  assert.match(beforeExtraction, /apt-get install[\s\S]*?\bxz-utils\b/);
+  assert.doesNotMatch(beforeExtraction.replace('xz-utils', ''), /apt-get install[\s\S]*?\bxz-utils\b/);
+});
 test('decoded time and frame progress resets the watchdog', () => {
   assert.deepEqual(evaluateProgress(baseline, { ...baseline, time: 11, frames: 330, presented: { frames: 330 } }, 1000, 2000), { failure: null, stagnantSince: 2000 });
 });
