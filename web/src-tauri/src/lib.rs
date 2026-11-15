@@ -906,7 +906,11 @@ pub fn run() {
                     android_startup::start(app.clone(), config);
                 }
             }
-            tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::Destroyed, .. } => {
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } => {
                 android_startup::window_destroyed(&label);
             }
             tauri::RunEvent::ExitRequested { code, api, .. } => {

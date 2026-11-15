@@ -142,7 +142,13 @@ pub(crate) fn start(app: AppHandle, config: WindowConfig) {
                                 let proof_window = window.clone();
                                 pending = Some((ticket, window));
                                 if queue_storage_proof(&proof_window, &helper, ticket).is_err() {
-                                    let _ = call(&mut env, &helper, "constructionFailed", "(J)V", &[JValue::Long(ticket)]);
+                                    let _ = call(
+                                        &mut env,
+                                        &helper,
+                                        "constructionFailed",
+                                        "(J)V",
+                                        &[JValue::Long(ticket)],
+                                    );
                                     destroy_pending(&mut pending, &mut destroying);
                                 }
                             }
@@ -183,8 +189,19 @@ pub(crate) fn start(app: AppHandle, config: WindowConfig) {
                             pending = None;
                         }
                     }
-                    CREATION_FAILED if !COMMITTED.load(Ordering::Acquire) && pending.as_ref().is_some_and(|(expected, _)| *expected == ticket) => {
-                        let _ = call(&mut env, &helper, "constructionFailed", "(J)V", &[JValue::Long(ticket)]);
+                    CREATION_FAILED
+                        if !COMMITTED.load(Ordering::Acquire)
+                            && pending
+                                .as_ref()
+                                .is_some_and(|(expected, _)| *expected == ticket) =>
+                    {
+                        let _ = call(
+                            &mut env,
+                            &helper,
+                            "constructionFailed",
+                            "(J)V",
+                            &[JValue::Long(ticket)],
+                        );
                         destroy_pending(&mut pending, &mut destroying);
                     }
                     CANCELLED if !COMMITTED.load(Ordering::Acquire) => {
@@ -224,20 +241,36 @@ fn bootstrap_failed(app: &AppHandle) {
     }
 }
 
-fn queue_storage_proof(window: &WebviewWindow, helper: &GlobalRef, ticket: i64) -> tauri::Result<()> {
+fn queue_storage_proof(
+    window: &WebviewWindow,
+    helper: &GlobalRef,
+    ticket: i64,
+) -> tauri::Result<()> {
     let helper = helper.clone();
     let exit_app = window.app_handle().clone();
     window.with_webview(move |platform| {
         platform.jni_handle().exec(move |env, _activity, webview| {
             // This message shares Wry's FIFO with CreateWebView. Only the exact
             // synchronously accepted object after ACTIVITY_PROXY storage qualifies.
-            let attached = CONSTRUCTION.load(Ordering::Acquire) == ticket &&
-                !webview.is_null() && call(env, &helper, "constructionStored",
-                    "(JLandroid/webkit/WebView;)Z", &[JValue::Long(ticket), JValue::Object(webview)])
-                    .and_then(|value| value.z()).unwrap_or(false);
+            let attached = CONSTRUCTION.load(Ordering::Acquire) == ticket
+                && !webview.is_null()
+                && call(
+                    env,
+                    &helper,
+                    "constructionStored",
+                    "(JLandroid/webkit/WebView;)Z",
+                    &[JValue::Long(ticket), JValue::Object(webview)],
+                )
+                .and_then(|value| value.z())
+                .unwrap_or(false);
             if let Some(events) = EVENTS.get() {
-                if events.send((if attached { ATTACHED } else { CREATION_FAILED }, ticket)).is_ok() {
-                    if attached { COMMITTED.store(true, Ordering::Release); }
+                if events
+                    .send((if attached { ATTACHED } else { CREATION_FAILED }, ticket))
+                    .is_ok()
+                {
+                    if attached {
+                        COMMITTED.store(true, Ordering::Release);
+                    }
                 } else {
                     bootstrap_failed(&exit_app);
                 }
