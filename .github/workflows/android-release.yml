@@ -497,6 +497,10 @@ jobs:
           assert len(badging) <= 131072, 'TEST_APK_BADGING_BOUND'
           (root / 'test-apk-badging.txt').write_bytes(badging)
           binding['testApkBadgingSha256'] = hashlib.sha256(badging).hexdigest()
+          manifest = subprocess.check_output(['apkanalyzer', 'manifest', 'print', str(apk)], timeout=30)
+          assert len(manifest) <= 131072, 'TEST_APK_MANIFEST_BOUND'
+          (root / 'test-apk-manifest.xml').write_bytes(manifest)
+          binding['testApkManifestSha256'] = hashlib.sha256(manifest).hexdigest()
           receipt.write_text(json.dumps(binding, sort_keys=True)+'\n')
           (root / 'test-fault-runtime-code.txt').write_bytes(code)
           PY
@@ -525,6 +529,7 @@ jobs:
             ${{ runner.temp }}/owned-startup-build/TEST-BUILD-BINDING.json
             ${{ runner.temp }}/owned-startup-build/*runtime-code.txt
             ${{ runner.temp }}/owned-startup-build/test-apk-badging.txt
+            ${{ runner.temp }}/owned-startup-build/test-apk-manifest.xml
             ${{ runner.temp }}/owned-startup-runtime/ROOT-LIFECYCLE.json
             ${{ runner.temp }}/owned-startup-runtime/owned-admission.json
             ${{ runner.temp }}/owned-startup-runtime/evidence/*.json

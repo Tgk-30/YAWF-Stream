@@ -60,6 +60,7 @@ class Fake(m.System):
    text="package: name='%s' versionCode='%s' versionName='%s'\n"%(package,code,version)
    if target and self.debug:text+='application-debuggable\n'
    if not target:text+="instrumentation: name='%s' targetPackage='%s'\n"%('foreign.runner'if self.wrong_runner else m.RUNNER,m.TARGET)
+  elif tool=='apkanalyzer':text='<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="'+m.TEST_PACKAGE+'"><instrumentation android:name="'+('foreign.runner'if self.wrong_runner else m.RUNNER)+'" android:targetPackage="'+m.TARGET+'"/></manifest>'
   elif tool=='apksigner':text='Signer #1 certificate DN: PRIVATE_NOT_RETAINED\nSigner #1 certificate SHA-256 digest: '+('b'*64 if self.bad_cert else 'a'*64)+'\n'
   else:raise AssertionError('unexpected executable')
   return 0,text.encode(),b''
@@ -67,7 +68,7 @@ class Fake(m.System):
 class Fixture:
  def __init__(self):
   self.temporary=tempfile.TemporaryDirectory(dir=os.environ['TMPDIR']);self.root=pathlib.Path(self.temporary.name).resolve();self.job=self.root/'job';self.job.mkdir();self.avd=self.job/'owned36.avd';self.avd.mkdir();sdk=self.root/'sdk'
-  for name in ['platform-tools/adb','build-tools/36.0.0/aapt','build-tools/36.0.0/apksigner']:
+  for name in ['platform-tools/adb','build-tools/36.0.0/aapt','build-tools/36.0.0/apksigner','cmdline-tools/latest/bin/apkanalyzer']:
    p=sdk/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('fake never executed');p.chmod(0o755)
   target=self.job/'target.apk';test=self.job/'test.apk'
   for p,name in [(target,'Lproduct/Main;'),(test,'Ltest/Observer;')]:
@@ -132,6 +133,10 @@ finally:f.close()
 
 test('only one complete exact-schema final evidence plus genuine JUnit completion qualifies',()=>run(String.raw`
 assert m.evidence(output())==proof()
+xml='<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="'+m.TEST_PACKAGE+'"><instrumentation android:name="'+m.RUNNER+'" android:targetPackage="'+m.TARGET+'"/></manifest>'
+assert m.test_instrumentation_matches(xml)
+for invalid in [xml.replace(m.TARGET,'foreign.target'),xml.replace(m.RUNNER,'foreign.runner'),xml.replace('</manifest>','<instrumentation/></manifest>'),'<manifest>', '<!DOCTYPE a>'+xml]:
+ assert not m.test_instrumentation_matches(invalid)
 assert m.install_succeeded('Success\n') and m.install_succeeded('Performing Push Install\nSuccess\n')
 for text in ['Success\nFailure [x]','Failure [x]\nSuccess','Success\nSuccess','unrecognized\nSuccess','Performing Push Install\n']:
  assert not m.install_succeeded(text)

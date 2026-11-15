@@ -23,6 +23,7 @@ import sys
 import time
 import zipfile
 import zlib
+from xml.etree import ElementTree
 
 TARGET = "com.tgk30.debridstreamer"
 TEST_PACKAGE = "com.yawf.ownedstartupinstrumentation.test"
@@ -70,6 +71,19 @@ def install_succeeded(output):
     # ADB's non-streaming installer prints its mode before package-manager
     # success. Never accept a success substring or an unrecognized extra line.
     return output.strip().splitlines() in (["Success"], ["Performing Push Install", "Success"])
+
+
+def test_instrumentation_matches(xml):
+    if "<!DOCTYPE" in xml or "<!ENTITY" in xml:
+        return False
+    try:
+        root = ElementTree.fromstring(xml)
+    except ElementTree.ParseError:
+        return False
+    android = "{http://schemas.android.com/apk/res/android}"
+    rows = root.findall("instrumentation")
+    return root.tag == "manifest" and root.get("package") == TEST_PACKAGE and len(rows) == 1 and \
+        rows[0].get(android + "name") == RUNNER and rows[0].get(android + "targetPackage") == TARGET
 
 
 def strict_json(text):
@@ -357,10 +371,10 @@ class Controller:
                     "application-debuggable" not in badging and "application-testOnly" not in badging and "instrumentation:" not in badging, "TARGET_APK_METADATA")
         else:
             require(packages[0][0] == TEST_PACKAGE, "TEST_APK_PACKAGE")
-            instruments = re.findall(r"(?m)^instrumentation: name='([^']+)' targetPackage='([^']+)'", badging)
-            require(instruments == [(RUNNER, TARGET)] and
-                    len([line for line in badging.splitlines() if line.startswith("instrumentation:")]) == 1,
-                    "TEST_INSTRUMENTATION")
+            # aapt badging omits instrumentation declarations. Inspect the
+            # actual binary manifest as XML before either APK is installed.
+            manifest = self.text([str(self.analyzer), "manifest", "print", str(path)])
+            require(test_instrumentation_matches(manifest), "TEST_INSTRUMENTATION")
         certificates = self.text([str(self.signer), "verify", "--print-certs", str(path)])
         found = re.findall(r"(?m)^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]{64})\s*$", certificates)
         require(len(found) == 1 and found[0].lower() == self.a.expected_cert, "APK_CERTIFICATE")
@@ -403,8 +417,9 @@ class Controller:
         self.evidence_owned = True
         sdk = Path(self.a.sdk).resolve(strict=True)
         self.aapt, self.signer = sdk / "build-tools/36.0.0/aapt", sdk / "build-tools/36.0.0/apksigner"
+        self.analyzer = sdk / "cmdline-tools/latest/bin/apkanalyzer"
         adb = sdk / "platform-tools/adb"
-        for tool in (self.aapt, self.signer, adb):
+        for tool in (self.aapt, self.signer, self.analyzer, adb):
             require(tool.is_file() and os.access(tool, os.X_OK) and tool.resolve().is_relative_to(sdk), "SDK_TOOL_REQUIRED")
         self.adb = [str(adb), "-H", "127.0.0.1", "-P", str(PORT), "-s", SERIAL]
         self.env = {"PATH": self.sys.environ.get("PATH", ""), "HOME": str(self.job), "TMPDIR": str(self.job),
