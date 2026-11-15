@@ -235,6 +235,9 @@ jobs:
       - name: Public repo preflight tests
         run: node --test scripts/public_repo_preflight.test.mjs
 
+      - name: Mounted website redirect handler tests
+        run: node --test scripts/deploy_website_cloudflare_redirect.test.mjs
+
       - name: Public repo preflight
         run: node scripts/public_repo_preflight.mjs
 

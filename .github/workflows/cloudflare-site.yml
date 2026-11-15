@@ -15,6 +15,7 @@ on:
       - "scripts/check_bundle_budgets.mjs"
       - "scripts/check_bundle_budgets.test.mjs"
       - "scripts/deploy_website_cloudflare.mjs"
+      - "scripts/deploy_website_cloudflare_redirect.test.mjs"
       - "scripts/public_repo_preflight.mjs"
       - ".github/workflows/cloudflare-site.yml"
   workflow_dispatch:
@@ -53,7 +54,7 @@ jobs:
 
       - name: YAWF Stream website QA
         run: |
-          node --test scripts/check_website_stream_picker_clip.test.mjs
+          node --test scripts/check_website_stream_picker_clip.test.mjs scripts/deploy_website_cloudflare_redirect.test.mjs
           node scripts/check_website_app.mjs
 
       - name: Website download logic
@@ -129,7 +130,7 @@ jobs:
       - name: YAWF Stream website QA
         if: steps.gate.outputs.ready == 'true'
         run: |
-          node --test scripts/check_website_stream_picker_clip.test.mjs
+          node --test scripts/check_website_stream_picker_clip.test.mjs scripts/deploy_website_cloudflare_redirect.test.mjs
           node scripts/check_website_app.mjs
 
       - name: Website download logic
