@@ -749,7 +749,7 @@ test('individual failure screenshot report and copy mutants are rejected behavio
       assert.equal(api.copyFailureScreenshot(source, dest, 'admission'), false);
     })],
     ["Object.keys(value.state).sort().join(',') !== UI_STATE_KEYS.join(',')", 'false', (api) => assert.equal(api.sanitizeUiFailureDiagnostic({ ...uiDiagnostic(), state: { ...safeUiState, raw: privateDiagnostic } }), null)],
-    ["fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);", 'fd = openSync(path, constants.O_RDONLY);', (api) => withScreenshotFiles((source, dest) => {
+    ["fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);", 'fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);', (api) => withScreenshotFiles((source, dest) => {
       rmSync(join(source, 'failure.jpg')); writeFileSync(join(source, 'target.jpg'), syntheticJpeg);
       symlinkSync(join(source, 'target.jpg'), join(source, 'failure.jpg'));
       assert.equal(api.copyFailureScreenshot(source, dest, 'admission'), false);
