@@ -537,7 +537,7 @@ jobs:
           certificate="$(tr -d '[:space:]:' < web/src-tauri/SIGNING_CERT_SHA256 | tr '[:upper:]' '[:lower:]')"
           python3 -B scripts/run_android_owned_startup_hosted.py \
             --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}" \
-            --target-apk "$RUNNER_TEMP/owned-startup-input/phone/YAWF.Stream_Android_2.3.112.apk" \
+            --target-apk "$RUNNER_TEMP/owned-startup-input/phone/YAWF.Stream_Android_2.3.114.apk" \
             --test-apk "$RUNNER_TEMP/owned-startup-build/test-signed.apk" \
             --source "$CANDIDATE_SHA" --certificate "$certificate" \
             --job-root "$RUNNER_TEMP/owned-startup-runtime" \

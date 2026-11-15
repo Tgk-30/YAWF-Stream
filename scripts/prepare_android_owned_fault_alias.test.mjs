@@ -19,7 +19,7 @@ class Tool:
  platform='linux'
  def __init__(self,root,alias):self.environ={'GITHUB_ACTIONS':'true','RUNNER_TEMP':str(root)};self.alias=alias;self.missing=False;self.opcode='invoke-virtual';self.calls=[]
  def analyze(self,executable,name,apk,guard,temporary):
-  assert name in m.CLASSES;assert executable.name=='apkanalyzer';assert apk.name=='YAWF.Stream_Android_2.3.112.apk';guard();self.calls.append(name)
+  assert name in m.CLASSES;assert executable.name=='apkanalyzer';assert apk.name=='YAWF.Stream_Android_2.3.114.apk';guard();self.calls.append(name)
   return code(name,self.alias,not self.missing and name==m.CLASSES[0],self.opcode)
 class Fixture:
  def __init__(self,alias='a'):
@@ -27,8 +27,8 @@ class Fixture:
   self.args=argparse.Namespace(inputs=str(self.inputs),source='1'*40,run='12345',module=str(self.module),output=str(self.output),sdk=str(sdk));self.tools=Tool(self.root,alias)
   self.mapping='app.tauri.plugin.Plugin -> app.tauri.plugin.Plugin:\n    1:1:void load(android.webkit.WebView):0:0 -> '+alias+'\nother.Class -> z:\n'
   self.runtime=code(m.PLUGIN,alias)
-  apk=b'fake ordinary APK from selected run';(self.phone/'YAWF.Stream_Android_2.3.112.apk').write_bytes(apk)
-  self.manifest={'schemaVersion':1,'version':'2.3.112','versionCode':2003112,'packageName':'com.tgk30.debridstreamer','sourceRevision':self.args.source,'apk':{'name':'YAWF.Stream_Android_2.3.112.apk','sha256':m.sha(apk),'size':len(apk)}}
+  apk=b'fake ordinary APK from selected run';(self.phone/'YAWF.Stream_Android_2.3.114.apk').write_bytes(apk)
+  self.manifest={'schemaVersion':1,'version':'2.3.114','versionCode':2003114,'packageName':'com.tgk30.debridstreamer','sourceRevision':self.args.source,'apk':{'name':'YAWF.Stream_Android_2.3.114.apk','sha256':m.sha(apk),'size':len(apk)}}
   jar=io.BytesIO()
   with zipfile.ZipFile(jar,'w')as archive:
    for name in ['Plugin','PluginManager','PluginHandle']:archive.writestr('app/tauri/plugin/'+name+'.class',b'public fixture class')

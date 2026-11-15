@@ -228,13 +228,13 @@ def prepare(args, tools=None):
                 type(item["id"]) is int and item["id"] > 0 and type(item["size_in_bytes"]) is int and item["size_in_bytes"] > 0 and
                 re.fullmatch(r"sha256:[a-f0-9]{64}", item["digest"]), "CANDIDATE_ARTIFACTS")
     phone, api = inputs / "phone", inputs / "api"
-    apk_name = "YAWF.Stream_Android_2.3.112.apk"
+    apk_name = "YAWF.Stream_Android_2.3.114.apk"
     phone_hashes = sums(phone, {apk_name: 160 * 1024**2, "android-update.json": 32768})
     api_hashes = sums(api, {"api-build-binding.json": 32768, "api-source-receipt.json": 32768,
                            "tauri-android-api-classes.jar": 32 * 1024**2, "android-r8-mapping.txt": 64 * 1024**2,
                            "plugin-runtime-code.txt": 2 * 1024**2})
     manifest = json_object(phone / "android-update.json")
-    require(manifest.get("schemaVersion") == 1 and manifest.get("version") == "2.3.112" and manifest.get("versionCode") == 2003112 and
+    require(manifest.get("schemaVersion") == 1 and manifest.get("version") == "2.3.114" and manifest.get("versionCode") == 2003114 and
             manifest.get("packageName") == "com.tgk30.debridstreamer" and manifest.get("sourceRevision") == args.source and
             manifest.get("apk") == {"name": apk_name, "sha256": phone_hashes[apk_name], "size": (phone / apk_name).stat().st_size}, "PHONE_MANIFEST")
     binding = json_object(api / "api-build-binding.json")

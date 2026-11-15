@@ -61,7 +61,7 @@ class Fake(m.System):
     else:text=output()
    else:raise AssertionError('unexpected command')
   elif tool=='aapt':
-   target=pathlib.Path(argv[-1]).name=='target.apk';package=(m.TARGET if target else m.TEST_PACKAGE);version='2.3.112' if target else '';code='2003112'if target else ''
+   target=pathlib.Path(argv[-1]).name=='target.apk';package=(m.TARGET if target else m.TEST_PACKAGE);version='2.3.114' if target else '';code='2003114'if target else ''
    if self.empty_target_version and target:version='';code=''
    if self.bad_package and target:package='foreign.package'
    text="package: name='%s' versionCode='%s' versionName='%s'\n"%(package,code,version)
@@ -86,7 +86,7 @@ class Fixture:
   bind=lambda p:{'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'bytes':p.stat().st_size}
   self.adm={'schemaVersion':1,'scope':'ROOT_OWNED_FRESH_HOSTED_API36','freshUserdata':True,'jobRoot':str(self.job),'avdName':'owned36','avdPath':str(self.avd),'serial':'emulator-5568','adbPort':5142,'emulator':{'pid':1234,'startTicks':100,'cmdline':['qemu','-avd','owned36','-datadir',str(self.avd),'-port','5568']},'adbServer':{'pid':2345,'startTicks':200,'cmdline':['adb','-L','tcp:127.0.0.1:5142','server']},'targetApk':bind(target),'testApk':bind(test),'sourceRevision':'1'*40}
   self.file=self.job/'admission.json';self.file.write_text(json.dumps(self.adm));self.fake=Fake(self.root,self.adm)
-  self.args=argparse.Namespace(sdk=str(sdk),adb_port=5142,serial='emulator-5568',owned_admission=str(self.file),target_apk=str(target),test_apk=str(test),expected_version='2.3.112',expected_code=2003112,expected_cert='a'*64,evidence_dir=str(self.job/'evidence'),timeout=180)
+  self.args=argparse.Namespace(sdk=str(sdk),adb_port=5142,serial='emulator-5568',owned_admission=str(self.file),target_apk=str(target),test_apk=str(test),expected_version='2.3.114',expected_code=2003114,expected_cert='a'*64,evidence_dir=str(self.job/'evidence'),timeout=180)
  def close(self):self.temporary.cleanup()
 
 def rejects(function,code=None):

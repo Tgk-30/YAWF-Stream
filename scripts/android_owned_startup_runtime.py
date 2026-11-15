@@ -599,7 +599,7 @@ class Controller:
     def run(self):
         require(self.sys.platform == "linux" and self.sys.environ.get("GITHUB_ACTIONS") == "true", "HOST_NOT_ADMITTED")
         require(self.a.adb_port == PORT and self.a.serial == SERIAL and 0 < self.a.timeout <= 180, "CLI_IDENTITY")
-        require(self.a.expected_version == "2.3.112" and self.a.expected_code == 2003112 and
+        require(self.a.expected_version == "2.3.114" and self.a.expected_code == 2003114 and
                 SHA.fullmatch(self.a.expected_cert), "EXPECTED_TARGET")
         self.temp = Path(self.sys.environ.get("RUNNER_TEMP", ""))
         require(self.temp.is_absolute() and self.temp.resolve(strict=True) == self.temp, "RUNNER_TEMP_REQUIRED")

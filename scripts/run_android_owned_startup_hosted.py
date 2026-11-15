@@ -62,8 +62,8 @@ def main():
     for path, expected in zip(inputs, (candidate["apk"], binding["finalTestApk"])):
         require(sha(path) == expected["sha256"] and path.stat().st_size == expected["bytes"], "FINAL_APK_BUILD_BINDING")
     manifest = json.loads((input_root / "phone/android-update.json").read_text())
-    require(manifest["sourceRevision"] == args.source and manifest["version"] == "2.3.112" and
-            manifest["versionCode"] == 2003112 and manifest["packageName"] == "com.tgk30.debridstreamer" and
+    require(manifest["sourceRevision"] == args.source and manifest["version"] == "2.3.114" and
+            manifest["versionCode"] == 2003114 and manifest["packageName"] == "com.tgk30.debridstreamer" and
             manifest["apk"]["sha256"] == candidate["apk"]["sha256"] and manifest["apk"]["size"] == candidate["apk"]["bytes"], "DOWNLOADED_APK_BUILD_BINDING")
     api_binding = json.loads((input_root / "api/api-build-binding.json").read_text())
     api_receipt = json.loads((input_root / "api/api-source-receipt.json").read_text())
@@ -323,7 +323,7 @@ def main():
         resource_check()
         controller, controller_birth = launch([sys.executable, "-B", str(module_path), "--sdk", str(sdk),
             "--owned-admission", str(admission_file), "--target-apk", str(target), "--test-apk", str(test),
-            "--expected-version", "2.3.112", "--expected-code", "2003112", "--expected-cert", args.certificate,
+            "--expected-version", "2.3.114", "--expected-code", "2003114", "--expected-cert", args.certificate,
             "--evidence-dir", str(job / "evidence"), "--adb-port", "5142", "--serial", "emulator-5568", "--timeout", "180"], "controller")
         controller_deadline = time.monotonic() + 200
         while controller.poll() is None:
