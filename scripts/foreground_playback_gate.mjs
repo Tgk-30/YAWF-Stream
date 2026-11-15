@@ -72,43 +72,144 @@ export function classifyResponse(path) {
 const BROWSER_LAUNCH_MESSAGE_LIMIT = 64 * 1024;
 const BROWSER_LAUNCH_FACTS = [
   'namespace-denied', 'sandbox-unavailable', 'executable-missing', 'launch-enoent', 'dependency-missing',
-  'process-exited', 'process-crashed', 'target-closed', 'timeout', 'unclassified',
+  'process-exited', 'process-crashed', 'target-closed', 'timeout', 'public-cause-marker', 'unclassified',
 ];
+const BROWSER_SIGNALS = [
+  'SIGABRT', 'SIGALRM', 'SIGBUS', 'SIGCHLD', 'SIGCONT', 'SIGFPE', 'SIGHUP', 'SIGILL', 'SIGINT', 'SIGIO', 'SIGKILL',
+  'SIGPIPE', 'SIGPOLL', 'SIGPROF', 'SIGPWR', 'SIGQUIT', 'SIGSEGV', 'SIGSTKFLT', 'SIGSTOP', 'SIGSYS', 'SIGTERM', 'SIGTRAP',
+  'SIGTSTP', 'SIGTTIN', 'SIGTTOU', 'SIGURG', 'SIGUSR1', 'SIGUSR2', 'SIGVTALRM', 'SIGWINCH', 'SIGXCPU', 'SIGXFSZ',
+];
+const BROWSER_CRASH_SIGNALS = ['SIGSEGV', 'SIGABRT', 'SIGILL', 'SIGTRAP', 'SIGBUS', 'SIGFPE', 'SIGSYS', 'SIGQUIT'];
+const BROWSER_MARKERS = ['namespaceFailure', 'sandboxFailure', 'checkFailure', 'operationNotPermitted',
+  'crashpadDatabaseRequired', 'crashpadDatabaseInitializationFailed', 'readOnlyFileSystem'];
+const emptyBrowserMarkers = () => Object.fromEntries(BROWSER_MARKERS.map((name) => [name, false]));
+
+function browserMarkerLines(text) {
+  return text.split(/\r?\n/).map((line) => {
+    // Public Chromium logger prefixes, both file.cc(line) and file.cc:line.
+    const cpp = /^([ \t]*(?:-[ \t]+)?(?:\[pid=\d+\]\[err\][ \t]*)?)\[(?:\d{1,12}:){0,3}(?:\d{4}\/\d{6}\.\d{1,9}:)?(?:INFO|WARNING|ERROR|FATAL|VERBOSE\d):[A-Za-z0-9_./-]{1,200}(?:\(\d{1,8}\)|:\d{1,8})\][ \t]*/.exec(line);
+    const normalized = cpp ? cpp[1] + line.slice(cpp[0].length) : line;
+    return { normalized, body: normalized.replace(/^[ \t]*(?:-[ \t]+)?(?:\[pid=\d+\]\[err\][ \t]*)?/, ''),
+      logged: cpp != null || /^[ \t]*(?:-[ \t]+)?\[pid=\d+\]\[err\]/.test(line) };
+  });
+}
 
 export function sanitizeBrowserLaunchDiagnostic(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).sort().join(',') !== 'exitCode,facts,schemaVersion' || value.schemaVersion !== 1 ||
+      Object.keys(value).sort().join(',') !== 'exitCode,facts,markers,schemaVersion,signals' || value.schemaVersion !== 1 ||
       !Array.isArray(value.facts) || value.facts.length === 0 || value.facts.length > BROWSER_LAUNCH_FACTS.length ||
       value.facts.some((fact, index) => !BROWSER_LAUNCH_FACTS.includes(fact) || value.facts.indexOf(fact) !== index) ||
       (value.facts.includes('unclassified') && value.facts.length !== 1) ||
-      (value.exitCode !== null && (!value.facts.includes('process-exited') || !Number.isSafeInteger(value.exitCode) || value.exitCode < 0 || value.exitCode > 255))) return null;
-  return { schemaVersion: 1, facts: [...value.facts], exitCode: value.exitCode };
+      (value.exitCode !== null && (!value.facts.includes('process-exited') || !Number.isSafeInteger(value.exitCode) || value.exitCode < 0 || value.exitCode > 255)) ||
+      !Array.isArray(value.signals) || value.signals.length > BROWSER_SIGNALS.length ||
+      value.signals.some((signal, index) => !BROWSER_SIGNALS.includes(signal) || value.signals.indexOf(signal) !== index) ||
+      (value.signals.length > 0 && !value.facts.includes('process-exited')) ||
+      value.facts.includes('process-crashed') !== value.signals.some((signal) => BROWSER_CRASH_SIGNALS.includes(signal)) ||
+      !value.markers || typeof value.markers !== 'object' || Array.isArray(value.markers) ||
+      Object.keys(value.markers).sort().join(',') !== [...BROWSER_MARKERS].sort().join(',') ||
+      BROWSER_MARKERS.some((name) => typeof value.markers[name] !== 'boolean')) return null;
+  return { schemaVersion: 1, facts: [...value.facts], exitCode: value.exitCode, signals: [...value.signals],
+    markers: Object.fromEntries(BROWSER_MARKERS.map((name) => [name, value.markers[name]])) };
 }
 
 export function classifyBrowserLaunchFailure(error) {
-  const fallback = { schemaVersion: 1, facts: ['unclassified'], exitCode: null };
+  const fallback = { schemaVersion: 1, facts: ['unclassified'], exitCode: null, signals: [], markers: emptyBrowserMarkers() };
   try {
     if (!(error instanceof Error) || typeof error.message !== 'string' || Buffer.byteLength(error.message, 'utf8') > BROWSER_LAUNCH_MESSAGE_LIMIT) return fallback;
     const text = error.message;
+    const lines = browserMarkerLines(text), markerText = lines.map((line) => line.normalized).join('\n');
+    const markers = {
+      namespaceFailure: lines.some(({ body }) => /^Failed to move to new (?:PID )?namespace:/i.test(body)),
+      sandboxFailure: false,
+      checkFailure: lines.some(({ body }) => /^Check failed:/i.test(body)),
+      operationNotPermitted: lines.some(({ body, logged }) => (logged || /^(?:Failed to move to new |Check failed:|Operation not permitted\b|EPERM\b)/i.test(body)) &&
+        /(?:^|[: \t])(?:Operation not permitted|EPERM)(?=[ \t:(,.)]|$)|\berrno[ \t]*=[ \t]*1\b/i.test(body)),
+      crashpadDatabaseRequired: lines.some(({ body }) => /^(?:[^ \t]{1,256}\/)?(?:chrome_)?crashpad_handler:[ \t]*--database is required\b/.test(body)),
+      crashpadDatabaseInitializationFailed: lines.some(({ body }) => /^Failed to initialize (?:a )?Crashpad database\b|^Failed to initialize database for Crashpad\b/i.test(body)),
+      readOnlyFileSystem: lines.some(({ body, logged }) => (logged || /^(?:mkdir:|open:|Read-only file system\b|EROFS\b)/i.test(body)) &&
+        /(?:^|[: \t])(?:Read-only file system|EROFS)(?=[ \t:(,.)]|$)/i.test(body)),
+    };
     const facts = [];
-    if (/^(?:[ \t]*-[ \t]+)?[ \t]*(?:\[pid=\d+\]\[err\][ \t]*)?Failed to move to new namespace:[^\r\n]{0,2048}(?:Operation not permitted|EPERM|errno[ \t]*=[ \t]*1\b)/mi.test(text)) facts.push('namespace-denied');
-    if (/^[^\r\n]{0,256}\bNo usable sandbox!/mi.test(text) || /^[ \t]*(?:browserType\.launch:[ \t]*)?(?:[║|][ \t]*)?Chromium sandboxing failed!(?:[ \t]*[║|])?[ \t]*$/m.test(text)) facts.push('sandbox-unavailable');
+    if (/^(?:[ \t]*-[ \t]+)?[ \t]*(?:\[pid=\d+\]\[err\][ \t]*)?Failed to move to new namespace:[^\r\n]{0,2048}(?:Operation not permitted|EPERM|errno[ \t]*=[ \t]*1\b)/mi.test(markerText)) facts.push('namespace-denied');
+    if (lines.some(({ body }) => /^No usable sandbox!/i.test(body)) || /^[ \t]*(?:browserType\.launch:[ \t]*)?(?:[║|][ \t]*)?Chromium sandboxing failed!(?:[ \t]*[║|])?[ \t]*$/m.test(markerText)) facts.push('sandbox-unavailable');
+    markers.sandboxFailure = facts.includes('sandbox-unavailable');
     if (/^browserType\.launch: Executable doesn't exist at\b/m.test(text)) facts.push('executable-missing');
     if (error.code === 'ENOENT') facts.push('launch-enoent');
     if (/Host system is missing dependencies to run browsers|error while loading shared libraries:/i.test(text)) facts.push('dependency-missing');
     const exits = [...text.matchAll(/^[ \t]*(?:-[ \t]+)?(?:\[pid=\d+\][ \t]*)?<process did exit: exitCode=(\d{1,3}|null), signal=(null|SIG[A-Z0-9]+)>/gm)];
     let exitCode = null;
+    const signals = [...new Set(exits.map((match) => match[2]).filter((signal) => BROWSER_SIGNALS.includes(signal)))];
     if (exits.length) {
       facts.push('process-exited');
       const codes = exits.map((match) => match[1] === 'null' ? null : Number(match[1]));
       if (codes.every((code) => Number.isSafeInteger(code) && code >= 0 && code <= 255 && code === codes[0])) exitCode = codes[0];
-      if (exits.some((match) => ['SIGSEGV', 'SIGABRT', 'SIGILL', 'SIGTRAP', 'SIGBUS'].includes(match[2]))) facts.push('process-crashed');
+      if (signals.some((signal) => BROWSER_CRASH_SIGNALS.includes(signal))) facts.push('process-crashed');
     }
     if (/^browserType\.launch: Target page, context or browser has been closed/m.test(text)) facts.push('target-closed');
     if (error.name === 'TimeoutError') facts.push('timeout');
-    if (facts.length === 0) facts.push('unclassified');
-    return sanitizeBrowserLaunchDiagnostic({ schemaVersion: 1, facts, exitCode }) ?? fallback;
+    if (facts.length === 0) facts.push(BROWSER_MARKERS.some((name) => markers[name]) ? 'public-cause-marker' : 'unclassified');
+    return sanitizeBrowserLaunchDiagnostic({ schemaVersion: 1, facts, exitCode, signals, markers }) ?? fallback;
   } catch { return fallback; }
+}
+
+export function parseKernelUsernsFlag(text) {
+  return ['0', '1', '0\n', '1\n'].includes(text) ? Number(text[0]) : null;
+}
+
+function readKernelFlagText(path) {
+  let descriptor;
+  try {
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    if (!fstatSync(descriptor).isFile()) return null;
+    const buffer = Buffer.alloc(4);
+    return buffer.subarray(0, readSync(descriptor, buffer, 0, buffer.length, 0)).toString('utf8');
+  } catch { return null; }
+  finally { if (descriptor != null) { try { closeSync(descriptor); } catch { /* No raw filesystem errors. */ } } }
+}
+
+export function sanitizeBrowserPrerequisiteDiagnostic(report) {
+  if (!report || typeof report !== 'object' || Array.isArray(report) ||
+      Object.keys(report).sort().join(',') !== 'exitCode,kernelFlags,outcome,schemaVersion,scope,signal' ||
+      report.schemaVersion !== 1 || report.scope !== 'user-pid-namespace-only' ||
+      !['exited', 'signaled', 'spawn-error', 'timed-out', 'unobserved'].includes(report.outcome) ||
+      !report.kernelFlags || typeof report.kernelFlags !== 'object' || Array.isArray(report.kernelFlags) ||
+      Object.keys(report.kernelFlags).sort().join(',') !== 'apparmorRestrictUnprivilegedUserns,unprivilegedUsernsClone' ||
+      Object.values(report.kernelFlags).some((flag) => flag !== null && flag !== 0 && flag !== 1)) return null;
+  if (report.outcome === 'exited' ? (!Number.isSafeInteger(report.exitCode) || report.exitCode < 0 || report.exitCode > 255 || report.signal !== null) :
+      report.outcome === 'signaled' ? (report.exitCode !== null || !BROWSER_SIGNALS.includes(report.signal)) :
+      (report.exitCode !== null || report.signal !== null)) return null;
+  return { schemaVersion: 1, scope: 'user-pid-namespace-only', outcome: report.outcome, exitCode: report.exitCode, signal: report.signal,
+    kernelFlags: { unprivilegedUsernsClone: report.kernelFlags.unprivilegedUsernsClone,
+      apparmorRestrictUnprivilegedUserns: report.kernelFlags.apparmorRestrictUnprivilegedUserns } };
+}
+
+// One failure-only prerequisite observation in the existing non-networked
+// container. Its result neither establishes crash causality nor qualifies UI.
+export function collectBrowserPrerequisites(spawnProbe = spawn, readFlag = readKernelFlagText) {
+  const flag = (path) => { try { return parseKernelUsernsFlag(readFlag(path)); } catch { return null; } };
+  const kernelFlags = {
+    unprivilegedUsernsClone: flag('/proc/sys/kernel/unprivileged_userns_clone'),
+    apparmorRestrictUnprivilegedUserns: flag('/proc/sys/kernel/apparmor_restrict_unprivileged_userns'),
+  };
+  return new Promise((resolve) => {
+    let child, settled = false;
+    const finish = (outcome, exitCode = null, signal = null) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      const base = { schemaVersion: 1, scope: 'user-pid-namespace-only', kernelFlags };
+      resolve(sanitizeBrowserPrerequisiteDiagnostic({ ...base, outcome, exitCode, signal }) ??
+        { ...base, outcome: 'unobserved', exitCode: null, signal: null });
+    };
+    const timer = setTimeout(() => {
+      finish('timed-out');
+      try { child?.kill('SIGKILL'); } catch { /* Killing an exited owned probe needs no raw error. */ }
+    }, 3_000);
+    try {
+      child = spawnProbe('/usr/bin/unshare', ['--user', '--map-root-user', '--pid', '--fork', '/usr/bin/true'], { stdio: 'ignore' });
+      child.once('error', () => finish('spawn-error'));
+      child.once('exit', (code, signal) => finish(code !== null ? 'exited' : 'signaled', code, signal));
+    } catch { finish('spawn-error'); }
+  });
 }
 
 const FIXTURE_STATUS_LIMIT = 2048;
@@ -266,6 +367,7 @@ async function runCase(chromium, name, output) {
       browser = await chromium.launch({ headless: true, chromiumSandbox: true });
     } catch (error) {
       evidence.browserLaunchDiagnostic = classifyBrowserLaunchFailure(error);
+      evidence.browserPrerequisites = await collectBrowserPrerequisites();
       throw error;
     }
     evidence.browserVersion = browser.version();

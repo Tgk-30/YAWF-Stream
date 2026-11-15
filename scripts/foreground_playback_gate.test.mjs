@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { classifyBrowserLaunchFailure, classifyFixtureBootstrapLog, classifyResponse, collectFixtureDiagnostic, evaluateProgress, sanitizeBrowserLaunchDiagnostic, sanitizeFixtureDiagnostic, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
+import { EventEmitter } from 'node:events';
+import { classifyBrowserLaunchFailure, classifyFixtureBootstrapLog, classifyResponse, collectBrowserPrerequisites, collectFixtureDiagnostic, evaluateProgress, parseKernelUsernsFlag, sanitizeBrowserLaunchDiagnostic, sanitizeBrowserPrerequisiteDiagnostic, sanitizeFixtureDiagnostic, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
 import { buildFixtureMediaPlan } from './foreground_fixture_media_plan.mjs';
 const baseline = { time: 10, frames: 300, paused: false, seeking: false, rate: 1, hidden: false, error: null, source: 'one', wall: 1000, presented: { frames: 300 } };
 test('verified Node xz archive has its extraction prerequisite in the image bootstrap', () => {
@@ -334,18 +335,23 @@ test('host receipt reader requires exact regular non-symlink files and matching 
 });
 
 
+const browserMarkers = { namespaceFailure: false, sandboxFailure: false, checkFailure: false, operationNotPermitted: false,
+  crashpadDatabaseRequired: false, crashpadDatabaseInitializationFailed: false, readOnlyFileSystem: false };
+const browserResult = (facts, exitCode = null, signals = [], markers = {}) =>
+  ({ schemaVersion: 1, facts, exitCode, signals, markers: { ...browserMarkers, ...markers } });
+
 test('actual browser-launch classifier retains only finite safe facts and bounded exit codes', () => {
   const failure = (text) => new Error(`${text}\n${privateDiagnostic}`);
-  const expected = (facts, exitCode = null) => ({ schemaVersion: 1, facts, exitCode });
+  const expected = browserResult;
   for (const [error, result] of [
-    [failure('[pid=123][err] Failed to move to new namespace: failed: errno = Operation not permitted'), expected(['namespace-denied'])],
-    [failure('[pid=123][err] No usable sandbox!'), expected(['sandbox-unavailable'])],
+    [failure('[pid=123][err] Failed to move to new namespace: failed: errno = Operation not permitted'), expected(['namespace-denied'], null, [], { namespaceFailure: true, operationNotPermitted: true })],
+    [failure('[pid=123][err] No usable sandbox!'), expected(['sandbox-unavailable'], null, [], { sandboxFailure: true })],
     [failure("browserType.launch: Executable doesn't exist at /sensitive/path"), expected(['executable-missing'])],
     [Object.assign(failure('spawn error'), { code: 'ENOENT' }), expected(['launch-enoent'])],
     [failure('Host system is missing dependencies to run browsers'), expected(['dependency-missing'])],
     [failure('[pid=123][err] error while loading shared libraries: /sensitive/library'), expected(['dependency-missing'])],
     [failure('[pid=123] <process did exit: exitCode=1, signal=null>'), expected(['process-exited'], 1)],
-    [failure('[pid=123] <process did exit: exitCode=null, signal=SIGSEGV>'), expected(['process-exited', 'process-crashed'])],
+    [failure('[pid=123] <process did exit: exitCode=null, signal=SIGSEGV>'), expected(['process-exited', 'process-crashed'], null, ['SIGSEGV'])],
     [failure('browserType.launch: Target page, context or browser has been closed'), expected(['target-closed'])],
     [Object.assign(failure('deadline'), { name: 'TimeoutError' }), expected(['timeout'])],
   ]) {
@@ -363,7 +369,7 @@ test('actual browser-launch classifier retains only finite safe facts and bounde
 });
 
 test('browser diagnostic validator rejects unknown, duplicate, private and invalid exit values', () => {
-  const safe = { schemaVersion: 1, facts: ['process-exited'], exitCode: 1 };
+  const safe = browserResult(['process-exited'], 1);
   assert.deepEqual(sanitizeBrowserLaunchDiagnostic(safe), safe);
   for (const value of [null, [], {}, { ...safe, raw: privateDiagnostic }, { ...safe, schemaVersion: 2 },
     { ...safe, facts: [privateDiagnostic] }, { ...safe, facts: [] }, { ...safe, facts: ['process-exited', 'process-exited'] },
@@ -374,7 +380,7 @@ test('browser diagnostic validator rejects unknown, duplicate, private and inval
 
 test('browser-launch diagnostics are attached only to actual sandboxed launch failures', () => {
   const source = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
-  assert.match(source, /try \{\s*browser = await chromium\.launch\(\{ headless: true, chromiumSandbox: true \}\);\s*\} catch \(error\) \{\s*evidence\.browserLaunchDiagnostic = classifyBrowserLaunchFailure\(error\);\s*throw error;/);
+  assert.match(source, /try \{\s*browser = await chromium\.launch\(\{ headless: true, chromiumSandbox: true \}\);\s*\} catch \(error\) \{\s*evidence\.browserLaunchDiagnostic = classifyBrowserLaunchFailure\(error\);\s*evidence\.browserPrerequisites = await collectBrowserPrerequisites\(\);\s*throw error;/);
 });
 
 test('individual browser diagnostic semantic mutants are rejected by actual classifier and validator probes', async () => {
@@ -383,9 +389,9 @@ test('individual browser diagnostic semantic mutants are rejected by actual clas
     ["facts.push('namespace-denied')", "facts.push('unclassified')", (api) => assert.deepEqual(api.classifyBrowserLaunchFailure(new Error('Failed to move to new namespace: Operation not permitted')).facts, ['namespace-denied'])],
     ["facts.push('dependency-missing')", "facts.push('unclassified')", (api) => assert.deepEqual(api.classifyBrowserLaunchFailure(new Error('Host system is missing dependencies to run browsers')).facts, ['dependency-missing'])],
     ["Buffer.byteLength(error.message, 'utf8') > BROWSER_LAUNCH_MESSAGE_LIMIT", 'false', (api) => assert.deepEqual(api.classifyBrowserLaunchFailure(new Error(`Host system is missing dependencies to run browsers ${'x'.repeat(64 * 1024)}`)).facts, ['unclassified'])],
-    ["Object.keys(value).sort().join(',') !== 'exitCode,facts,schemaVersion'", 'false', (api) => assert.equal(api.sanitizeBrowserLaunchDiagnostic({ schemaVersion: 1, facts: ['timeout'], exitCode: null, raw: privateDiagnostic }), null)],
-    ["!BROWSER_LAUNCH_FACTS.includes(fact)", 'false', (api) => assert.equal(api.sanitizeBrowserLaunchDiagnostic({ schemaVersion: 1, facts: [privateDiagnostic], exitCode: null }), null)],
-    ["value.exitCode > 255", 'false', (api) => assert.equal(api.sanitizeBrowserLaunchDiagnostic({ schemaVersion: 1, facts: ['process-exited'], exitCode: 256 }), null)],
+    ["Object.keys(value).sort().join(',') !== 'exitCode,facts,markers,schemaVersion,signals'", 'false', (api) => assert.equal(api.sanitizeBrowserLaunchDiagnostic({ ...browserResult(['timeout']), raw: privateDiagnostic }), null)],
+    ["!BROWSER_LAUNCH_FACTS.includes(fact)", 'false', (api) => assert.equal(api.sanitizeBrowserLaunchDiagnostic(browserResult([privateDiagnostic])), null)],
+    ["value.exitCode > 255", 'false', (api) => assert.equal(api.sanitizeBrowserLaunchDiagnostic(browserResult(['process-exited'], 256)), null)],
   ];
   for (const [from, to, probe] of mutations) {
     probe({ classifyBrowserLaunchFailure, sanitizeBrowserLaunchDiagnostic });
@@ -402,14 +408,14 @@ test('pinned Playwright sandbox rewrite and bullet call logs yield only bounded 
     `╔════════════════════════════════╗\n║ Chromium sandboxing failed!    ║\n╚════════════════════════════════╝\n` +
     `Call log:\n  - [pid=123][err] Failed to move to new namespace: errno = Operation not permitted\n` +
     `  - [pid=123] <process did exit: exitCode=1, signal=null>\n${privateDiagnostic}`;
-  assert.deepEqual(classifyBrowserLaunchFailure(new Error(text)), {
-    schemaVersion: 1, facts: ['namespace-denied', 'sandbox-unavailable', 'process-exited', 'target-closed'], exitCode: 1,
-  });
+  assert.deepEqual(classifyBrowserLaunchFailure(new Error(text)), browserResult(
+    ['namespace-denied', 'sandbox-unavailable', 'process-exited', 'target-closed'], 1, [],
+    { namespaceFailure: true, operationNotPermitted: true, sandboxFailure: true }));
   const crash = new Error('Call log:\n  - [pid=9] <process did exit: exitCode=null, signal=SIGSEGV>');
-  assert.deepEqual(classifyBrowserLaunchFailure(crash), { schemaVersion: 1, facts: ['process-exited', 'process-crashed'], exitCode: null });
+  assert.deepEqual(classifyBrowserLaunchFailure(crash), browserResult(['process-exited', 'process-crashed'], null, ['SIGSEGV']));
   for (const text of ['private text Chromium sandboxing failed!', 'quoted - [pid=123][err] Failed to move to new namespace: EPERM',
     'quoted - [pid=123] <process did exit: exitCode=1, signal=null>']) {
-    assert.deepEqual(classifyBrowserLaunchFailure(new Error(text)), { schemaVersion: 1, facts: ['unclassified'], exitCode: null });
+    assert.deepEqual(classifyBrowserLaunchFailure(new Error(text)), browserResult(['unclassified']));
   }
   assert.ok(!JSON.stringify(classifyBrowserLaunchFailure(new Error(text))).includes('PRIVATE_DIAGNOSTIC'));
 });
@@ -431,5 +437,113 @@ test('pinned rewrite and bullet parser semantic mutants fail actual classifier p
     let rejected = false;
     try { probe(mutant); } catch (error) { assert.equal(error.code, 'ERR_ASSERTION'); rejected = true; }
     assert.equal(rejected, true, 'each pinned format mutation must be rejected');
+  }
+});
+
+test('C++ logger causes and exact finite signals survive without retaining messages or paths', () => {
+  const prefix = '  - [pid=7][err] [7:8:0710/120000.123456:FATAL:zygote_host_impl_linux.cc(202)] ';
+  for (const [body, markers, facts = ['public-cause-marker']] of [
+    ['Failed to move to new namespace: errno = Operation not permitted', { namespaceFailure: true, operationNotPermitted: true }, ['namespace-denied']],
+    ['No usable sandbox!', { sandboxFailure: true }, ['sandbox-unavailable']],
+    ['Check failed: result: Operation not permitted (1)', { checkFailure: true, operationNotPermitted: true }],
+    ['chrome_crashpad_handler: --database is required', { crashpadDatabaseRequired: true }],
+    [`Failed to initialize Crashpad database at ${privateDiagnostic}`, { crashpadDatabaseInitializationFailed: true }],
+    [`mkdir ${privateDiagnostic}: Read-only file system (30)`, { readOnlyFileSystem: true }],
+  ]) {
+    for (const logger of [prefix, prefix.replace('.cc(202)', '.cc:202')]) {
+      const result = classifyBrowserLaunchFailure(new Error(logger + body));
+      assert.deepEqual(result, browserResult(facts, null, [], markers));
+      assert.ok(!JSON.stringify(result).includes('PRIVATE_DIAGNOSTIC'));
+      assert.ok(!JSON.stringify(result).includes('zygote_host_impl_linux'));
+    }
+  }
+  const exited = (signal) => `  - [pid=7] <process did exit: exitCode=null, signal=${signal}>`;
+  assert.deepEqual(classifyBrowserLaunchFailure(new Error([exited('SIGTRAP'), exited('SIGSYS'), exited('SIGTRAP')].join('\n'))),
+    browserResult(['process-exited', 'process-crashed'], null, ['SIGTRAP', 'SIGSYS']));
+  assert.deepEqual(classifyBrowserLaunchFailure(new Error(exited('SIGKILL'))), browserResult(['process-exited'], null, ['SIGKILL']));
+  assert.deepEqual(classifyBrowserLaunchFailure(new Error(exited('SIGPRIVATE'))), browserResult(['process-exited']));
+  for (const text of ['quoted Check failed: EPERM', 'private text Read-only file system', 'quoted chrome_crashpad_handler: --database is required']) {
+    assert.deepEqual(classifyBrowserLaunchFailure(new Error(text)), browserResult(['unclassified']));
+  }
+  const safe = browserResult(['process-exited'], 1);
+  for (const signals of [null, 'SIGTRAP', [privateDiagnostic], ['SIGTRAP', 'SIGTRAP']]) {
+    assert.equal(sanitizeBrowserLaunchDiagnostic({ ...safe, signals }), null);
+  }
+  for (const name of Object.keys(browserMarkers)) {
+    const missing = { ...safe.markers }; delete missing[name];
+    assert.equal(sanitizeBrowserLaunchDiagnostic({ ...safe, markers: missing }), null);
+    assert.equal(sanitizeBrowserLaunchDiagnostic({ ...safe, markers: { ...safe.markers, [name]: privateDiagnostic } }), null);
+  }
+  assert.equal(sanitizeBrowserLaunchDiagnostic({ ...safe, markers: { ...safe.markers, raw: privateDiagnostic } }), null);
+});
+
+const probeResult = (outcome, exitCode = null, signal = null) => ({ schemaVersion: 1, scope: 'user-pid-namespace-only', outcome, exitCode, signal,
+  kernelFlags: { unprivilegedUsernsClone: 1, apparmorRestrictUnprivilegedUserns: 0 } });
+
+test('failure-only prerequisite uses exactly one ignored-stdio user/PID probe and no qualification data', async () => {
+  for (const [event, args, expected] of [
+    ['exit', [0, null], probeResult('exited', 0)], ['exit', [1, null], probeResult('exited', 1)],
+    ['exit', [null, 'SIGSYS'], probeResult('signaled', null, 'SIGSYS')],
+    ['exit', [null, 'SIGPRIVATE'], probeResult('unobserved')], ['error', [new Error(privateDiagnostic)], probeResult('spawn-error')],
+  ]) {
+    let count = 0; const paths = [];
+    const result = await collectBrowserPrerequisites((command, argv, options) => {
+      count++;
+      assert.equal(command, '/usr/bin/unshare');
+      assert.deepEqual(argv, ['--user', '--map-root-user', '--pid', '--fork', '/usr/bin/true']);
+      assert.deepEqual(options, { stdio: 'ignore' });
+      const child = new EventEmitter(); queueMicrotask(() => child.emit(event, ...args)); return child;
+    }, (path) => { paths.push(path); return path.endsWith('/unprivileged_userns_clone') ? '1\n' : '0\n'; });
+    assert.equal(count, 1);
+    assert.deepEqual(paths, ['/proc/sys/kernel/unprivileged_userns_clone', '/proc/sys/kernel/apparmor_restrict_unprivileged_userns']);
+    assert.deepEqual(result, expected);
+    assert.ok(!JSON.stringify(result).includes('PRIVATE_DIAGNOSTIC'));
+  }
+});
+
+test('prerequisite deadline kills only its owned child at three seconds and never invents an observed signal', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const killed = [], child = new EventEmitter(); child.kill = (signal) => killed.push(signal);
+    let settled = false;
+    const pending = collectBrowserPrerequisites(() => child, () => null).then((value) => { settled = true; return value; });
+    t.mock.timers.tick(2999); await Promise.resolve(); assert.equal(settled, false);
+    t.mock.timers.tick(1); await Promise.resolve(); assert.equal(settled, true);
+    assert.deepEqual(await pending, { ...probeResult('timed-out'), kernelFlags: { unprivilegedUsernsClone: null, apparmorRestrictUnprivilegedUserns: null } });
+    assert.deepEqual(killed, ['SIGKILL']);
+  } finally { t.mock.timers.reset(); }
+});
+
+test('prerequisite schema and kernel parser reject arbitrary values before retention', () => {
+  for (const [raw, expected] of [['0', 0], ['0\n', 0], ['1', 1], ['1\n', 1]]) assert.equal(parseKernelUsernsFlag(raw), expected);
+  for (const raw of [null, true, 1, '01', '1\n\n', '1\r\n', ' 1', privateDiagnostic, '1'.repeat(64)]) assert.equal(parseKernelUsernsFlag(raw), null);
+  const safe = probeResult('exited', 0);
+  assert.deepEqual(sanitizeBrowserPrerequisiteDiagnostic(safe), safe);
+  for (const value of [{ ...safe, raw: privateDiagnostic }, { ...safe, scope: privateDiagnostic }, { ...safe, outcome: privateDiagnostic },
+    { ...safe, signal: 'SIGSYS' }, { ...safe, exitCode: 256 }, { ...safe, exitCode: true }, { ...safe, kernelFlags: null },
+    { ...probeResult('signaled', null, 'SIGPRIVATE') },
+    ...[undefined, true, 2, -1, '1', privateDiagnostic].map((flag) => ({ ...safe, kernelFlags: { ...safe.kernelFlags, unprivilegedUsernsClone: flag } })),
+  ]) assert.equal(sanitizeBrowserPrerequisiteDiagnostic(value), null);
+});
+
+test('cause, signal and prerequisite guards reject individual semantic mutants after original positives', async () => {
+  const original = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  const mutations = [
+    ['const normalized = cpp ? cpp[1] + line.slice(cpp[0].length) : line;', 'const normalized = line;',
+      (api) => assert.equal(api.classifyBrowserLaunchFailure(new Error('[1:2:0710/120000.123456:FATAL:zygote.cc(202)] Check failed: value')).markers.checkFailure, true)],
+    ['!BROWSER_SIGNALS.includes(signal)', 'false',
+      (api) => assert.equal(api.sanitizeBrowserLaunchDiagnostic(browserResult(['process-exited'], null, [privateDiagnostic])), null)],
+    ["typeof value.markers[name] !== 'boolean'", 'false',
+      (api) => assert.equal(api.sanitizeBrowserLaunchDiagnostic(browserResult(['timeout'], null, [], { checkFailure: privateDiagnostic })), null)],
+    ["['0', '1', '0\\n', '1\\n'].includes(text)", 'true', (api) => assert.equal(api.parseKernelUsernsFlag('2'), null)],
+    ['report.exitCode > 255', 'false', (api) => assert.equal(api.sanitizeBrowserPrerequisiteDiagnostic(probeResult('exited', 256)), null)],
+  ];
+  for (const [from, to, probe] of mutations) {
+    probe({ classifyBrowserLaunchFailure, sanitizeBrowserLaunchDiagnostic, parseKernelUsernsFlag, sanitizeBrowserPrerequisiteDiagnostic });
+    assert.equal(original.split(from).length, 2);
+    const mutant = await import(`data:text/javascript;base64,${Buffer.from(original.replace(from, to)).toString('base64')}`);
+    let rejected = false;
+    try { probe(mutant); } catch (error) { assert.equal(error.code, 'ERR_ASSERTION'); rejected = true; }
+    assert.equal(rejected, true, 'each guard mutant must fail an actual diagnostic assertion');
   }
 });
