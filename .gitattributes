@@ -1,2 +1,5 @@
 * text=auto eol=lf
 Vendor/VLCKit.xcframework/** filter=lfs diff=lfs merge=lfs -text
+
+# Preserve the checksum-bound upstream license bytes.
+/scripts/foreground-playback/LICENSE.playwright binary
