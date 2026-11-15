@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { captureFailureUi, copyFailureScreenshot, isBoundedViewportJpeg, sanitizeUiFailureDiagnostic, classifyBrowserLaunchFailure, classifyFixtureBootstrapLog, classifyResponse, collectBrowserPrerequisites, collectFixtureDiagnostic, evaluateProgress, parseKernelUsernsFlag, runCasesAfterPublicBootstrap, runPublicBrowserBootstrap, sanitizeBrowserLaunchDiagnostic, sanitizeBrowserPrerequisiteDiagnostic, sanitizeFixtureDiagnostic, sanitizePublicBrowserBootstrap, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
+import { selectAndVerify480p, captureFailureUi, copyFailureScreenshot, isBoundedViewportJpeg, sanitizeUiFailureDiagnostic, classifyBrowserLaunchFailure, classifyFixtureBootstrapLog, classifyResponse, collectBrowserPrerequisites, collectFixtureDiagnostic, evaluateProgress, parseKernelUsernsFlag, runCasesAfterPublicBootstrap, runPublicBrowserBootstrap, sanitizeBrowserLaunchDiagnostic, sanitizeBrowserPrerequisiteDiagnostic, sanitizeFixtureDiagnostic, sanitizePublicBrowserBootstrap, validateEvidenceDirectory, validatePositiveWindow, validateReceipts } from './foreground_playback_gate.mjs';
 import { buildFixtureMediaPlan } from './foreground_fixture_media_plan.mjs';
 const baseline = { time: 10, frames: 300, paused: false, seeking: false, rate: 1, hidden: false, error: null, source: 'one', wall: 1000, presented: { frames: 300 } };
 test('verified Node xz archive has its extraction prerequisite in the image bootstrap', () => {
@@ -792,4 +792,117 @@ test('fresh fixture waits for its real tour dismissal before Watchlist input', (
   const tour = source.slice(from, to);
   validate(tour);
   assert.throws(() => validate(tour.replace('await skipTour.click({ timeout: 60_000 });', 'if (await skipTour.isVisible()) await skipTour.click();')), { code: 'ERR_ASSERTION' });
+});
+
+
+function qualityPage({ remount = false, initiallyActive = false, neverActive = false, ignoreFirstClose = false, enabledAfterTicks = 0, neverEnabled = false, throwAfterSelection = false } = {}) {
+  const state = { now: 0, menu: false, active: initiallyActive, selected: false, qualityClicks: 0, openClicks: 0, closeClicks: 0, ticks: 0, enabledChecks: 0, timeouts: [] };
+  const bounded = (options) => {
+    assert.ok(options && Number.isFinite(options.timeout) && options.timeout > 0 && options.timeout <= 1000);
+    assert.ok(options.timeout <= 3000 - state.now);
+    state.timeouts.push(options.timeout);
+  };
+  const quality = {
+    isVisible: async () => state.menu,
+    getAttribute: async (name, options) => { bounded(options); assert.equal(name, 'aria-pressed'); assert.equal(state.menu, true); return state.active ? 'true' : 'false'; },
+    isEnabled: async (options) => { bounded(options); state.enabledChecks += 1; return !neverEnabled && state.ticks >= enabledAfterTicks; },
+    click: async (options) => {
+      bounded(options); assert.equal(state.menu, true); assert.ok(!neverEnabled && state.ticks >= enabledAfterTicks);
+      state.qualityClicks += 1; state.selected = true; if (remount) state.menu = false;
+      if (throwAfterSelection && state.qualityClicks === 1) { const error = new Error('unknown click delivery'); error.name = 'TimeoutError'; throw error; }
+    },
+  };
+  const settings = { click: async (options) => { bounded(options); assert.equal(state.menu, false); state.menu = true; state.openClicks += 1; } };
+  const closeSettings = { click: async (options) => {
+    bounded(options); assert.equal(state.menu, true); state.closeClicks += 1;
+    if (!(ignoreFirstClose && state.closeClicks === 1)) state.menu = false;
+  } };
+  const page = {
+    getByText: (text, options) => { assert.equal(text, 'Streaming mode'); assert.equal(options.exact, true); return { isVisible: async () => state.menu }; },
+    getByRole: (role, options) => { assert.equal(role, 'button'); assert.equal(options.exact, true); assert.ok(['480p', 'Playback settings', 'Close playback settings'].includes(options.name)); return options.name === '480p' ? quality : options.name === 'Playback settings' ? settings : closeSettings; },
+    locator: (name) => { assert.equal(name, 'video'); return { hover: async (options) => bounded(options) }; },
+  };
+  const options = { timeoutMs: 3000, now: () => state.now, wait: async (ms) => {
+    assert.ok(ms > 0 && ms <= Math.min(250, 3000 - state.now));
+    state.now += ms; state.ticks += 1;
+    if (state.selected && state.ticks >= 3 && !neverActive) state.active = true;
+  } };
+  return { page, options, state };
+}
+async function requireQualityHandoff(helper) {
+  for (const remount of [false, true]) {
+    const { page, options, state } = qualityPage({ remount });
+    await helper(page, options);
+    assert.equal(state.qualityClicks, 1);
+    assert.equal(state.active, true);
+    assert.equal(state.menu, false);
+    assert.equal(state.openClicks, remount ? 2 : 1);
+    assert.ok(state.timeouts.length > 0);
+  }
+  const already = qualityPage({ initiallyActive: true });
+  await helper(already.page, already.options);
+  assert.equal(already.state.qualityClicks, 0);
+  assert.equal(already.state.menu, false);
+  const ignoredClose = qualityPage({ initiallyActive: true, ignoreFirstClose: true });
+  await helper(ignoredClose.page, ignoredClose.options);
+  assert.equal(ignoredClose.state.menu, false);
+  assert.equal(ignoredClose.state.qualityClicks, 0);
+  const disabled = qualityPage({ enabledAfterTicks: 4 });
+  await helper(disabled.page, disabled.options);
+  assert.equal(disabled.state.qualityClicks, 1);
+  assert.ok(disabled.state.enabledChecks > 1);
+  assert.equal(disabled.state.menu, false);
+  const uncertain = qualityPage({ throwAfterSelection: true });
+  await helper(uncertain.page, uncertain.options);
+  assert.equal(uncertain.state.qualityClicks, 1);
+  assert.equal(uncertain.state.menu, false);
+}
+async function requirePendingFails(helper) {
+  const pending = qualityPage({ neverActive: true });
+  await assert.rejects(helper(pending.page, pending.options));
+  assert.equal(pending.state.qualityClicks, 1);
+  assert.equal(pending.state.now, 3000);
+  const disabled = qualityPage({ neverEnabled: true });
+  await assert.rejects(helper(disabled.page, disabled.options));
+  assert.equal(disabled.state.qualityClicks, 0);
+  assert.ok(disabled.state.enabledChecks > 0);
+  assert.equal(disabled.state.now, 3000);
+}
+function requireQualityBinding(source) {
+  const start = source.indexOf("      evidence.phase = 'quality';");
+  const end = source.indexOf("    evidence.phase = 'firstframe';", start);
+  assert.ok(start >= 0 && end > start);
+  const block = source.slice(start, end);
+  assert.match(block, /await selectAndVerify480p\(page\);/);
+  assert.ok(block.indexOf('await selectAndVerify480p(page);') < block.indexOf("evidence.optimizedQuality = '480p';"));
+  assert.doesNotMatch(block, /getAttribute|\.click\(/);
+}
+test('actual quality helper handles retained and remounted menus, closes settings and never reselects active quality', async () => {
+  await requireQualityHandoff(selectAndVerify480p);
+  await requirePendingFails(selectAndVerify480p);
+  requireQualityBinding(readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8'));
+});
+test('quality helper semantic mutants cannot pass the original positive and pending probes', async () => {
+  const original = readFileSync(new URL('./foreground_playback_gate.mjs', import.meta.url), 'utf8');
+  const mutants = [
+    ["if (!(await menu.isVisible())) {", "if (!(await menu.isVisible()) && !selected) {"],
+    ["if (pressed === 'true') {", "if (pressed !== null) {"],
+    ["} else if (!selected && await quality.isEnabled({ timeout: actionTimeout() })) {", "} else if (await quality.isEnabled({ timeout: actionTimeout() })) {"],
+    ["await quality.isEnabled({ timeout: actionTimeout() })", "true"],
+    ["          selected = true;\n          await quality.click({ timeout: actionTimeout() });", "          await quality.click({ timeout: actionTimeout() });\n          selected = true;"],
+    ["await closeSettings.click({ timeout: actionTimeout() });", "await settings.click({ timeout: actionTimeout() });"],
+    ["if (!(await menu.isVisible())) return;", "return;"],
+  ];
+  for (const [from, to] of mutants) {
+    await requireQualityHandoff(selectAndVerify480p);
+    await requirePendingFails(selectAndVerify480p);
+    assert.equal(original.split(from).length, 2);
+    const mutant = await import(`data:text/javascript;base64,${Buffer.from(original.replace(from, to)).toString('base64')}`);
+    let rejected = false;
+    try { await requireQualityHandoff(mutant.selectAndVerify480p); await requirePendingFails(mutant.selectAndVerify480p); }
+    catch (error) { assert.ok(error instanceof Error); rejected = true; }
+    assert.equal(rejected, true);
+  }
+  requireQualityBinding(original);
+  assert.throws(() => requireQualityBinding(original.replace('await selectAndVerify480p(page);', 'await Promise.resolve();')), { code: 'ERR_ASSERTION' });
 });

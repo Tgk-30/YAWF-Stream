@@ -510,6 +510,43 @@ function realHlsProducer() {
   }
   return false;
 }
+// Normal UI only: a reader handoff can remount and close its settings menu.
+export async function selectAndVerify480p(page, { now = () => performance.now(), wait = delay, timeoutMs = 90_000 } = {}) {
+  const deadline = now() + timeoutMs;
+  let selected = false;
+  const menu = page.getByText('Streaming mode', { exact: true });
+  const settings = page.getByRole('button', { name: 'Playback settings', exact: true });
+  const closeSettings = page.getByRole('button', { name: 'Close playback settings', exact: true });
+  const quality = page.getByRole('button', { name: '480p', exact: true });
+  const remaining = () => Math.max(0, deadline - now());
+  const actionTimeout = () => {
+    const left = remaining();
+    if (left <= 0) throw new Error('Optimized quality UI verification deadline');
+    return Math.min(1000, left);
+  };
+  while (remaining() > 0) {
+    try {
+      if (!(await menu.isVisible())) {
+        await page.locator('video').hover({ timeout: actionTimeout() });
+        await settings.click({ timeout: actionTimeout() });
+      } else if (await quality.isVisible()) {
+        const pressed = await quality.getAttribute('aria-pressed', { timeout: actionTimeout() });
+        if (pressed === 'true') {
+          await closeSettings.click({ timeout: actionTimeout() });
+          if (!(await menu.isVisible())) return;
+        } else if (!selected && await quality.isEnabled({ timeout: actionTimeout() })) {
+          selected = true;
+          await quality.click({ timeout: actionTimeout() });
+        }
+      }
+    } catch (error) {
+      if (error?.name !== 'TimeoutError') throw error;
+    }
+    if (remaining() > 0) await wait(Math.min(250, remaining()));
+  }
+  throw new Error('Optimized quality UI verification deadline');
+}
+
 async function runCase(chromium, name, output) {
   const caseDir = `${output}/${name}`;
   mkdirSync(caseDir, { mode: 0o700 });
@@ -607,14 +644,7 @@ async function runCase(chromium, name, output) {
     await page.locator('video').waitFor({ state: 'visible', timeout: 60_000 });
     if (name !== 'direct') {
       evidence.phase = 'quality';
-      await page.locator('video').hover();
-      await page.getByRole('button', { name: 'Playback settings', exact: true }).click();
-      await page.getByText('Streaming mode', { exact: true }).waitFor();
-      await page.getByRole('button', { name: '480p', exact: true }).click();
-      const quality = page.getByRole('button', { name: '480p', exact: true });
-      const switchDeadline = Date.now() + 90_000;
-      while (Date.now() < switchDeadline && await quality.getAttribute('aria-pressed') !== 'true') await delay(500);
-      assert(await quality.getAttribute('aria-pressed') === 'true', 'Optimized quality not active');
+      await selectAndVerify480p(page);
       evidence.optimizedQuality = '480p';
     }
     evidence.phase = 'firstframe';
