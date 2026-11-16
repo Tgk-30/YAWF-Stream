@@ -330,6 +330,10 @@ class Run:
         self.last_census_completed = None
         self.result['resourceDiagnostic'] = {'schemaVersion': 1, 'fullScanCount': 0, 'totalScanMs': 0.0,
             'maxScanMs': 0.0, 'minFreeBytes': None, 'last': None,
+            'bootstatusDeferredPolls': 0,
+            'bootstatusContinuousChecks': ['deadline', 'free-space', 'owned-identities', 'same-volume'],
+            'bootstatusContinuousQuotaEnforcement': False, 'bootstatusQuotaSnapshot': 'last-census-not-current',
+            'postBootCensusCompleted': False,
             'peak': {'combinedAllocatedBytes': 0, 'combinedIsLowerBound': False, 'roles': {}}, 'refusal': None}
         self.env = dict(os.environ, DEVELOPER_DIR=DEVELOPER, TMPDIR=str(self.root / 'tmp'),
                         CLANG_MODULE_CACHE_PATH=str(self.root / 'tmp/clang-modules'),
@@ -457,6 +461,17 @@ class Run:
         if force or self.last_census_completed is None or time.monotonic() - self.last_census_completed >= CENSUS_INTERVAL_SECONDS:
             self.full_census()
 
+    def bootstatus_monitor(self):
+        # No fixture or player exists yet. Quota snapshots are stale until the
+        # mandatory post-boot census; identity, volume, space and time remain checked.
+        self.cheap_monitor()
+        if self.last_census_completed is None or time.monotonic() - self.last_census_completed >= CENSUS_INTERVAL_SECONDS:
+            self.result['resourceDiagnostic']['bootstatusDeferredPolls'] += 1
+
+    def post_boot_census(self):
+        self.monitor(force=True)
+        self.result['resourceDiagnostic']['postBootCensusCompleted'] = True
+
     def stop(self, process):
         if not process: return
         try: os.killpg(process.pid, signal.SIGTERM)
@@ -496,7 +511,7 @@ class Run:
                                 self.monitor()
                             else:
                                 monitor_start = time.monotonic()
-                                try: self.monitor()
+                                try: self.bootstatus_monitor()
                                 finally:
                                     monitor_end = time.monotonic()
                                     boot_diagnostic.monitor_finished(monitor_start, monitor_end)
@@ -586,7 +601,7 @@ class Run:
         self.set_phase('device-boot')
         self.command('boot', ['/usr/bin/xcrun', 'simctl', 'boot', self.device], 30)
         self.command('bootstatus', ['/usr/bin/xcrun', 'simctl', 'bootstatus', self.device, '-b'], 120)
-        self.monitor(force=True)
+        self.post_boot_census()
 
     def admit_network(self):
         sandbox = self.root / 'configs/fixture.sb'
@@ -610,6 +625,7 @@ class Run:
         sandbox = self.root / 'configs/fixture.sb'
         require(self.network_admitted is True and sandbox.is_file() and not sandbox.is_symlink() and
                 self.network_profile_sha is not None and sha(sandbox) == self.network_profile_sha, 'NETWORK_ADMISSION_REQUIRED')
+        require(self.result.get('resourceDiagnostic', {}).get('postBootCensusCompleted') is True, 'POST_BOOT_CENSUS_REQUIRED')
         env = dict(self.env, HOME=str(self.root), IPAD_QA_CONTROL_TOKEN=self.token)
         self.fixture_log = (self.root / 'fixture.log').open('xb')
         self.start_command('fixture')

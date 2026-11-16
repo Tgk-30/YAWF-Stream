@@ -38,9 +38,12 @@ class NativePolicyTests(unittest.TestCase):
         run.env = {}
         run.stop = lambda _process: None
         run.monitor = lambda **_kwargs: None
+        run.cheap_monitor = lambda: None
+        run.last_census_completed = None
         run.result = {'status': 'refused', 'fullQualification': False, 'deviceCreated': False, 'deviceDeleted': False,
                       'phase': 'host-admission', 'lastCommand': None, 'commandSuccess': {},
-                      'primaryCode': None, 'cleanupCode': None, 'cleanupObservationUnavailable': False}
+                      'primaryCode': None, 'cleanupCode': None, 'cleanupObservationUnavailable': False,
+                      'resourceDiagnostic': {'bootstatusDeferredPolls': 0, 'postBootCensusCompleted': False}}
         return run
 
     def resource_run(self, root):
@@ -50,7 +53,9 @@ class NativePolicyTests(unittest.TestCase):
         run.receipt_identity = (10, 2)
         run.device_identity = None
         run.last_census_completed = None
-        run.result['resourceDiagnostic'] = {'schemaVersion': 1, 'fullScanCount': 0, 'totalScanMs': 0.0,
+        run.cheap_monitor = runner.Run.cheap_monitor.__get__(run)
+        run.result['resourceDiagnostic'] = {'bootstatusDeferredPolls': 0, 'postBootCensusCompleted': False,
+            'schemaVersion': 1, 'fullScanCount': 0, 'totalScanMs': 0.0,
             'maxScanMs': 0.0, 'minFreeBytes': None, 'last': None,
             'peak': {'combinedAllocatedBytes': 0, 'combinedIsLowerBound': False, 'roles': {}}, 'refusal': None}
         return run
@@ -133,10 +138,11 @@ class NativePolicyTests(unittest.TestCase):
     def test_full_census_forces_only_at_required_lifecycle_boundaries(self):
         source = (HERE / 'run_native.py').read_text()
         prepare = source.split('    def prepare(self):', 1)[1].split('    def admit_network(self):', 1)[0]
-        self.assertEqual(prepare.count('self.monitor(force=True)'), 3)
+        self.assertEqual(prepare.count('self.monitor(force=True)'), 2)
         self.assertLess(prepare.index('self.device = candidate.upper()'), prepare.index('self.monitor(force=True)'))
         self.assertIn("self.command('bootstatus'", prepare)
-        self.assertGreater(prepare.rindex('self.monitor(force=True)'), prepare.index("self.command('bootstatus'"))
+        self.assertGreater(prepare.index('self.post_boot_census()'), prepare.index("self.command('bootstatus'"))
+        self.assertGreater(prepare.index("self.command('bootstatus'"), prepare.rindex('self.monitor(force=True)'))
         fixture = source.split('    def start_fixture(self):', 1)[1].split('    def native(self):', 1)[0]
         self.assertEqual(fixture.count('self.monitor(force=True)'), 1)
         self.assertGreater(fixture.index('self.monitor(force=True)'), fixture.index("if value.get('status') == 'ready':"))
@@ -382,6 +388,102 @@ class NativePolicyTests(unittest.TestCase):
                 self.assertEqual(run.result['lastCommand'], 'inventory')
                 self.assertIs(run.result['commandSuccess']['inventory'], False)
 
+    def test_bootstatus_defers_due_censuses_without_changing_snapshot_age(self):
+        for label in ('bootstatus', 'build'):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                run = self.diagnostic_run(Path(tmp))
+                clock = SimpleNamespace(now=0.0)
+                run.deadline = 1000.0
+                run.last_census_completed = 0.0
+                cheap, scans = [], []
+                run.cheap_monitor = lambda: cheap.append(clock.now)
+                run.monitor = runner.Run.monitor.__get__(run)
+                def census():
+                    scans.append(clock.now)
+                    run.last_census_completed = clock.now
+                run.full_census = census
+                class Process:
+                    returncode = None
+                    def poll(self):
+                        if clock.now >= 32.0: self.returncode = 0
+                        return self.returncode
+                with patch.object(runner.time, 'monotonic', side_effect=lambda: clock.now), \
+                     patch.object(runner.time, 'sleep', side_effect=lambda n: setattr(clock, 'now', clock.now + n)), \
+                     patch.object(runner.subprocess, 'Popen', return_value=Process()):
+                    run.command(label, ['unused'], 90)
+                self.assertEqual(len(cheap), 64)
+                if label == 'bootstatus':
+                    self.assertEqual(scans, [])
+                    self.assertEqual(run.last_census_completed, 0.0)
+                    self.assertEqual(run.result['resourceDiagnostic']['bootstatusDeferredPolls'], 4)
+                else:
+                    self.assertEqual(scans, [30.0])
+                    self.assertEqual(run.last_census_completed, 30.0)
+                    self.assertEqual(run.result['resourceDiagnostic']['bootstatusDeferredPolls'], 0)
+                self.assertFalse(run.result['resourceDiagnostic']['postBootCensusCompleted'])
+
+    def test_bootstatus_cheap_floor_and_device_identity_still_refuse(self):
+        for failure in ('floor', 'identity'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                run = self.resource_run(Path(tmp))
+                run.root = Path(tmp)
+                run.device = str(uuid.uuid4()).upper()
+                run.device_identity = (10, 3)
+                run.deadline = 1000
+                full = runner.guard.REMAINING_FREE + 1024
+                def facts(path, _failure):
+                    if path == run.root: return run.root_identity, full
+                    if path == run.receipt.parent:
+                        return run.receipt_identity, runner.guard.REMAINING_FREE - 1 if failure == 'floor' else full
+                    return (10, 4) if failure == 'identity' else run.device_identity, full
+                process = SimpleNamespace(poll=lambda: None, returncode=None)
+                expected = 'REMAINING_6_GIB_REQUIRED' if failure == 'floor' else 'OWNED_DEVICE_IDENTITY_CHANGED'
+                with patch.object(runner.time, 'monotonic', return_value=0), \
+                     patch.object(runner, 'directory_facts', side_effect=facts), \
+                     patch.object(runner.subprocess, 'Popen', return_value=process), \
+                     patch.object(run, 'full_census') as census:
+                    with self.assertRaisesRegex(runner.Refusal, expected):
+                        run.command('bootstatus', ['unused'], 120)
+                    census.assert_not_called()
+                self.assertFalse(run.result['resourceDiagnostic']['postBootCensusCompleted'])
+                self.assertFalse(run.result['commandSuccess']['bootstatus'])
+
+    def test_mandatory_post_boot_census_applies_old_caps_before_fixture(self):
+        for over_cap in (False, True):
+            with self.subTest(over_cap=over_cap), tempfile.TemporaryDirectory() as tmp:
+                run = self.resource_run(Path(tmp))
+                run.device = str(uuid.uuid4()).upper()
+                run.device_identity = (10, 3)
+                run.cheap_monitor = lambda: None
+                run.monitor = runner.Run.monitor.__get__(run)
+                runtime = self.resource_facts(files=1, allocated=512)
+                receipt = self.resource_facts(files=1, allocated=512)
+                allocated = runner.guard.MAX_ALLOCATED if over_cap else 512
+                device = self.resource_facts(files=1, allocated=allocated)
+                with patch.object(runner.guard, 'measure', side_effect=[runtime, receipt]), \
+                     patch.object(runner, 'measure_owned_device', return_value=(device, (10, 3))):
+                    if over_cap:
+                        with self.assertRaisesRegex(runner.Refusal, 'OWNED_DEVICE_AND_RUNTIME_CAP'):
+                            run.post_boot_census()
+                    else:
+                        run.post_boot_census()
+                self.assertEqual(run.result['resourceDiagnostic']['postBootCensusCompleted'], not over_cap)
+                self.assertTrue(run.result['resourceDiagnostic']['last']['complete'])
+
+    def test_bootstatus_quota_truth_and_timeout_leave_post_boot_unqualified(self):
+        source = (HERE / 'run_native.py').read_text()
+        self.assertIn("'bootstatusContinuousChecks': ['deadline', 'free-space', 'owned-identities', 'same-volume']", source)
+        self.assertIn("'bootstatusContinuousQuotaEnforcement': False", source)
+        self.assertIn("'bootstatusQuotaSnapshot': 'last-census-not-current'", source)
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self.diagnostic_run(Path(tmp))
+            process = SimpleNamespace(poll=lambda: None, returncode=None)
+            with patch.object(runner.subprocess, 'Popen', return_value=process):
+                with self.assertRaisesRegex(runner.Refusal, 'COMMAND_TIMEOUT_BOOTSTATUS'):
+                    run.command('bootstatus', ['unused'], 0)
+            self.assertFalse(run.result['resourceDiagnostic']['postBootCensusCompleted'])
+            self.assertFalse(run.result['commandSuccess']['bootstatus'])
+
     def test_bootstatus_census_timing_and_log_growth_without_log_content(self):
         for timeout in (False, True):
             with self.subTest(timeout=timeout), tempfile.TemporaryDirectory() as tmp:
@@ -402,7 +504,7 @@ class NativePolicyTests(unittest.TestCase):
                     clock.now += 0.2
                     holder['output'].write(b'privateSentinel\n')
                     holder['output'].flush()
-                run.monitor = monitor
+                run.cheap_monitor = monitor
                 def sleep(seconds): clock.now += seconds
                 with patch.object(runner.time, 'monotonic', side_effect=lambda: clock.now), \
                      patch.object(runner.time, 'sleep', side_effect=sleep), \
@@ -433,7 +535,7 @@ class NativePolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run = self.diagnostic_run(Path(tmp))
             process = SimpleNamespace(poll=lambda: None, returncode=None)
-            run.monitor = lambda **_kwargs: (_ for _ in ()).throw(runner.Refusal('ORIGINAL_MONITOR_FAILURE'))
+            run.cheap_monitor = lambda: (_ for _ in ()).throw(runner.Refusal('ORIGINAL_MONITOR_FAILURE'))
             with patch.object(runner.subprocess, 'Popen', return_value=process):
                 with self.assertRaisesRegex(runner.Refusal, 'ORIGINAL_MONITOR_FAILURE'):
                     run.command('bootstatus', ['unused'], 20)
@@ -452,7 +554,7 @@ class NativePolicyTests(unittest.TestCase):
                         if clock.now >= 120:
                             self.returncode = 0
                         return self.returncode
-                run.monitor = lambda **_kwargs: setattr(clock, 'now', observed - 0.5)
+                run.cheap_monitor = lambda: setattr(clock, 'now', observed - 0.5)
                 def sleep(seconds): clock.now += seconds
                 with patch.object(runner.time, 'monotonic', side_effect=lambda: clock.now), \
                      patch.object(runner.time, 'sleep', side_effect=sleep), \
@@ -617,6 +719,22 @@ class NativePolicyTests(unittest.TestCase):
                     run.start_fixture()
                 spawn.assert_not_called()
 
+    def test_fixture_refuses_without_passing_post_boot_census(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'configs').mkdir()
+            sandbox = root / 'configs/fixture.sb'
+            sandbox.write_text('owned-profile')
+            run = self.diagnostic_run(root)
+            run.network_admitted = True
+            run.network_profile_sha = runner.sha(sandbox)
+            with patch.object(runner.subprocess, 'Popen') as spawn:
+                with self.assertRaisesRegex(runner.Refusal, 'POST_BOOT_CENSUS_REQUIRED'):
+                    run.start_fixture()
+                spawn.assert_not_called()
+            self.assertFalse((root / 'fixture.log').exists())
+            self.assertIs(run.result['fullQualification'], False)
+
     def test_network_admission_requires_both_unchanged_negative_controls(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); (root / 'configs').mkdir()
@@ -698,6 +816,7 @@ class NativePolicyTests(unittest.TestCase):
                 status = root / 'fixture/foreground-fixture-status.json'; status.write_text(json.dumps(value))
                 run = self.diagnostic_run(root)
                 run.network_admitted = True; run.network_profile_sha = runner.sha(sandbox)
+                run.result['resourceDiagnostic']['postBootCensusCompleted'] = True
                 run.node = Path('/test/node'); run.token = 'a' * 64
                 run.env = {'TMPDIR': str(root / 'tmp'), 'PATH': '/test/bin'}
                 process = SimpleNamespace(poll=lambda: exit_code)
