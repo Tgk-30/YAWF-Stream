@@ -1,5 +1,6 @@
 """Owned hosted-simulator harness. No artifacts other than a sanitized receipt leave the runner."""
 import argparse
+import copy
 import hashlib
 import importlib.util
 import json
@@ -38,10 +39,17 @@ CENSUS_INTERVAL_SECONDS = 30
 LOCAL_DEVICE_MAX_FILES = 9000
 LOCAL_COMBINED_MAX_ALLOCATED = 1_946_157_056
 LOCAL_START_FREE = 8_657_043_456
+CALIBRATION_DEVICE_MAX_FILES = 11_000
+CALIBRATION_DEVICE_MAX_ALLOCATED = 2_281_701_376
+CALIBRATION_DEVICE_START_FREE = 8_992_587_776
+CALIBRATION_MEASUREMENT_ENTRIES = 27_000
 RESOURCE_CODES = frozenset(('ABSOLUTE_DEADLINE', 'REMAINING_6_GIB_REQUIRED', 'RUNTIME_ROOT_CHANGED',
     'RECEIPT_ROOT_CHANGED', 'OWNED_DEVICE_UUID_PATH', 'OWNED_DEVICE_DIRECTORY_REQUIRED', 'OWNED_DEVICE_IDENTITY_CHANGED',
     'OWNED_DEVICE_VOLUME_MISMATCH', 'RUNTIME_FILE_COUNT_LIMIT', 'RUNTIME_1P5_GIB_CAP', 'DIAGNOSTIC_250_MIB_CAP',
     'COMBINED_DIAGNOSTIC_CAP', 'OWNED_DEVICE_AND_RUNTIME_CAP', 'MEASUREMENT_60S_LIMIT', 'MEASUREMENT_ENTRY_LIMIT',
+    'CALIBRATION_WORK_ALLOCATION_CAP', 'CALIBRATION_DEVICE_ALLOCATION_CAP',
+    'LOCAL_DEVICE_ROOT_REQUIRED', 'LOCAL_DEVICE_ROOT_CHANGED', 'NATIVE_TMPDIR_REQUIRED', 'NATIVE_TMPDIR_CHANGED',
+    'OWNED_DEVICE_OWNER_REQUIRED',
     'DIRECTORY_REPLACED', 'DIRECTORY_IDENTITY_CHANGED', 'DIRECTORY_REQUIRED', 'BLOCK_COUNT_UNAVAILABLE',
     'DIRECTORY_NOFOLLOW_UNAVAILABLE', 'ABSOLUTE_OWNED_ROOT_REQUIRED'))
 RESOURCE_FIELDS = ('allocatedBytes', 'logicalBytes', 'diagnosticLogicalBytes', 'files', 'directories', 'symlinkCount', 'entryCount')
@@ -229,8 +237,31 @@ def local_resource_policy():
             'runtimeAllocatedLimitBytes': guard.MAX_ALLOCATED, 'startFreeBytes': LOCAL_START_FREE}
 
 
+def calibration_policy():
+    return {'scope': 'local-calibration-only', 'provisional': True,
+            'basis': 'complete-nonterminal-run3-long-mp4',
+            'basisDeviceAllocatedBytes': 1_787_641_856, 'basisDeviceFiles': 8210,
+            'basisDeviceSymlinks': 11, 'basisAllEntries': 21486,
+            'workAllocatedAcceptanceBytes': guard.MAX_ALLOCATED - 4096,
+            'deviceAllocatedAcceptanceBytes': CALIBRATION_DEVICE_MAX_ALLOCATED - 4096,
+            'deviceFileAndSymlinkLimit': CALIBRATION_DEVICE_MAX_FILES,
+            'runtimeAndReceiptFileAndSymlinkLimit': guard.MAX_FILES,
+            'measurementEntryLimit': CALIBRATION_MEASUREMENT_ENTRIES, 'measurementSeconds': guard.MEASUREMENT_SECONDS,
+            'workStartFreeBytes': LOCAL_START_FREE, 'deviceStartFreeBytes': CALIBRATION_DEVICE_START_FREE,
+            'continuousFreeBytes': guard.REMAINING_FREE}
+
+
+def validate_calibration_mode(host_profile, case, calibration):
+    require(not calibration or (host_profile == 'local-xcode27' and case in ('admission-direct', 'admission-hls')),
+            'LOCAL_CALIBRATION_MODE_REQUIRED')
+
+
 def admit_local_start(root):
     require(guard.free_bytes(root) >= LOCAL_START_FREE, 'LOCAL_START_8P0625_GIB_REQUIRED')
+
+
+def admit_calibration_device_start(free):
+    require(free >= CALIBRATION_DEVICE_START_FREE, 'CALIBRATION_DEVICE_START_REQUIRED')
 
 
 def bounded_local_git(arguments, *, stop_on_output=False):
@@ -367,9 +398,11 @@ def measure_owned_device(device, runtime_root, expected_identity, *, census=None
 
 
 class Run:
-    def __init__(self, root, receipt, case, toolchain, host_profile='hosted'):
+    def __init__(self, root, receipt, case, toolchain, host_profile='hosted', local_calibration=False):
         require(host_profile in ('hosted', 'local-xcode27'), 'HOST_PROFILE_REQUIRED')
+        validate_calibration_mode(host_profile, case, local_calibration)
         self.host_profile = host_profile
+        self.local_calibration = local_calibration
         self.root = Path(root)
         self.receipt = Path(receipt)
         self.case = case
@@ -406,6 +439,7 @@ class Run:
             self.local_devices = home / 'Library/Developer/CoreSimulator/Devices'
             self.local_devices_identity, local_free = directory_facts(self.local_devices, 'LOCAL_DEVICE_ROOT_REQUIRED')
             require(local_free >= guard.REMAINING_FREE, 'REMAINING_6_GIB_REQUIRED')
+            if local_calibration: admit_calibration_device_start(local_free)
             original_tmp = os.environ.get('TMPDIR')
             require(isinstance(original_tmp, str) and original_tmp.startswith('/') and '\0' not in original_tmp, 'NATIVE_TMPDIR_REQUIRED')
             managed = Path(original_tmp).resolve(strict=True)
@@ -418,6 +452,13 @@ class Run:
             self.local_tmp_path, self.local_tmp_original = managed, original_tmp
             self.result['hostProfile'] = host_profile
             self.result['scope'] = 'local-ipad-simulator-foreground'
+            if local_calibration:
+                self.result.update({'scope': 'local-ipad-calibration-only', 'calibrationOnly': True,
+                    'nativeQualification': False, 'providerQualification': False,
+                    'enduranceQualification': False, 'physicalDeviceQualification': False,
+                    'calibrationPolicy': calibration_policy(), 'calibrationTerminalReason': 'not-reached',
+                    'calibrationSnapshots': {'fixtureReady': {'state': 'not-reached', 'complete': False},
+                                             'nativeTerminal': {'state': 'not-reached', 'complete': False}}})
             self.result['nativeTmpDiagnostic'] = {'present': True, 'lengthBytes': len(os.fsencode(original_tmp)),
                 'sameVolumeAsWork': self.local_tmp_identity[0] == work.stat().st_dev,
                 'allocationScope': 'host-managed-not-censused'}
@@ -437,7 +478,7 @@ class Run:
             'postBootCensusCompleted': False,
             'peak': {'combinedAllocatedBytes': 0, 'combinedIsLowerBound': False, 'roles': {}}, 'refusal': None}
         if host_profile == 'local-xcode27':
-            self.result['localResourcePolicy'] = local_resource_policy()
+            if not local_calibration: self.result['localResourcePolicy'] = local_resource_policy()
             self.result['resourceDiagnostic']['bootstatusContinuousChecks'] = ['deadline', 'free-space', 'owned-identities', 'owned-volume-bindings']
         self.env = dict(os.environ, DEVELOPER_DIR=LOCAL_DEVELOPER if host_profile == 'local-xcode27' else DEVELOPER, TMPDIR=str(self.root / 'tmp'),
                         CLANG_MODULE_CACHE_PATH=str(self.root / 'tmp/clang-modules'),
@@ -544,7 +585,8 @@ class Run:
         roles = {'runtime': None, 'receipt': None, 'device': None}
         role = 'runtime'
         complete = False
-        budget = guard.CensusBudget(self.cheap_monitor)
+        budget = (guard.CensusBudget(self.cheap_monitor, max_entries=CALIBRATION_MEASUREMENT_ENTRIES)
+                  if getattr(self, 'local_calibration', False) else guard.CensusBudget(self.cheap_monitor))
         try:
             roles['runtime'] = guard.measure(self.root, census=budget)
             role = 'receipt'
@@ -567,7 +609,7 @@ class Run:
             self.record_census(roles, complete, started)
             if complete: self.last_census_completed = time.monotonic()
         for role, value in roles.items():
-            limit = LOCAL_DEVICE_MAX_FILES if role == 'device' and getattr(self, 'host_profile', 'hosted') == 'local-xcode27' else guard.MAX_FILES
+            limit = (CALIBRATION_DEVICE_MAX_FILES if getattr(self, 'local_calibration', False) else LOCAL_DEVICE_MAX_FILES) if role == 'device' and getattr(self, 'host_profile', 'hosted') == 'local-xcode27' else guard.MAX_FILES
             if value is not None and value['files'] + value['symlinkCount'] > limit:
                 error = guard.Refusal('RUNTIME_FILE_COUNT_LIMIT'); self.resource_refusal(error, role); raise error
         if roles['runtime']['allocatedBytes'] > guard.MAX_ALLOCATED - 4096:
@@ -576,9 +618,15 @@ class Run:
             error = guard.Refusal('DIAGNOSTIC_250_MIB_CAP'); self.resource_refusal(error, 'runtime'); raise error
         if roles['runtime']['diagnosticLogicalBytes'] + roles['receipt']['logicalBytes'] > guard.MAX_DIAGNOSTIC - 4096:
             error = Refusal('COMBINED_DIAGNOSTIC_CAP'); self.resource_refusal(error, 'receipt'); raise error
-        combined_limit = LOCAL_COMBINED_MAX_ALLOCATED if getattr(self, 'host_profile', 'hosted') == 'local-xcode27' else guard.MAX_ALLOCATED
-        if sum(value['allocatedBytes'] for value in roles.values() if value is not None) > combined_limit - 4096:
-            error = Refusal('OWNED_DEVICE_AND_RUNTIME_CAP'); self.resource_refusal(error, 'device' if roles['device'] else 'runtime'); raise error
+        if getattr(self, 'local_calibration', False):
+            if roles['runtime']['allocatedBytes'] + roles['receipt']['allocatedBytes'] > guard.MAX_ALLOCATED - 4096:
+                error = Refusal('CALIBRATION_WORK_ALLOCATION_CAP'); self.resource_refusal(error, 'runtime'); raise error
+            if roles['device'] is not None and roles['device']['allocatedBytes'] > CALIBRATION_DEVICE_MAX_ALLOCATED - 4096:
+                error = Refusal('CALIBRATION_DEVICE_ALLOCATION_CAP'); self.resource_refusal(error, 'device'); raise error
+        else:
+            combined_limit = LOCAL_COMBINED_MAX_ALLOCATED if getattr(self, 'host_profile', 'hosted') == 'local-xcode27' else guard.MAX_ALLOCATED
+            if sum(value['allocatedBytes'] for value in roles.values() if value is not None) > combined_limit - 4096:
+                error = Refusal('OWNED_DEVICE_AND_RUNTIME_CAP'); self.resource_refusal(error, 'device' if roles['device'] else 'runtime'); raise error
 
     def monitor(self, *, force=False):
         self.cheap_monitor()
@@ -595,6 +643,30 @@ class Run:
     def post_boot_census(self):
         self.monitor(force=True)
         self.result['resourceDiagnostic']['postBootCensusCompleted'] = True
+
+    def calibration_snapshot(self, key, state, previous_count):
+        diagnostic = self.result['resourceDiagnostic']
+        last = diagnostic['last'] if diagnostic['fullScanCount'] > previous_count else None
+        self.result['calibrationSnapshots'][key] = {'state': state,
+            'complete': bool(last and last['complete']), 'snapshot': copy.deepcopy(last)}
+
+    def calibration_terminal_snapshot(self):
+        if self.deadline - time.monotonic() <= CLEANUP_SECONDS + guard.MEASUREMENT_SECONDS + 1:
+            self.result['calibrationSnapshots']['nativeTerminal'] = {'state': 'cleanup-reserve', 'complete': False}
+            return
+        previous = self.result['resourceDiagnostic']['fullScanCount']
+        try:
+            self.monitor(force=True)
+        except Exception:
+            self.calibration_snapshot('nativeTerminal', 'refused', previous)
+            raise
+        self.calibration_snapshot('nativeTerminal', 'complete', previous)
+
+    def calibration_failure_snapshot(self, error):
+        if isinstance(error, (Refusal, guard.Refusal)) and str(error) in RESOURCE_CODES:
+            self.result['calibrationSnapshots']['nativeTerminal'] = {'state': 'resource-refusal', 'complete': False}
+            return
+        self.calibration_terminal_snapshot()
 
     def stop(self, process):
         if not process: return
@@ -818,7 +890,12 @@ class Run:
             if isinstance(value, dict):
                 if value.get('status') == 'refused': raise Refusal('FIXTURE_REFUSED')
                 if value.get('status') == 'ready':
-                    self.monitor(force=True)
+                    previous = self.result['resourceDiagnostic']['fullScanCount'] if getattr(self, 'local_calibration', False) else None
+                    try: self.monitor(force=True)
+                    except Exception:
+                        if previous is not None: self.calibration_snapshot('fixtureReady', 'refused', previous)
+                        raise
+                    if previous is not None: self.calibration_snapshot('fixtureReady', 'complete', previous)
                     self.finish_command('fixture')
                     return
             time.sleep(.5)
@@ -939,7 +1016,8 @@ class Run:
             require(not output.exists() and self.root.stat().st_dev == self.receipt.parent.stat().st_dev, 'ATOMIC_ANCHOR_PUBLISH_REQUIRED')
             staging.rename(output)
             self.monitor()
-        self.result['status'] = 'admission-only' if seconds == 15 else 'observation-only'
+        self.result['status'] = ('calibration-only' if getattr(self, 'local_calibration', False) else
+                                 'admission-only' if seconds == 15 else 'observation-only')
         self.result['manualPixelReviewPending'] = True
         self.result['fullQualification'] = False
 
@@ -959,7 +1037,7 @@ class Run:
             self.result['cleanupObservation'] = 'not-required-no-create'
             if self.before is None and self.result['commandSuccess'].get('inventory') is False:
                 self.result['cleanupObservationUnavailable'] = True
-            if self.result['status'] in ('admission-only', 'observation-only'):
+            if self.result['status'] in ('admission-only', 'observation-only', 'calibration-only'):
                 self.result['status'] = 'refused'
                 self.result['primaryCode'] = 'DEVICE_CREATION_NOT_ATTEMPTED'
                 self.result['code'] = 'DEVICE_CREATION_NOT_ATTEMPTED'
@@ -1032,7 +1110,12 @@ def main():
     parser.add_argument('--case', choices=['admission-direct', 'admission-hls', 'direct', 'hls', 'stall'], required=True)
     parser.add_argument('--toolchain', required=True)
     parser.add_argument('--host-profile', choices=['hosted', 'local-xcode27'], default='hosted')
+    parser.add_argument('--local-calibration', action='store_true')
     args = parser.parse_args()
+    try: validate_calibration_mode(args.host_profile, args.case, args.local_calibration)
+    except Refusal:
+        print('LOCAL_CALIBRATION_MODE_REQUIRED', file=sys.stderr)
+        return 1
     if args.host_profile == 'local-xcode27':
         try: admit_local_paths(args.root, args.receipt)
         except (OSError, Refusal):
@@ -1040,8 +1123,18 @@ def main():
             return 1
     run = None
     try:
-        run = Run(args.root, args.receipt, args.case, read_json(args.toolchain, reject_duplicates=args.host_profile == 'local-xcode27'), args.host_profile)
-        run.prepare(); run.start_fixture(); run.native()
+        run = Run(args.root, args.receipt, args.case, read_json(args.toolchain, reject_duplicates=args.host_profile == 'local-xcode27'), args.host_profile, args.local_calibration)
+        run.prepare(); run.start_fixture()
+        if args.local_calibration:
+            try: run.native()
+            except Exception as error:
+                run.result['calibrationTerminalReason'] = 'native-pipeline-failed'
+                try: run.calibration_failure_snapshot(error)
+                except Exception: pass
+                raise
+            run.result['calibrationTerminalReason'] = 'native-pipeline-returned'
+            run.calibration_terminal_snapshot()
+        else: run.native()
     except Exception as error:
         code = str(error) if isinstance(error, (Refusal, guard.Refusal)) else 'UNEXPECTED_FAILURE'
         if not re.fullmatch('[A-Za-z0-9_-]{1,64}', code): code = 'UNEXPECTED_FAILURE'
@@ -1052,15 +1145,25 @@ def main():
                 'primaryCode': code, 'cleanupCode': None, 'sourceSha': source_sha if re.fullmatch('[a-f0-9]{40}', source_sha) else None,
                 'sourceShaAdmitted': False, 'phase': 'initialization', 'lastCommand': None, 'commandSuccess': {},
                 'cleanupObservationUnavailable': False, 'fullQualification': False}
-            if args.host_profile == 'local-xcode27': refusal['localResourcePolicy'] = local_resource_policy()
+            if args.local_calibration:
+                refusal.update({'scope': 'local-ipad-calibration-only', 'calibrationOnly': True,
+                    'nativeQualification': False, 'providerQualification': False,
+                    'enduranceQualification': False, 'physicalDeviceQualification': False,
+                    'calibrationPolicy': calibration_policy(), 'calibrationTerminalReason': 'pre-native-failure',
+                    'calibrationSnapshots': {'fixtureReady': {'state': 'not-reached', 'complete': False},
+                                             'nativeTerminal': {'state': 'not-reached', 'complete': False}}})
+            elif args.host_profile == 'local-xcode27': refusal['localResourcePolicy'] = local_resource_policy()
             Path(args.receipt).write_text(json.dumps(refusal) + '\n')
             return 1
         run.result['code'] = code
         run.result['primaryCode'] = code
+        if args.local_calibration:
+            run.result['status'] = 'refused'
+            if run.result['calibrationTerminalReason'] == 'not-reached': run.result['calibrationTerminalReason'] = 'pre-native-failure'
     finally:
         if run is not None:
             if not run.cleanup(): return 1
-    return 0 if run.result['status'] in ('admission-only', 'observation-only') else 1
+    return 0 if run.result['status'] in ('admission-only', 'observation-only', 'calibration-only') else 1
 
 
 if __name__ == '__main__':

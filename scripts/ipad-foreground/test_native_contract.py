@@ -229,7 +229,7 @@ class NativePolicyTests(unittest.TestCase):
         self.assertEqual(runner.guard.MAX_DIAGNOSTIC, 262144000)
         source = (HERE / 'run_native.py').read_text()
         self.assertIn("'fullQualification': False", source)
-        self.assertIn("return 0 if run.result['status'] in ('admission-only', 'observation-only') else 1", source)
+        self.assertIn("return 0 if run.result['status'] in ('admission-only', 'observation-only', 'calibration-only') else 1", source)
         self.assertIn('OWNED_DEVICE_AND_RUNTIME_CAP', source)
         self.assertIn('FFMPEG_NETWORK_CANARY', source)
         self.assertIn('segment-held', source)
@@ -318,6 +318,95 @@ class NativePolicyTests(unittest.TestCase):
                     runner.Run.monitor(run)
                 census.assert_not_called()
             self.assertEqual(run.result['resourceDiagnostic']['refusal']['role'], 'runtime')
+
+    def test_calibration_mode_is_only_local_short_admission(self):
+        for profile in ('hosted', 'local-xcode27'):
+            for case in ('admission-direct', 'admission-hls', 'direct', 'hls', 'stall'):
+                for enabled in (False, True):
+                    with self.subTest(profile=profile, case=case, enabled=enabled):
+                        if not enabled or (profile == 'local-xcode27' and case.startswith('admission-')):
+                            runner.validate_calibration_mode(profile, case, enabled)
+                        else:
+                            with self.assertRaisesRegex(runner.Refusal, 'LOCAL_CALIBRATION_MODE_REQUIRED'):
+                                runner.validate_calibration_mode(profile, case, enabled)
+        policy = runner.calibration_policy()
+        self.assertEqual(policy['scope'], 'local-calibration-only')
+        self.assertTrue(policy['provisional'])
+        self.assertEqual(policy['measurementEntryLimit'], 27000)
+        self.assertEqual(policy['measurementSeconds'], 60)
+        self.assertEqual(policy['continuousFreeBytes'], runner.guard.REMAINING_FREE)
+        self.assertEqual(policy['workStartFreeBytes'], runner.LOCAL_START_FREE)
+        self.assertEqual(policy['deviceStartFreeBytes'], 8_992_587_776)
+        for free, accepted in ((runner.CALIBRATION_DEVICE_START_FREE - 1, False),
+                               (runner.CALIBRATION_DEVICE_START_FREE, True)):
+            if accepted: runner.admit_calibration_device_start(free)
+            else:
+                with self.assertRaisesRegex(runner.Refusal, 'CALIBRATION_DEVICE_START_REQUIRED'):
+                    runner.admit_calibration_device_start(free)
+
+    def test_calibration_independent_volume_and_entry_boundaries(self):
+        work_max = runner.guard.MAX_ALLOCATED - 4096
+        device_max = runner.CALIBRATION_DEVICE_MAX_ALLOCATED - 4096
+        cases = (
+            ('both-at', work_max, device_max, 10989, 11, None),
+            ('device-above', 1024, device_max + 1, 1, 0, 'CALIBRATION_DEVICE_ALLOCATION_CAP'),
+            ('work-above', work_max + 1, 1024, 1, 0, 'CALIBRATION_WORK_ALLOCATION_CAP'),
+            ('device-files-above', 1024, 1024, 10990, 11, 'RUNTIME_FILE_COUNT_LIMIT'),
+        )
+        for name, work, device_bytes, device_files, links, failure in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                run = self.resource_run(Path(tmp)); run.host_profile = 'local-xcode27'; run.local_calibration = True
+                run.device = str(uuid.uuid4()).upper(); run.device_identity = (10, 3)
+                run.local_devices = Path(tmp) / 'devices'; run.cheap_monitor = lambda: None
+                runtime = self.resource_facts(files=1, allocated=work - 512)
+                receipt = self.resource_facts(files=1, allocated=512)
+                device = self.resource_facts(files=device_files, symlinks=links, allocated=device_bytes)
+                with patch.object(runner.guard, 'CensusBudget', wraps=runner.guard.CensusBudget) as budget, \
+                     patch.object(runner.guard, 'measure', side_effect=[runtime, receipt]), \
+                     patch.object(runner, 'measure_owned_device', return_value=(device, (10, 3))):
+                    if failure:
+                        with self.assertRaisesRegex((runner.Refusal, runner.guard.Refusal), failure): run.full_census()
+                    else: run.full_census()
+                self.assertEqual(budget.call_args.kwargs['max_entries'], 27000)
+                self.assertTrue(run.result['resourceDiagnostic']['last']['complete'])
+        budget = runner.guard.CensusBudget(lambda: None, clock=lambda: 0, max_entries=27000)
+        budget.entries = 26999
+        budget.tick(entry=True)
+        with self.assertRaisesRegex(runner.guard.Refusal, 'MEASUREMENT_ENTRY_LIMIT'): budget.tick(entry=True)
+        self.assertEqual(runner.guard.MEASUREMENT_ENTRIES, 24000)
+
+    def test_calibration_terminal_snapshot_respects_cleanup_reserve(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self.resource_run(Path(tmp)); run.local_calibration = True
+            run.result['calibrationSnapshots'] = {'nativeTerminal': {'state': 'not-reached', 'complete': False}}
+            run.deadline = 200
+            def census(**_kwargs):
+                run.result['resourceDiagnostic']['fullScanCount'] += 1
+                run.result['resourceDiagnostic']['last'] = {'complete': True, 'roles': {}}
+            run.monitor = census
+            with patch.object(runner.time, 'monotonic', return_value=0): run.calibration_terminal_snapshot()
+            self.assertEqual(run.result['calibrationSnapshots']['nativeTerminal']['state'], 'complete')
+            self.assertTrue(run.result['calibrationSnapshots']['nativeTerminal']['complete'])
+            run.deadline = runner.CLEANUP_SECONDS + runner.guard.MEASUREMENT_SECONDS + 1
+            with patch.object(runner.time, 'monotonic', return_value=0), patch.object(run, 'monitor') as monitor:
+                run.calibration_terminal_snapshot()
+                monitor.assert_not_called()
+            self.assertEqual(run.result['calibrationSnapshots']['nativeTerminal'], {'state': 'cleanup-reserve', 'complete': False})
+            run.deadline = 200
+            def refused(**_kwargs):
+                run.result['resourceDiagnostic']['fullScanCount'] += 1
+                run.result['resourceDiagnostic']['last'] = {'complete': False, 'roles': {}}
+                raise runner.Refusal('CALIBRATION_DEVICE_ALLOCATION_CAP')
+            run.monitor = refused
+            with patch.object(runner.time, 'monotonic', return_value=0):
+                with self.assertRaisesRegex(runner.Refusal, 'CALIBRATION_DEVICE_ALLOCATION_CAP'):
+                    run.calibration_terminal_snapshot()
+            self.assertEqual(run.result['calibrationSnapshots']['nativeTerminal']['state'], 'refused')
+            self.assertFalse(run.result['calibrationSnapshots']['nativeTerminal']['complete'])
+            with patch.object(run, 'calibration_terminal_snapshot') as snapshot:
+                run.calibration_failure_snapshot(runner.Refusal('CALIBRATION_DEVICE_ALLOCATION_CAP'))
+                snapshot.assert_not_called()
+            self.assertEqual(run.result['calibrationSnapshots']['nativeTerminal'], {'state': 'resource-refusal', 'complete': False})
 
     def test_local_calibrated_start_floor_is_stricter_and_provisional(self):
         self.assertEqual(runner.LOCAL_START_FREE, 8_657_043_456)
