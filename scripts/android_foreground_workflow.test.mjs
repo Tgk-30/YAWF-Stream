@@ -75,10 +75,13 @@ function contract(source) {
   assert.ok(source.includes("| sed -nE 's/.*pid=([0-9]+),.*/\\1/p' | sort -u)"));
   assert.match(source, /test "\$\{#adb_pids\[@\]\}" -eq 1/);
   assert.ok(source.includes('setsid adb -L "tcp:${ADB_SERVER_PORT}" --one-device "$EMULATOR_SERIAL" server nodaemon'));
-  assert.match(source, /adb_pid=\$!\n          adb_identity="\$\(process_identity "\$adb_pid"\)"/);
-  assert.ok(source.includes('test "$adb_identity" = "$(id -u):${adb_pid}:${adb_identity##*:}"'));
-  assert.match(source, /deadline=\$\(\(SECONDS \+ 15\)\)\n          while :; do\n            current="\$\(process_identity "\$adb_pid"\)"\n            test "\$current" = "\$adb_identity"/);
-  assert.ok(source.includes('          done\n          test "${#adb_pids[@]}" -eq 1\n          test "${adb_pids[0]}" = "$adb_pid"'));
+  assert.match(source, /adb_pid=\$!\n          adb_initial_identity="\$\(process_identity "\$adb_pid"\)"/);
+  assert.ok(source.includes('adb_uid="${adb_initial_identity%%:*}"'));
+  assert.ok(source.includes('adb_start="${adb_initial_identity##*:}"'));
+  assert.ok(source.includes('test "$adb_uid" = "$(id -u)"'));
+  assert.match(source, /deadline=\$\(\(SECONDS \+ 15\)\)\n          while :; do\n            current="\$\(process_identity "\$adb_pid"\)"\n            test "\$\{current%%:\*\}" = "\$adb_uid"\n            test "\$\{current##\*:\}" = "\$adb_start"/);
+  assert.ok(source.includes('if [ "$current" = "$adb_uid:$adb_pid:$adb_start" ]; then\n              adb_identity="$current"'));
+  assert.ok(source.includes('          done\n          test "$adb_identity" = "$adb_uid:$adb_pid:$adb_start"\n          test "${#adb_pids[@]}" -eq 1\n          test "${adb_pids[0]}" = "$adb_pid"'));
   assert.match(source, /adb_identity="\$\(process_identity "\$adb_pid"\)"/);
   assert.match(source, /test "\$\{adb_identity%%:\*\}" = "\$\(id -u\)"/);
   assert.equal(source.split(
@@ -119,6 +122,10 @@ function contract(source) {
   assert.ok(source.includes('test "${#ipad_qa_control_token}" -eq 64'));
   assert.ok(source.includes('test -z "${ipad_qa_control_token//[0-9a-f]/}"'));
   assert.ok(source.includes('IPAD_QA_CONTROL_TOKEN="$ipad_qa_control_token" setsid node'));
+  assert.ok(source.includes('--import "$GITHUB_WORKSPACE/fixture-source/server/node_modules/tsx/dist/loader.mjs"'));
+  assert.ok(source.includes('"$GITHUB_WORKSPACE/fixture-source/scripts/android_external_player_server_fixture.mts"'));
+  assert.doesNotMatch(source, /tsx\/dist\/cli\.mjs/);
+  assert.ok(source.includes('ss -ltnp | grep "pid=$fixture_pid," > "$RUNNER_TEMP/fixture-listeners.txt"'));
   assert.match(source, /fixture_pid=\$!\n          unset ipad_qa_control_token/);
   assert.match(source, /--repo "\$GITHUB_WORKSPACE\/fixture-source"/);
   assert.match(source, /127\\\.0\\\.0\\\.1:43120/);
@@ -245,13 +252,20 @@ test("workflow contract catches hosted admission and cleanup regressions", () =>
       'adb -H 127.0.0.1 -P "$ADB_SERVER_PORT" start-server',
     ],
     [
-      '          done\n          test "${#adb_pids[@]}" -eq 1\n          test "${adb_pids[0]}" = "$adb_pid"',
-      '          done\n          test "${#adb_pids[@]}" -eq 1',
+      '          done\n          test "$adb_identity" = "$adb_uid:$adb_pid:$adb_start"\n          test "${#adb_pids[@]}" -eq 1\n          test "${adb_pids[0]}" = "$adb_pid"',
+      '          done\n          test "$adb_identity" = "$adb_uid:$adb_pid:$adb_start"\n          test "${#adb_pids[@]}" -eq 1',
     ],
     [
-      '            current="$(process_identity "$adb_pid")"\n            test "$current" = "$adb_identity"',
+      '            test "${current##*:}" = "$adb_start"',
       '            : # server birth identity check removed',
     ],
+    ['test "${current%%:*}" = "$adb_uid"', ': # server UID check removed'],
+    ['if [ "$current" = "$adb_uid:$adb_pid:$adb_start" ]; then', 'if true; then'],
+    [
+      '--import "$GITHUB_WORKSPACE/fixture-source/server/node_modules/tsx/dist/loader.mjs"',
+      '"$GITHUB_WORKSPACE/fixture-source/server/node_modules/tsx/dist/cli.mjs"',
+    ],
+    ['ss -ltnp | grep "pid=$fixture_pid,"', 'ss -ltnp'],
     [
       'ss -ltnp | grep -Eq "127\\\\.0\\\\.0\\\\.1:${ADB_SERVER_PORT}.*pid=${adb_pid},"',
       ': # listener ownership guard removed',

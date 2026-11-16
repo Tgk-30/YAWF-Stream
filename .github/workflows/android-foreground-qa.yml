@@ -315,21 +315,28 @@ jobs:
           setsid adb -L "tcp:${ADB_SERVER_PORT}" --one-device "$EMULATOR_SERIAL" server nodaemon \
             > "$RUNNER_TEMP/adb-server.log" 2>&1 &
           adb_pid=$!
-          adb_identity="$(process_identity "$adb_pid")"
-          test "$adb_identity" = "$(id -u):${adb_pid}:${adb_identity##*:}"
+          adb_initial_identity="$(process_identity "$adb_pid")"
+          adb_uid="${adb_initial_identity%%:*}"
+          adb_start="${adb_initial_identity##*:}"
+          test "$adb_uid" = "$(id -u)"
           deadline=$((SECONDS + 15))
           while :; do
             current="$(process_identity "$adb_pid")"
-            test "$current" = "$adb_identity"
-            mapfile -t adb_pids < <(ss -ltnp | grep -E "127\\.0\\.0\\.1:${ADB_SERVER_PORT}[[:space:]]" \
-              | sed -nE 's/.*pid=([0-9]+),.*/\1/p' | sort -u)
-            if [ "${#adb_pids[@]}" -eq 1 ] && [ "${adb_pids[0]}" = "$adb_pid" ] && \
-                ss -ltnp | grep -Eq "127\\.0\\.0\\.1:${ADB_SERVER_PORT}.*pid=${adb_pid},"; then
-              break
+            test "${current%%:*}" = "$adb_uid"
+            test "${current##*:}" = "$adb_start"
+            if [ "$current" = "$adb_uid:$adb_pid:$adb_start" ]; then
+              adb_identity="$current"
+              mapfile -t adb_pids < <(ss -ltnp | grep -E "127\\.0\\.0\\.1:${ADB_SERVER_PORT}[[:space:]]" \
+                | sed -nE 's/.*pid=([0-9]+),.*/\1/p' | sort -u)
+              if [ "${#adb_pids[@]}" -eq 1 ] && [ "${adb_pids[0]}" = "$adb_pid" ] && \
+                  ss -ltnp | grep -Eq "127\\.0\\.0\\.1:${ADB_SERVER_PORT}.*pid=${adb_pid},"; then
+                break
+              fi
             fi
             test "$SECONDS" -lt "$deadline"
             sleep 0.2
           done
+          test "$adb_identity" = "$adb_uid:$adb_pid:$adb_start"
           test "${#adb_pids[@]}" -eq 1
           test "${adb_pids[0]}" = "$adb_pid"
           test "${adb_identity%%:*}" = "$(id -u)"
@@ -342,8 +349,9 @@ jobs:
           ipad_qa_control_token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
           test "${#ipad_qa_control_token}" -eq 64
           test -z "${ipad_qa_control_token//[0-9a-f]/}"
-          IPAD_QA_CONTROL_TOKEN="$ipad_qa_control_token" setsid node fixture-source/server/node_modules/tsx/dist/cli.mjs \
-            fixture-source/scripts/android_external_player_server_fixture.mts \
+          IPAD_QA_CONTROL_TOKEN="$ipad_qa_control_token" setsid node \
+            --import "$GITHUB_WORKSPACE/fixture-source/server/node_modules/tsx/dist/loader.mjs" \
+            "$GITHUB_WORKSPACE/fixture-source/scripts/android_external_player_server_fixture.mts" \
             --repo "$GITHUB_WORKSPACE/fixture-source" --output "$fixture_output" \
             --foreground-long --ipad-foreground > "$RUNNER_TEMP/fixture.log" 2>&1 &
           fixture_pid=$!
