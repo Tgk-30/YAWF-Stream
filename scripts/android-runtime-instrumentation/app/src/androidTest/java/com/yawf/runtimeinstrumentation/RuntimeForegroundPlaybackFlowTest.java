@@ -383,26 +383,24 @@ public final class RuntimeForegroundPlaybackFlowTest {
     }
 
     private void openDetailsOnce() {
-        boolean revealed = false;
         long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT_MS;
         while (SystemClock.uptimeMillis() < deadline) {
+            assertTrue("Accessibility cache refresh failed while opening player details",
+                    instrumentation.getUiAutomation().clearCache());
             assertNoOutOfScopeApproval();
+            assertEquals("Product package lost foreground ownership while opening player details",
+                    PRODUCT_PACKAGE, device.getCurrentPackageName());
             UiObject2 player = findUniqueExactProductDialog(PLAYER_DIALOG_LABEL);
             if (player == null || !hasVisibleBounds(player)) {
                 SystemClock.sleep(250);
                 continue;
             }
             UiObject2 details = findLabeledClickableWithin(player, DETAILS_LABEL, DETAILS_LABEL);
-            if (details != null) {
+            if (details != null && hasVisibleBounds(details)) {
                 guardedClick(details, "read-only player details");
                 return;
             }
-            if (!revealed) {
-                guardedClick(player, "player surface reveal");
-                revealed = true;
-            } else {
-                SystemClock.sleep(250);
-            }
+            SystemClock.sleep(250);
         }
         fail("Timed out opening read-only player details");
     }

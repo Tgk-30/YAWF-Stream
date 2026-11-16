@@ -16,6 +16,48 @@ function replaceUnique(source, before, after) {
   return changed;
 }
 
+function safeDetailsOpeningContract(source) {
+  const start = source.indexOf("private void openDetailsOnce()");
+  const end = source.indexOf("private UiObject2 waitForUniquePlayerDialog", start);
+  assert.ok(start >= 0 && end > start);
+  const body = source.slice(start, end);
+  const refresh = body.indexOf(
+    'assertTrue("Accessibility cache refresh failed while opening player details",',
+  );
+  const clearCache = body.indexOf("instrumentation.getUiAutomation().clearCache()", refresh);
+  const noApproval = body.indexOf("assertNoOutOfScopeApproval()", clearCache);
+  const foreground = body.indexOf(
+    'assertEquals("Product package lost foreground ownership while opening player details",',
+    noApproval,
+  );
+  const player = body.indexOf("findUniqueExactProductDialog(PLAYER_DIALOG_LABEL)", foreground);
+  const playerVisible = body.indexOf("player == null || !hasVisibleBounds(player)", player);
+  const details = body.indexOf(
+    "findLabeledClickableWithin(player, DETAILS_LABEL, DETAILS_LABEL)",
+    playerVisible,
+  );
+  const visible = body.indexOf("details != null && hasVisibleBounds(details)", details);
+  const exactClick = body.indexOf('guardedClick(details, "read-only player details")', visible);
+  for (const [name, index] of Object.entries({
+    refresh,
+    clearCache,
+    noApproval,
+    foreground,
+    player,
+    playerVisible,
+    details,
+    visible,
+    exactClick,
+  })) assert.ok(index >= 0, `Missing safe details-opening marker: ${name}`);
+  assert.ok(refresh < clearCache && clearCache < noApproval);
+  assert.ok(noApproval < foreground && foreground < player);
+  assert.ok(player < playerVisible && playerVisible < details);
+  assert.ok(details < visible && visible < exactClick);
+  assert.equal((body.match(/guardedClick\(/g) ?? []).length, 1);
+  assert.doesNotMatch(body, /guardedClick\(player|player::click|player\.click\(/);
+  assert.match(body, /SystemClock\.uptimeMillis\(\) \+ MEDIA_WAIT_MS/);
+}
+
 function contract(source) {
   assert.match(source, /^name: Android foreground playback QA$/m);
   assert.match(source, /push:[\s\S]*branches:[\s\S]*codex\/android-foreground114-qa[\s\S]*codex\/android-foreground114-full-qa/);
@@ -275,6 +317,30 @@ test("native timing starts only after the passive zero-baseline is sealed", () =
   assert.ok(baselineCapture < remainingAnchors);
   assert.doesNotMatch(flow.slice(noInput), /guardedClick\(|\.click\(\)|device\.click\(/);
   assert.match(validator, /receipt\.anchors\[0\]\.elapsedMs > 5_000/);
+});
+
+test("details opening refreshes observation and clicks only the exact visible control", () => {
+  safeDetailsOpeningContract(driver);
+});
+
+test("details-opening contract catches missing refresh and generic player input", () => {
+  safeDetailsOpeningContract(driver);
+  const missingRefresh = replaceUnique(
+    driver,
+    'assertTrue("Accessibility cache refresh failed while opening player details",\n' +
+      "                    instrumentation.getUiAutomation().clearCache());",
+    'assertTrue("Accessibility cache refresh failed while opening player details", true);',
+  );
+  assert.throws(() => safeDetailsOpeningContract(missingRefresh));
+
+  const genericPlayerInput = replaceUnique(
+    driver,
+    '            SystemClock.sleep(250);\n        }\n        fail("Timed out opening read-only player details");',
+    '            guardedClick(player, "player surface reveal");\n' +
+      '            SystemClock.sleep(250);\n        }\n' +
+      '        fail("Timed out opening read-only player details");',
+  );
+  assert.throws(() => safeDetailsOpeningContract(genericPlayerInput));
 });
 
 test("workflow contract rejects public artifact substitution", () => {
