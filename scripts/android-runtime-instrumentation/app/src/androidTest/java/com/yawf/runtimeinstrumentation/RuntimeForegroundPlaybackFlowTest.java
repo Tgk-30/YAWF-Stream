@@ -201,10 +201,19 @@ public final class RuntimeForegroundPlaybackFlowTest {
         while (SystemClock.uptimeMillis() < deadline) {
             try {
                 assertTrue("Accessibility cache refresh failed before passive window", instrumentation.getUiAutomation().clearCache());
-                assertNormalOwnership();
+                assertEquals("Product package lost foreground ownership", PRODUCT_PACKAGE, device.getCurrentPackageName());
+                assertNoOutOfScopeApproval();
+                assertNull("Details panel remained visible", findUniqueExactProductDialog(DETAILS_LABEL));
                 UiObject2 player = requireUniqueExactProductDialog(PLAYER_DIALOG_LABEL, "player");
                 UiObject2 pause = findLabeledClickableWithin(player, "Pause", "pause control");
-                if (pause != null && hasVisibleBounds(pause)) { pauseVisible = true; break; }
+                boolean playVisible = false;
+                for (UiObject2 play : player.findObjects(By.desc(exactLabel("Play")))) {
+                    if (hasVisibleBounds(play)) playVisible = true;
+                }
+                for (UiObject2 play : player.findObjects(By.text(exactLabel("Play")))) {
+                    if (hasVisibleBounds(play)) playVisible = true;
+                }
+                if (pause != null && hasVisibleBounds(pause) && pause.isEnabled() && !playVisible) { pauseVisible = true; break; }
             } catch (StaleObjectException stale) {
                 // Read-only reacquisition; no input is issued.
             }
