@@ -6,8 +6,10 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import pwd
 import re
 import secrets
+import select
 import signal
 import socket
 import stat
@@ -28,6 +30,7 @@ PROJECT = REPO / 'scripts/ipad-foreground/NativeQA/NativeQA.xcodeproj'
 RUNTIME = 'com.apple.CoreSimulator.SimRuntime.iOS-26-5'
 DEVICE = 'com.apple.CoreSimulator.SimDeviceType.iPad-A16'
 DEVELOPER = '/Applications/Xcode_26.5.app/Contents/Developer'
+LOCAL_DEVELOPER = '/Applications/Xcode-beta.app/Contents/Developer'
 SELECTOR = 'SafariNativeInputTests/IPadForegroundTests/testInstalledPwaForeground'
 ABSOLUTE_SECONDS = 1500
 CLEANUP_SECONDS = 60
@@ -42,7 +45,7 @@ RESOURCE_FIELDS = ('allocatedBytes', 'logicalBytes', 'diagnosticLogicalBytes', '
 COMMAND_LABELS = frozenset(('xcode-version', 'runtimes', 'device-types', 'inventory', 'ffmpeg-filters',
                             'ffmpeg-encoders', 'create-device', 'build', 'boot', 'bootstatus',
                             'network-canary', 'ffmpeg-network-canary', 'fixture', 'native-test',
-                            'evaluate', 'export-attachments'))
+                            'evaluate', 'export-attachments', 'local-node-version', 'local-ffmpeg-version'))
 PHASES = frozenset(('initialization', 'host-admission', 'toolchain-admission', 'device-creation',
                     'native-build', 'device-boot', 'fixture-admission', 'native-test', 'evidence'))
 PROFILE_OPERATORS = frozenset(('version', 'allow', 'default', 'deny', 'network*', 'network-inbound',
@@ -206,6 +209,62 @@ def directory_facts(path, failure):
         raise Refusal(failure) from None
 
 
+def admit_local_paths(root, receipt):
+    root, receipt, work = Path(root), Path(receipt), Path('/Volumes/Work')
+    require(root.is_absolute() and receipt.is_absolute() and '..' not in root.parts and '..' not in receipt.parts and
+            os.path.ismount(work) and root.is_relative_to(work) and receipt.is_relative_to(work) and
+            root.parent.resolve() == root.parent and receipt.parent.resolve() == receipt.parent and
+            root.parent.stat().st_dev == work.stat().st_dev == receipt.parent.stat().st_dev, 'LOCAL_WORK_VOLUME_REQUIRED')
+
+
+def bounded_local_git(arguments, *, stop_on_output=False):
+    """Read at most 129 bytes, with no Git output or paths in a receipt."""
+    process = None
+    try:
+        env = {'PATH': '/usr/bin:/bin', 'HOME': pwd.getpwuid(os.getuid()).pw_dir, 'LC_ALL': 'C',
+               'DEVELOPER_DIR': LOCAL_DEVELOPER, 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
+               'GIT_TERMINAL_PROMPT': '0', 'GIT_OPTIONAL_LOCKS': '0'}
+        process = subprocess.Popen(['/usr/bin/git', '--no-optional-locks', '-c', 'core.fsmonitor=false',
+                                    '-C', str(REPO), *arguments], stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, env=env, start_new_session=True)
+        end = time.monotonic() + 10
+        output = bytearray()
+        while True:
+            remaining = end - time.monotonic()
+            require(remaining > 0, 'LOCAL_SOURCE_UNAVAILABLE')
+            ready, _, _ = select.select([process.stdout], [], [], remaining)
+            require(bool(ready), 'LOCAL_SOURCE_UNAVAILABLE')
+            chunk = os.read(process.stdout.fileno(), 1 if stop_on_output else 129 - len(output))
+            if not chunk:
+                remaining = end - time.monotonic()
+                require(remaining > 0 and process.wait(timeout=remaining) == 0, 'LOCAL_SOURCE_UNAVAILABLE')
+                return bytes(output)
+            output.extend(chunk)
+            if stop_on_output: return bytes(output)
+            require(len(output) <= 128, 'LOCAL_SOURCE_UNAVAILABLE')
+    except (OSError, subprocess.SubprocessError, ValueError):
+        raise Refusal('LOCAL_SOURCE_UNAVAILABLE') from None
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                try:
+                    process.terminate()
+                    process.wait(timeout=1)
+                except (OSError, subprocess.TimeoutExpired):
+                    try: process.kill(); process.wait(timeout=1)
+                    except (OSError, subprocess.TimeoutExpired): pass
+            if process.stdout is not None: process.stdout.close()
+
+
+def require_clean_local_source(expected):
+    head = bounded_local_git(['rev-parse', '--verify', 'HEAD'])
+    require(re.fullmatch(rb'[a-f0-9]{40}\n', head) is not None, 'LOCAL_SOURCE_UNAVAILABLE')
+    require(head[:-1].decode('ascii') == expected, 'LOCAL_SOURCE_HEAD_MISMATCH')
+    status = bounded_local_git(['status', '--porcelain=v1', '-z', '--untracked-files=all',
+                                '--ignore-submodules=none'], stop_on_output=True)
+    require(status == b'', 'LOCAL_SOURCE_DIRTY')
+
+
 class BootStatusDiagnostic:
     """Only monotonic timings, counts and owned-log size, never log contents."""
     def __init__(self, started):
@@ -257,7 +316,7 @@ class BootStatusDiagnostic:
                 'firstGrowthMs': self.first_growth, 'lastGrowthMs': self.last_growth, 'exitClass': exit_class}
 
 
-def measure_owned_device(device, runtime_root, expected_identity, *, census=None):
+def measure_owned_device(device, runtime_root, expected_identity, *, census=None, local=False):
     """Admit and recheck the exact device directory without following links."""
     device = Path(device)
     try:
@@ -267,19 +326,20 @@ def measure_owned_device(device, runtime_root, expected_identity, *, census=None
         raise Refusal('OWNED_DEVICE_DIRECTORY_REQUIRED') from None
     try:
         info = os.fstat(fd)
+        if local: require(info.st_uid == os.getuid(), 'OWNED_DEVICE_OWNER_REQUIRED')
         identity = (info.st_dev, info.st_ino)
         if expected_identity is not None:
             require(identity == expected_identity, 'OWNED_DEVICE_IDENTITY_CHANGED')
         root_fd = guard._root_fd(runtime_root)
         try:
-            require(info.st_dev == os.fstat(root_fd).st_dev, 'OWNED_DEVICE_VOLUME_MISMATCH')
+            if not local: require(info.st_dev == os.fstat(root_fd).st_dev, 'OWNED_DEVICE_VOLUME_MISMATCH')
         finally:
             os.close(root_fd)
         usage = guard.measure(device, census=census) if census is not None else guard.measure(device)
         verify_fd = guard._root_fd(device)
         try:
             final = os.fstat(verify_fd)
-            require((final.st_dev, final.st_ino) == identity and
+            require((not local or final.st_uid == os.getuid()) and (final.st_dev, final.st_ino) == identity and
                     (os.fstat(fd).st_dev, os.fstat(fd).st_ino) == identity, 'OWNED_DEVICE_IDENTITY_CHANGED')
         finally:
             os.close(verify_fd)
@@ -291,7 +351,9 @@ def measure_owned_device(device, runtime_root, expected_identity, *, census=None
 
 
 class Run:
-    def __init__(self, root, receipt, case, toolchain):
+    def __init__(self, root, receipt, case, toolchain, host_profile='hosted'):
+        require(host_profile in ('hosted', 'local-xcode27'), 'HOST_PROFILE_REQUIRED')
+        self.host_profile = host_profile
         self.root = Path(root)
         self.receipt = Path(receipt)
         self.case = case
@@ -321,6 +383,28 @@ class Run:
                 'FRESH_CANONICAL_ROOT_REQUIRED')
         require(self.receipt.is_absolute() and self.receipt.parent.is_dir() and self.receipt.parent.resolve() == self.receipt.parent and
                 not self.receipt.is_symlink() and self.root not in self.receipt.parents and self.receipt.parent not in self.root.parents, 'SEPARATE_OWNED_RECEIPT_ROOT')
+        if host_profile == 'local-xcode27':
+            work = Path('/Volumes/Work')
+            admit_local_paths(self.root, self.receipt)
+            home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve(strict=True)
+            self.local_devices = home / 'Library/Developer/CoreSimulator/Devices'
+            self.local_devices_identity, local_free = directory_facts(self.local_devices, 'LOCAL_DEVICE_ROOT_REQUIRED')
+            require(local_free >= guard.REMAINING_FREE, 'REMAINING_6_GIB_REQUIRED')
+            original_tmp = os.environ.get('TMPDIR')
+            require(isinstance(original_tmp, str) and original_tmp.startswith('/') and '\0' not in original_tmp, 'NATIVE_TMPDIR_REQUIRED')
+            managed = Path(original_tmp).resolve(strict=True)
+            tmp_fd = guard._root_fd(managed)
+            try:
+                tmp_info, tmp_vfs = os.fstat(tmp_fd), os.fstatvfs(tmp_fd)
+                require(tmp_info.st_uid == os.getuid() and tmp_vfs.f_bavail * tmp_vfs.f_frsize >= guard.REMAINING_FREE, 'NATIVE_TMPDIR_REQUIRED')
+                self.local_tmp_identity = (tmp_info.st_dev, tmp_info.st_ino)
+            finally: os.close(tmp_fd)
+            self.local_tmp_path, self.local_tmp_original = managed, original_tmp
+            self.result['hostProfile'] = host_profile
+            self.result['scope'] = 'local-ipad-simulator-foreground'
+            self.result['nativeTmpDiagnostic'] = {'present': True, 'lengthBytes': len(os.fsencode(original_tmp)),
+                'sameVolumeAsWork': self.local_tmp_identity[0] == work.stat().st_dev,
+                'allocationScope': 'host-managed-not-censused'}
         guard.admit_start(self.root.parent)
         self.root.mkdir(mode=0o700)
         for name in ('tmp', 'Derived', 'configs', 'fixture'):
@@ -335,7 +419,9 @@ class Run:
             'bootstatusContinuousQuotaEnforcement': False, 'bootstatusQuotaSnapshot': 'last-census-not-current',
             'postBootCensusCompleted': False,
             'peak': {'combinedAllocatedBytes': 0, 'combinedIsLowerBound': False, 'roles': {}}, 'refusal': None}
-        self.env = dict(os.environ, DEVELOPER_DIR=DEVELOPER, TMPDIR=str(self.root / 'tmp'),
+        if host_profile == 'local-xcode27':
+            self.result['resourceDiagnostic']['bootstatusContinuousChecks'] = ['deadline', 'free-space', 'owned-identities', 'owned-volume-bindings']
+        self.env = dict(os.environ, DEVELOPER_DIR=LOCAL_DEVELOPER if host_profile == 'local-xcode27' else DEVELOPER, TMPDIR=str(self.root / 'tmp'),
                         CLANG_MODULE_CACHE_PATH=str(self.root / 'tmp/clang-modules'),
                         SWIFT_MODULE_CACHE_PATH=str(self.root / 'tmp/swift-modules'))
         self.token = secrets.token_hex(32)
@@ -375,13 +461,29 @@ class Run:
             receipt_identity, receipt_free = directory_facts(self.receipt.parent, 'RECEIPT_ROOT_CHANGED')
             require(receipt_identity == self.receipt_identity, 'RECEIPT_ROOT_CHANGED')
             minimum = min(free, receipt_free)
+            local = getattr(self, 'host_profile', 'hosted') == 'local-xcode27'
+            if local:
+                device_root_identity, device_root_free = directory_facts(self.local_devices, 'LOCAL_DEVICE_ROOT_REQUIRED')
+                require(device_root_identity == self.local_devices_identity, 'LOCAL_DEVICE_ROOT_CHANGED')
+                require(Path(self.local_tmp_original).resolve(strict=True) == self.local_tmp_path, 'NATIVE_TMPDIR_CHANGED')
+                tmp_identity, tmp_free = directory_facts(self.local_tmp_path, 'NATIVE_TMPDIR_REQUIRED')
+                require(tmp_identity == self.local_tmp_identity, 'NATIVE_TMPDIR_CHANGED')
+                minimum = min(minimum, device_root_free, tmp_free)
             if self.device:
                 role = 'device'
                 try: require(str(uuid.UUID(self.device)).upper() == self.device.upper(), 'OWNED_DEVICE_UUID_PATH')
                 except ValueError: raise Refusal('OWNED_DEVICE_UUID_PATH') from None
-                device = Path.home() / 'Library/Developer/CoreSimulator/Devices' / self.device
+                device = (self.local_devices if local else Path.home() / 'Library/Developer/CoreSimulator/Devices') / self.device
                 device_identity, device_free = directory_facts(device, 'OWNED_DEVICE_DIRECTORY_REQUIRED')
-                require(device_identity[0] == identity[0], 'OWNED_DEVICE_VOLUME_MISMATCH')
+                if local:
+                    device_fd = guard._root_fd(device)
+                    try:
+                        device_info = os.fstat(device_fd)
+                        require(device_info.st_uid == os.getuid(), 'OWNED_DEVICE_OWNER_REQUIRED')
+                        require((device_info.st_dev, device_info.st_ino) == device_identity, 'OWNED_DEVICE_IDENTITY_CHANGED')
+                    finally: os.close(device_fd)
+                    require(device_identity[0] == self.local_devices_identity[0], 'OWNED_DEVICE_VOLUME_MISMATCH')
+                else: require(device_identity[0] == identity[0], 'OWNED_DEVICE_VOLUME_MISMATCH')
                 if self.device_identity is not None:
                     require(device_identity == self.device_identity, 'OWNED_DEVICE_IDENTITY_CHANGED')
                 else:
@@ -431,8 +533,10 @@ class Run:
             roles['receipt'] = guard.measure(self.receipt.parent, census=budget)
             if self.device:
                 role = 'device'
-                device = Path.home() / 'Library/Developer/CoreSimulator/Devices' / self.device
-                roles['device'], self.device_identity = measure_owned_device(device, self.root, self.device_identity, census=budget)
+                local = getattr(self, 'host_profile', 'hosted') == 'local-xcode27'
+                device = (self.local_devices if local else Path.home() / 'Library/Developer/CoreSimulator/Devices') / self.device
+                if local: roles['device'], self.device_identity = measure_owned_device(device, self.root, self.device_identity, census=budget, local=True)
+                else: roles['device'], self.device_identity = measure_owned_device(device, self.root, self.device_identity, census=budget)
             self.cheap_monitor()
             complete = True
         except Exception as error:
@@ -500,6 +604,10 @@ class Run:
         groups[label] = {'lingering': lingering, 'state': 'point-in-time-unattributed',
                          'anyUnattributed': previous.get('anyUnattributed', False) or lingering is not False}
 
+    def simctl_env(self):
+        if getattr(self, 'host_profile', 'hosted') != 'local-xcode27': return self.env
+        return dict(self.env, TMPDIR=self.local_tmp_original)
+
     def command(self, label, args, seconds, *, env=None, monitor=True):
         self.start_command(label)
         log = self.root / f'{len(self.commands):03d}-{label}.log'
@@ -511,8 +619,11 @@ class Run:
         with log.open('xb') as output:
             stderr_file = stderr_path.open('xb') if canary else None
             try:
+                command_env = env or self.env
+                if getattr(self, 'host_profile', 'hosted') == 'local-xcode27' and args[:2] == ['/usr/bin/xcrun', 'simctl']:
+                    command_env = self.simctl_env()
                 process = subprocess.Popen(args, stdout=output, stderr=stderr_file if canary else subprocess.STDOUT,
-                                           env=env or self.env, start_new_session=True)
+                                           env=command_env, start_new_session=True)
                 end = min(self.deadline - CLEANUP_SECONDS, time.monotonic() + seconds)
                 boot_diagnostic = BootStatusDiagnostic(time.monotonic()) if label == 'bootstatus' else None
                 successful = False
@@ -564,33 +675,54 @@ class Run:
 
     def prepare(self):
         self.set_phase('host-admission')
-        require(os.uname().machine == 'arm64' and Path(DEVELOPER).is_dir(), 'EXPECTED_HOST_AND_XCODE')
+        local = getattr(self, 'host_profile', 'hosted') == 'local-xcode27'
+        require(os.uname().machine == 'arm64' and Path(LOCAL_DEVELOPER if local else DEVELOPER).is_dir(), 'EXPECTED_HOST_AND_XCODE')
         version = self.command('xcode-version', ['/usr/bin/xcodebuild', '-version'], 20)
-        require('Xcode 26.5' in version and 'Build version 17F42' in version, 'XCODE_VERSION_REFUSED')
+        if local: require(version.splitlines() == ['Xcode 27.0', 'Build version 27A5218g'], 'XCODE_VERSION_REFUSED')
+        else: require('Xcode 26.5' in version and 'Build version 17F42' in version, 'XCODE_VERSION_REFUSED')
         runtime_data = json.loads(self.command('runtimes', ['/usr/bin/xcrun', 'simctl', 'list', 'runtimes', '--json'], 20))
         available = [x for x in runtime_data['runtimes'] if x.get('identifier') == RUNTIME and x.get('isAvailable') is True]
         require(len(available) == 1, 'IOS_26_5_RUNTIME_REFUSED')
+        if local: require(available[0].get('buildversion') == '23F77', 'IOS_26_5_BUILD_REFUSED')
         types = json.loads(self.command('device-types', ['/usr/bin/xcrun', 'simctl', 'list', 'devicetypes', '--json'], 20))
         require(sum(x.get('identifier') == DEVICE for x in types['devicetypes']) == 1, 'IPAD_A16_TYPE_REFUSED')
         self.before = self.inventory()
         require(all(x[1].get('name') != self.device_name for x in self.before.values()), 'DEVICE_NAME_COLLISION')
         require(all(unavailable(port) for port in (43120, 43121)), 'OWNED_PORTS_REQUIRED')
         require(re.fullmatch('[a-f0-9]{40}', os.environ.get('GITHUB_SHA', '')) is not None, 'SOURCE_SHA_REQUIRED')
+        if local:
+            require_clean_local_source(os.environ['GITHUB_SHA'])
+            self.cheap_monitor()
         self.result['sourceSha'] = os.environ['GITHUB_SHA']
         self.result['sourceShaAdmitted'] = True
         self.set_phase('toolchain-admission')
         self.result['sourceHashes'] = {name: sha(REPO / name) for name in (
             'web/src/components/VideoPlayer.tsx', 'web/src/components/EmbeddedPlayer.tsx',
             'server/src/transcodeSession.ts', 'server/src/transcode.ts', 'server/src/app.ts')}
-        node = Path(self.toolchain['node']).resolve()
-        ffmpeg = Path(self.toolchain['ffmpeg']).resolve()
-        ffprobe = Path(self.toolchain['ffprobe']).resolve()
-        require(ffmpeg.parent == ffprobe.parent and all(p.is_file() and os.access(p, os.X_OK) for p in (node, ffmpeg, ffprobe)), 'TOOLCHAIN_PATHS')
-        require(sha(ffmpeg) == self.toolchain['ffmpegSha256'] and sha(ffprobe) == self.toolchain['ffprobeSha256'] and
-                re.fullmatch('[a-f0-9]{64}', self.toolchain['bottleSha256']) is not None and
-                re.fullmatch('[a-f0-9]{40}', self.toolchain['formulaCommit']) is not None, 'TOOLCHAIN_PROVENANCE')
+        if local:
+            local_spec = importlib.util.spec_from_file_location('prepare_local_toolchain', Path(__file__).with_name('prepare_local_toolchain.py'))
+            local_tools = importlib.util.module_from_spec(local_spec); local_spec.loader.exec_module(local_tools)
+            try:
+                hashes = local_tools.verify(self.toolchain)
+                require(all(self.toolchain.get(k) == v for k, v in hashes.items()) and
+                        self.toolchain.get('formulaName') == 'ffmpeg-full' and self.toolchain.get('formulaVersion') == '9.0.2' and
+                        self.toolchain.get('installedKeg') == '9.0.2' and self.toolchain.get('nodeVersion') == 'v24.17.0', 'TOOLCHAIN_PROVENANCE')
+            except (OSError, ValueError, KeyError, TypeError): raise Refusal('TOOLCHAIN_PROVENANCE') from None
+            node, ffmpeg, ffprobe = Path(self.toolchain['nodePath']), local_tools.CELLAR / 'bin/ffmpeg', local_tools.CELLAR / 'bin/ffprobe'
+            require(self.command('local-node-version', [str(node), '--version'], 20).strip() == 'v24.17.0', 'LOCAL_NODE_VERSION')
+            require(re.match(r'^ffmpeg version 9\.0\.2(?:\s|$)', self.command('local-ffmpeg-version', [str(ffmpeg), '-version'], 20)) is not None, 'LOCAL_FFMPEG_VERSION')
+        else:
+            node = Path(self.toolchain['node']).resolve()
+            ffmpeg = Path(self.toolchain['ffmpeg']).resolve()
+            ffprobe = Path(self.toolchain['ffprobe']).resolve()
+            require(ffmpeg.parent == ffprobe.parent and all(p.is_file() and os.access(p, os.X_OK) for p in (node, ffmpeg, ffprobe)), 'TOOLCHAIN_PATHS')
+            require(sha(ffmpeg) == self.toolchain['ffmpegSha256'] and sha(ffprobe) == self.toolchain['ffprobeSha256'] and
+                    re.fullmatch('[a-f0-9]{64}', self.toolchain['bottleSha256']) is not None and
+                    re.fullmatch('[a-f0-9]{40}', self.toolchain['formulaCommit']) is not None, 'TOOLCHAIN_PROVENANCE')
         self.node, self.ffmpeg, self.ffprobe = node, ffmpeg, ffprobe
-        self.result['toolchain'] = {k: self.toolchain[k] for k in ('formulaVersion', 'formulaCommit', 'bottleSha256', 'ffmpegSha256', 'ffprobeSha256', 'nodeVersion')}
+        if local:
+            self.result['toolchain'] = {k: self.toolchain[k] for k in ('scope', 'formulaName', 'formulaVersion', 'installedKeg', 'metadataSha256', 'bottleSha256', 'installReceiptSha256', 'ffmpegSha256', 'ffprobeSha256', 'nodeVersion', 'nodeSha256', 'nodeArchiveSha256')}
+        else: self.result['toolchain'] = {k: self.toolchain[k] for k in ('formulaVersion', 'formulaCommit', 'bottleSha256', 'ffmpegSha256', 'ffprobeSha256', 'nodeVersion')}
         self.env['PATH'] = str(ffmpeg.parent) + os.pathsep + str(node.parent) + ':/usr/bin:/bin:/usr/sbin:/sbin'
         filters = self.command('ffmpeg-filters', [str(ffmpeg), '-hide_banner', '-filters'], 20)
         encoders = self.command('ffmpeg-encoders', [str(ffmpeg), '-hide_banner', '-encoders'], 20)
@@ -815,7 +947,7 @@ class Run:
             cleanup_stage = 'inventory'
             try:
                 require(self.before is not None, 'CLEANUP_BASELINE_MISSING')
-                result = subprocess.run(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], env=self.env,
+                result = subprocess.run(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], env=self.simctl_env(),
                                         capture_output=True, timeout=15, check=True)
                 items = [(runtime, x) for runtime, rows in json.loads(result.stdout)['devices'].items() for x in rows]
                 candidates = [x for runtime, x in items if x.get('name') == self.device_name and runtime == RUNTIME and x.get('udid') not in self.before]
@@ -824,15 +956,26 @@ class Run:
                     self.device = candidates[0]['udid']; self.result['deviceCreated'] = True
                 if self.device:
                     require(len(candidates) == 1 and candidates[0]['udid'].lower() == self.device.lower(), 'CLEANUP_IDENTITY')
+                    if getattr(self, 'host_profile', 'hosted') == 'local-xcode27':
+                        require(str(uuid.UUID(self.device)).upper() == self.device.upper(), 'CLEANUP_IDENTITY')
+                        local_root_identity, _ = directory_facts(self.local_devices, 'LOCAL_DEVICE_ROOT_REQUIRED')
+                        require(local_root_identity == self.local_devices_identity, 'CLEANUP_IDENTITY')
+                        device_fd = guard._root_fd(self.local_devices / self.device)
+                        try:
+                            info = os.fstat(device_fd)
+                            identity = (info.st_dev, info.st_ino)
+                            require(info.st_uid == os.getuid() and info.st_dev == local_root_identity[0] and
+                                    (self.device_identity is None or identity == self.device_identity), 'CLEANUP_IDENTITY')
+                        finally: os.close(device_fd)
                     state = candidates[0].get('state')
                     self.result['cleanupDeviceState'] = state if state in ('Booted', 'Shutdown', 'Creating', 'Booting', 'ShuttingDown') else 'other'
                     if state == 'Booted':
                         cleanup_stage = 'shutdown'
-                        subprocess.run(['/usr/bin/xcrun', 'simctl', 'shutdown', self.device], env=self.env, capture_output=True, timeout=15, check=True)
+                        subprocess.run(['/usr/bin/xcrun', 'simctl', 'shutdown', self.device], env=self.simctl_env(), capture_output=True, timeout=15, check=True)
                     cleanup_stage = 'delete'
-                    subprocess.run(['/usr/bin/xcrun', 'simctl', 'delete', self.device], env=self.env, capture_output=True, timeout=15, check=True)
+                    subprocess.run(['/usr/bin/xcrun', 'simctl', 'delete', self.device], env=self.simctl_env(), capture_output=True, timeout=15, check=True)
                     cleanup_stage = 'verify'
-                    after_raw = subprocess.run(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], env=self.env,
+                    after_raw = subprocess.run(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], env=self.simctl_env(),
                                                capture_output=True, timeout=10, check=True)
                     after = {x['udid'] for rows in json.loads(after_raw.stdout)['devices'].values() for x in rows}
                     require(self.device not in after and set(self.before).issubset(after), 'POST_CLEANUP_DEVICE_CENSUS')
@@ -868,10 +1011,16 @@ def main():
     parser.add_argument('--receipt', required=True)
     parser.add_argument('--case', choices=['admission-direct', 'admission-hls', 'direct', 'hls', 'stall'], required=True)
     parser.add_argument('--toolchain', required=True)
+    parser.add_argument('--host-profile', choices=['hosted', 'local-xcode27'], default='hosted')
     args = parser.parse_args()
+    if args.host_profile == 'local-xcode27':
+        try: admit_local_paths(args.root, args.receipt)
+        except (OSError, Refusal):
+            print('LOCAL_WORK_VOLUME_REQUIRED', file=sys.stderr)
+            return 1
     run = None
     try:
-        run = Run(args.root, args.receipt, args.case, read_json(args.toolchain))
+        run = Run(args.root, args.receipt, args.case, read_json(args.toolchain, reject_duplicates=args.host_profile == 'local-xcode27'), args.host_profile)
         run.prepare(); run.start_fixture(); run.native()
     except Exception as error:
         code = str(error) if isinstance(error, (Refusal, guard.Refusal)) else 'UNEXPECTED_FAILURE'

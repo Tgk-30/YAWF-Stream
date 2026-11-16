@@ -67,6 +67,132 @@ class NativePolicyTests(unittest.TestCase):
                 'symlinkCount': symlinks, 'disappearedChildren': 0, 'entryCount': files + symlinks + 1,
                 'complete': complete}
 
+    def test_local_device_owner_and_hosted_volume_are_fail_closed(self):
+        device = Path('/owned/AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA')
+        root = Path('/work/runtime')
+        info = SimpleNamespace(st_dev=20, st_ino=2, st_uid=501)
+        work = SimpleNamespace(st_dev=10, st_ino=1, st_uid=501)
+        def open_fd(path): return 10 if Path(path) == root else 20
+        def fstat(fd): return work if fd == 10 else info
+        with patch.object(runner.guard, '_root_fd', side_effect=open_fd), \
+             patch.object(runner.guard, 'measure', return_value={'allocatedBytes': 1}), \
+             patch.object(runner.os, 'fstat', side_effect=fstat), patch.object(runner.os, 'close'), \
+             patch.object(runner.os, 'getuid', return_value=501):
+            with self.assertRaisesRegex(runner.Refusal, 'OWNED_DEVICE_VOLUME_MISMATCH'):
+                runner.measure_owned_device(device, root, None)
+            _, identity = runner.measure_owned_device(device, root, None, local=True)
+            self.assertEqual(identity, (20, 2))
+            with patch.object(runner.os, 'getuid', return_value=502):
+                with self.assertRaisesRegex(runner.Refusal, 'OWNED_DEVICE_OWNER_REQUIRED'):
+                    runner.measure_owned_device(device, root, None, local=True)
+            with self.assertRaisesRegex(runner.Refusal, 'OWNED_DEVICE_IDENTITY_CHANGED'):
+                runner.measure_owned_device(device, root, (20, 3), local=True)
+
+    def test_local_dual_volume_floor_and_identity_remain_fail_closed(self):
+        for failure in ('none', 'work-floor', 'device-floor', 'wrong-volume', 'wrong-owner', 'root-replaced'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                run = self.resource_run(Path(tmp))
+                run.host_profile = 'local-xcode27'; run.deadline = 1000
+                run.local_devices = Path(tmp) / 'devices'; run.local_devices_identity = (20, 3)
+                run.local_tmp_path = Path(tmp).resolve(); run.local_tmp_original = str(run.local_tmp_path)
+                run.local_tmp_identity = (30, 4)
+                run.device = str(uuid.uuid4()).upper(); run.device_identity = (20, 5)
+                high, low = runner.guard.REMAINING_FREE + 1024, runner.guard.REMAINING_FREE - 1
+                def facts(path, _failure):
+                    if path == run.root: return run.root_identity, low if failure == 'work-floor' else high
+                    if path == run.receipt.parent: return run.receipt_identity, high
+                    if path == run.local_devices: return ((20, 99) if failure == 'root-replaced' else (20, 3)), high
+                    if path == run.local_tmp_path: return run.local_tmp_identity, high
+                    return ((21, 5) if failure == 'wrong-volume' else (20, 5)), low if failure == 'device-floor' else high
+                device_dev = 21 if failure == 'wrong-volume' else 20
+                owner = 502 if failure == 'wrong-owner' else 501
+                with patch.object(runner.time, 'monotonic', return_value=0), \
+                     patch.object(runner, 'directory_facts', side_effect=facts), \
+                     patch.object(runner.guard, '_root_fd', return_value=20), \
+                     patch.object(runner.os, 'fstat', return_value=SimpleNamespace(st_dev=device_dev, st_ino=5, st_uid=owner)), \
+                     patch.object(runner.os, 'getuid', return_value=501), patch.object(runner.os, 'close'):
+                    if failure == 'none': run.cheap_monitor()
+                    else:
+                        with self.assertRaises(runner.Refusal): run.cheap_monitor()
+
+    def test_local_simctl_tmp_is_scoped_and_hosted_env_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self.diagnostic_run(Path(tmp))
+            run.env = {'TMPDIR': '/owned/work/tmp', 'OTHER': 'unchanged'}
+            run.host_profile = 'local-xcode27'; run.local_tmp_original = '/native/managed/tmp'
+            process = SimpleNamespace(poll=lambda: 0, returncode=0)
+            with patch.object(runner.subprocess, 'Popen', return_value=process) as spawn:
+                run.command('runtimes', ['/usr/bin/xcrun', 'simctl', 'list', 'runtimes'], 20)
+                self.assertEqual(spawn.call_args.kwargs['env']['TMPDIR'], '/native/managed/tmp')
+                run.command('build', ['/usr/bin/xcodebuild', 'build-for-testing'], 20)
+                self.assertEqual(spawn.call_args.kwargs['env']['TMPDIR'], '/owned/work/tmp')
+            run.host_profile = 'hosted'
+            self.assertIs(run.simctl_env(), run.env)
+
+    def test_local_work_and_profiles_fail_closed(self):
+        with patch.object(runner.os.path, 'ismount', return_value=False):
+            with self.assertRaisesRegex(runner.Refusal, 'LOCAL_WORK_VOLUME_REQUIRED'):
+                runner.admit_local_paths('/Volumes/Work/example/root', '/Volumes/Work/example/status')
+        with self.assertRaisesRegex(runner.Refusal, 'LOCAL_WORK_VOLUME_REQUIRED'):
+            runner.admit_local_paths('/private/tmp/root', '/Volumes/Work/example/status')
+        source = (HERE / 'run_native.py').read_text()
+        self.assertIn("choices=['hosted', 'local-xcode27'], default='hosted'", source)
+        self.assertIn("guard.admit_start(self.root.parent)", source)
+        self.assertIn("available[0].get('buildversion') == '23F77'", source)
+        self.assertIn("['Xcode 27.0', 'Build version 27A5218g']", source)
+        self.assertNotIn(str(Path.home()), source)
+        self.assertNotIn(str(Path.home()), (HERE / 'prepare_local_toolchain.py').read_text())
+
+    def test_local_source_requires_exact_head_and_clean_index_worktree_untracked(self):
+        expected = 'a' * 40
+        head = (expected + '\n').encode()
+        with patch.object(runner, 'bounded_local_git', side_effect=[head, b'']) as git:
+            runner.require_clean_local_source(expected)
+        self.assertEqual(git.call_args_list[0].args[0], ['rev-parse', '--verify', 'HEAD'])
+        status_args = git.call_args_list[1].args[0]
+        self.assertIn('--untracked-files=all', status_args)
+        self.assertIn('--ignore-submodules=none', status_args)
+        self.assertIs(git.call_args_list[1].kwargs['stop_on_output'], True)
+        with patch.object(runner, 'bounded_local_git', return_value=b'b' * 40 + b'\n') as git:
+            with self.assertRaisesRegex(runner.Refusal, 'LOCAL_SOURCE_HEAD_MISMATCH'):
+                runner.require_clean_local_source(expected)
+            self.assertEqual(git.call_count, 1)
+        for status in (b'M ', b' M', b'??'):
+            with self.subTest(status=status), patch.object(runner, 'bounded_local_git', side_effect=[head, status]):
+                with self.assertRaisesRegex(runner.Refusal, 'LOCAL_SOURCE_DIRTY'):
+                    runner.require_clean_local_source(expected)
+        for failure in (runner.Refusal('LOCAL_SOURCE_UNAVAILABLE'), b'privateSentinel'):
+            with self.subTest(failure=failure), patch.object(runner, 'bounded_local_git', side_effect=[failure]):
+                with self.assertRaisesRegex(runner.Refusal, 'LOCAL_SOURCE_UNAVAILABLE') as caught:
+                    runner.require_clean_local_source(expected)
+                self.assertNotIn('privateSentinel', str(caught.exception))
+        source = (HERE / 'run_native.py').read_text()
+        prepare = source.split('    def prepare(self):', 1)[1].split('    def admit_network(self):', 1)[0]
+        self.assertLess(prepare.index("if local:\n            require_clean_local_source"), prepare.index("self.result['sourceShaAdmitted'] = True"))
+        self.assertLess(prepare.index('require_clean_local_source('), prepare.index('self.create_attempted = True'))
+
+    def test_git_probe_is_bounded_and_never_persists_output(self):
+        stream = SimpleNamespace(fileno=lambda: 5, close=lambda: None)
+        process = SimpleNamespace(stdout=stream, poll=lambda: 0, wait=lambda **_kwargs: 0)
+        with patch.object(runner.subprocess, 'Popen', return_value=process) as spawn, \
+             patch.object(runner.select, 'select', return_value=([stream], [], [])), \
+             patch.object(runner.os, 'read', side_effect=[b'a' * 40 + b'\n', b'']) as read:
+            result = runner.bounded_local_git(['rev-parse', '--verify', 'HEAD'])
+        self.assertEqual(result, b'a' * 40 + b'\n')
+        self.assertLessEqual(read.call_args_list[0].args[1], 129)
+        self.assertEqual(spawn.call_args.kwargs['stderr'], runner.subprocess.DEVNULL)
+        self.assertEqual(spawn.call_args.kwargs['env']['GIT_OPTIONAL_LOCKS'], '0')
+        self.assertNotIn('privateSentinel', str(spawn.call_args.kwargs['env']))
+        with patch.object(runner.subprocess, 'Popen', return_value=process), \
+             patch.object(runner.select, 'select', return_value=([stream], [], [])), \
+             patch.object(runner.os, 'read', return_value=b'x' * 129):
+            with self.assertRaisesRegex(runner.Refusal, 'LOCAL_SOURCE_UNAVAILABLE'):
+                runner.bounded_local_git(['rev-parse', '--verify', 'HEAD'])
+        with patch.object(runner.subprocess, 'Popen', side_effect=OSError('privateSentinel')):
+            with self.assertRaisesRegex(runner.Refusal, 'LOCAL_SOURCE_UNAVAILABLE') as caught:
+                runner.bounded_local_git(['status'], stop_on_output=True)
+            self.assertNotIn('privateSentinel', str(caught.exception))
+
     def test_profile_denies_network_and_allows_only_fixture_loopback(self):
         profile = runner.profile(Path('/qa/owned'))
         self.assertIn('(deny network*)', profile)
