@@ -18,6 +18,9 @@ STATUS_PREFIX: Final = "INSTRUMENTATION_STATUS: "
 STATUS_CODE_PREFIX: Final = "INSTRUMENTATION_STATUS_CODE: "
 PHASE_KEY: Final = "yawfForegroundRefusalPhase"
 CLASS_KEY: Final = "yawfForegroundRefusalClass"
+SITE_KEY: Final = "yawfForegroundRefusalSite"
+LINE_KEY: Final = "yawfForegroundRefusalLine"
+CUSTOM_KEYS: Final = frozenset({PHASE_KEY, CLASS_KEY, SITE_KEY, LINE_KEY})
 ALLOWED_PHASES: Final = frozenset(
     {
         "not-started",
@@ -32,6 +35,8 @@ ALLOWED_PHASES: Final = frozenset(
     }
 )
 SAFE_CLASS: Final = re.compile(r"\A[A-Za-z_$][A-Za-z0-9_$]{0,79}\Z")
+ALLOWED_SITES: Final = frozenset({"native-flow", "settings-transaction", "unknown"})
+SAFE_LINE: Final = re.compile(r"\A(?:0|[1-9][0-9]{0,3})\Z")
 SAFE_KEY: Final = re.compile(r"\A[A-Za-z][A-Za-z0-9_.-]{0,127}\Z")
 INTEGER: Final = re.compile(r"\A-?[0-9]{1,10}\Z")
 
@@ -54,9 +59,16 @@ def _fixed(code: str) -> dict[str, object]:
     return result
 
 
-def _observed(phase: str, failure_class: str) -> dict[str, object]:
+def _observed(phase: str, failure_class: str, site: str, line: int) -> dict[str, object]:
     result = _base()
-    result.update({"nativePhase": phase, "nativeClass": failure_class})
+    result.update(
+        {
+            "nativePhase": phase,
+            "nativeClass": failure_class,
+            "nativeSite": site,
+            "nativeLine": line,
+        }
+    )
     return result
 
 
@@ -93,7 +105,7 @@ def parse_instrumentation(text: str) -> dict[str, object]:
                 if key in block:
                     malformed = True
                 block[key] = value
-            if code != 2 and (PHASE_KEY in block or CLASS_KEY in block):
+            if code != 2 and any(key in block for key in CUSTOM_KEYS):
                 custom_outside_status_two = True
             blocks.append((block, code))
             pending.clear()
@@ -103,7 +115,7 @@ def parse_instrumentation(text: str) -> dict[str, object]:
 
     if pending:
         malformed = True
-        if any(key in {PHASE_KEY, CLASS_KEY} for key, _ in pending):
+        if any(key in CUSTOM_KEYS for key, _ in pending):
             custom_outside_status_two = True
 
     status_two = [block for block, code in blocks if code == 2]
@@ -115,13 +127,23 @@ def parse_instrumentation(text: str) -> dict[str, object]:
         return _fixed("refused")
 
     diagnostic = status_two[0]
-    if set(diagnostic) != {PHASE_KEY, CLASS_KEY}:
+    if set(diagnostic) != CUSTOM_KEYS:
         return _fixed("refused")
     phase = diagnostic[PHASE_KEY]
     failure_class = diagnostic[CLASS_KEY]
-    if phase not in ALLOWED_PHASES or not SAFE_CLASS.fullmatch(failure_class):
+    site = diagnostic[SITE_KEY]
+    raw_line = diagnostic[LINE_KEY]
+    if (
+        phase not in ALLOWED_PHASES
+        or not SAFE_CLASS.fullmatch(failure_class)
+        or site not in ALLOWED_SITES
+        or not SAFE_LINE.fullmatch(raw_line)
+    ):
         return _fixed("refused")
-    return _observed(phase, failure_class)
+    line = int(raw_line)
+    if line > 2000 or (site == "unknown") != (line == 0):
+        return _fixed("refused")
+    return _observed(phase, failure_class, site, line)
 
 
 def _read_bounded(path: Path) -> str:

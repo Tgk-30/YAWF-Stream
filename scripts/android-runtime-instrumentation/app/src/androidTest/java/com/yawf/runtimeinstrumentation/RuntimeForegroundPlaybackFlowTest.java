@@ -81,6 +81,7 @@ public final class RuntimeForegroundPlaybackFlowTest {
     private static final Pattern BUFFER = Pattern.compile("\\A([0-9]{1,6}(?:\\.[0-9])?) s\\z");
     private static final Pattern SAFE_FAILURE_CLASS = Pattern.compile(
             "\\A[A-Za-z_$][A-Za-z0-9_$]{0,79}\\z");
+    private static final int MAX_REFUSAL_SITE_FRAMES = 16;
 
     private Instrumentation instrumentation;
     private UiDevice device;
@@ -140,6 +141,29 @@ public final class RuntimeForegroundPlaybackFlowTest {
         diagnostic.putString(
                 "yawfForegroundRefusalClass",
                 SAFE_FAILURE_CLASS.matcher(simpleName).matches() ? simpleName : "OtherThrowable");
+        String site = "unknown";
+        int siteLine = 0;
+        StackTraceElement[] frames = caught.getStackTrace();
+        int frameCount = Math.min(MAX_REFUSAL_SITE_FRAMES, frames.length);
+        String flowClass = RuntimeForegroundPlaybackFlowTest.class.getName();
+        String settingsClass = RuntimeExternalSettingsTransaction.class.getName();
+        for (int index = 0; index < frameCount; index++) {
+            StackTraceElement frame = frames[index];
+            int line = frame.getLineNumber();
+            if (line < 1 || line > 2000) continue;
+            if (flowClass.equals(frame.getClassName())) {
+                site = "native-flow";
+                siteLine = line;
+                break;
+            }
+            if (settingsClass.equals(frame.getClassName())) {
+                site = "settings-transaction";
+                siteLine = line;
+                break;
+            }
+        }
+        diagnostic.putString("yawfForegroundRefusalSite", site);
+        diagnostic.putInt("yawfForegroundRefusalLine", siteLine);
         instrumentation.sendStatus(2, diagnostic);
     }
 

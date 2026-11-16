@@ -290,7 +290,10 @@ test("native refusal metadata is one bounded public status diagnostic", () => {
   assert.equal((driver.match(/instrumentation\.sendStatus\(/g) ?? []).length, 1);
   assert.equal((driver.match(/yawfForegroundRefusalPhase/g) ?? []).length, 1);
   assert.equal((driver.match(/yawfForegroundRefusalClass/g) ?? []).length, 1);
+  assert.equal((driver.match(/yawfForegroundRefusalSite/g) ?? []).length, 1);
+  assert.equal((driver.match(/yawfForegroundRefusalLine/g) ?? []).length, 1);
   assert.match(driver, /SAFE_FAILURE_CLASS\.matcher\(simpleName\)\.matches\(\) \? simpleName : "OtherThrowable"/);
+  assert.match(driver, /MAX_REFUSAL_SITE_FRAMES = 16/);
   for (const phase of [
     "not-started", "launching-product", "server-login", "source-selection", "selecting-480p",
     "opening-read-only-details", "measured-no-input-window", "native-observation-complete",
@@ -300,7 +303,17 @@ test("native refusal metadata is one bounded public status diagnostic", () => {
     driver.indexOf("private void sendRefusalDiagnostic"),
     driver.indexOf("private String refusalPhase"),
   );
-  assert.doesNotMatch(diagnostic, /getMessage|printStackTrace|REPORT_KEY_STREAMRESULT|https?:|FIXTURE_URL|USERNAME|PASSWORD/);
+  assert.match(diagnostic, /Math\.min\(MAX_REFUSAL_SITE_FRAMES, frames\.length\)/);
+  assert.match(diagnostic, /RuntimeForegroundPlaybackFlowTest\.class\.getName\(\)/);
+  assert.match(diagnostic, /RuntimeExternalSettingsTransaction\.class\.getName\(\)/);
+  assert.match(diagnostic, /flowClass\.equals\(frame\.getClassName\(\)\)[\s\S]*site = "native-flow"/);
+  assert.match(diagnostic, /settingsClass\.equals\(frame\.getClassName\(\)\)[\s\S]*site = "settings-transaction"/);
+  assert.match(diagnostic, /line < 1 \|\| line > 2000/);
+  assert.match(diagnostic, /String site = "unknown";[\s\S]*int siteLine = 0;/);
+  assert.doesNotMatch(
+    diagnostic,
+    /getMessage|getMethodName|getFileName|printStackTrace|REPORT_KEY_STREAMRESULT|https?:|FIXTURE_URL|USERNAME|PASSWORD|\.contains\(|\.startsWith\(|\.endsWith\(/,
+  );
 });
 
 test("native timing starts only after the passive zero-baseline is sealed", () => {

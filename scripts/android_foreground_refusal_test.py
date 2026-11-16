@@ -15,10 +15,18 @@ refusal = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(refusal)
 
 
-def block(phase: str = "selecting-480p", failure_class: str = "AssertionError", code: int = 2) -> str:
+def block(
+    phase: str = "selecting-480p",
+    failure_class: str = "AssertionError",
+    site: str = "settings-transaction",
+    line: str = "137",
+    code: int = 2,
+) -> str:
     return (
         f"INSTRUMENTATION_STATUS: {refusal.PHASE_KEY}={phase}\n"
         f"INSTRUMENTATION_STATUS: {refusal.CLASS_KEY}={failure_class}\n"
+        f"INSTRUMENTATION_STATUS: {refusal.SITE_KEY}={site}\n"
+        f"INSTRUMENTATION_STATUS: {refusal.LINE_KEY}={line}\n"
         f"INSTRUMENTATION_STATUS_CODE: {code}\n"
     )
 
@@ -34,13 +42,17 @@ class ParserTests(unittest.TestCase):
                 "fullQualification": False,
                 "nativePhase": "selecting-480p",
                 "nativeClass": "AssertionError",
+                "nativeSite": "settings-transaction",
+                "nativeLine": 137,
             },
         )
 
     def test_accepts_fixed_unrecognized_phase_and_safe_class(self) -> None:
-        result = refusal.parse_instrumentation(block("unrecognized", "OtherThrowable"))
+        result = refusal.parse_instrumentation(block("unrecognized", "OtherThrowable", "unknown", "0"))
         self.assertEqual(result["nativePhase"], "unrecognized")
         self.assertEqual(result["nativeClass"], "OtherThrowable")
+        self.assertEqual(result["nativeSite"], "unknown")
+        self.assertEqual(result["nativeLine"], 0)
 
     def test_missing_diagnostic_is_fixed_unavailable(self) -> None:
         self.assertEqual(refusal.parse_instrumentation("OK (1 test)\n")["code"], "unavailable")
@@ -50,6 +62,8 @@ class ParserTests(unittest.TestCase):
             f"INSTRUMENTATION_STATUS: {refusal.PHASE_KEY}=server-login\n"
             f"INSTRUMENTATION_STATUS: {refusal.PHASE_KEY}=source-selection\n"
             f"INSTRUMENTATION_STATUS: {refusal.CLASS_KEY}=AssertionError\n"
+            f"INSTRUMENTATION_STATUS: {refusal.SITE_KEY}=native-flow\n"
+            f"INSTRUMENTATION_STATUS: {refusal.LINE_KEY}=188\n"
             "INSTRUMENTATION_STATUS_CODE: 2\n"
         )
         self.assertEqual(refusal.parse_instrumentation(text)["code"], "refused")
@@ -77,9 +91,41 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(refusal.parse_instrumentation(block("private-phase"))["code"], "refused")
         self.assertEqual(refusal.parse_instrumentation(block(failure_class="Bad Class"))["code"], "refused")
 
+    def test_missing_or_duplicate_site_and_line_are_refused(self) -> None:
+        missing_site = block().replace(
+            f"INSTRUMENTATION_STATUS: {refusal.SITE_KEY}=settings-transaction\n", "")
+        self.assertEqual(refusal.parse_instrumentation(missing_site)["code"], "refused")
+        missing_line = block().replace(
+            f"INSTRUMENTATION_STATUS: {refusal.LINE_KEY}=137\n", "")
+        self.assertEqual(refusal.parse_instrumentation(missing_line)["code"], "refused")
+        duplicate_site = block().replace(
+            f"INSTRUMENTATION_STATUS: {refusal.LINE_KEY}=137",
+            f"INSTRUMENTATION_STATUS: {refusal.SITE_KEY}=native-flow\n"
+            f"INSTRUMENTATION_STATUS: {refusal.LINE_KEY}=137",
+        )
+        self.assertEqual(refusal.parse_instrumentation(duplicate_site)["code"], "refused")
+        duplicate_line = block().replace(
+            "INSTRUMENTATION_STATUS_CODE: 2",
+            f"INSTRUMENTATION_STATUS: {refusal.LINE_KEY}=138\nINSTRUMENTATION_STATUS_CODE: 2",
+        )
+        self.assertEqual(refusal.parse_instrumentation(duplicate_line)["code"], "refused")
+
+    def test_site_and_line_consistency_is_strict(self) -> None:
+        for site, line in [
+            ("unknown", "1"),
+            ("native-flow", "0"),
+            ("settings-transaction", "2001"),
+            ("private-site", "137"),
+            ("native-flow", "0137"),
+            ("native-flow", "line137"),
+        ]:
+            with self.subTest(site=site, line=line):
+                self.assertEqual(refusal.parse_instrumentation(block(site=site, line=line))["code"], "refused")
+
     def test_unrelated_secret_text_is_never_copied(self) -> None:
-        secret = "authorization=do-not-copy https://private.invalid/path"
+        secret = "privacySentinel authorization=do-not-copy https://private.invalid/path"
         encoded = json.dumps(refusal.parse_instrumentation(secret + "\n" + block()))
+        self.assertNotIn("privacySentinel", encoded)
         self.assertNotIn("do-not-copy", encoded)
         self.assertNotIn("private.invalid", encoded)
 
