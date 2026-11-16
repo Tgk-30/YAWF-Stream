@@ -1,3 +1,4 @@
+import { assertSubmitTapDerivative } from './android_foreground_submit_tap.test.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -21,7 +22,8 @@ function section(source, start, end) {
 
 function contract(source, reference = publicWorkflow, java = driver) {
   assert.equal(sha256(reference), '1cb644cff702bd51b8bbb2ec533e10b22adadbe5fa7dff6f608b79bd156f89fd');
-  assert.equal(sha256(java), '36122e1fa1fc54ab29bb1556f8b91a0940db6cbe4fb3aa28437d2a41e007c4bc');
+  assert.equal(sha256(java), '7990cfd8a79564dbea28960c0c33607665b1d6ed7b1dd0ee7d2d8708054f7821');
+  assertSubmitTapDerivative(java);
   const trigger = section(source, '\non:\n', '\npermissions:');
   assert.match(trigger, /^\non:\n  push:\n    branches: \[codex\/android115-unfaulted-qa\]\n    paths: \[\.github\/workflows\/android115-unfaulted-qa\.yml\]\n  workflow_dispatch:\n/);
   assert.deepEqual([...trigger.matchAll(/^  ([a-z_]+):/gm)].map((m) => m[1]), ['push', 'workflow_dispatch']);

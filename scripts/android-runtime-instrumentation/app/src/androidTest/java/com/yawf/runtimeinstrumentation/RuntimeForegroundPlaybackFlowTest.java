@@ -320,7 +320,7 @@ public final class RuntimeForegroundPlaybackFlowTest {
         loginFields.get(0).setText(USERNAME);
         loginFields.get(1).setText(PASSWORD);
         dismissObservedIme();
-        clickLabeled("Sign in", "Sign in", SHORT_WAIT_MS);
+        clickSyntheticLoginSubmitOnce();
 
         phase = "source-selection";
         waitForTextOrDescription("Watchlist", UI_WAIT_MS, "Watchlist navigation");
@@ -847,6 +847,63 @@ public final class RuntimeForegroundPlaybackFlowTest {
     private void clickLabeled(String label, String description, long timeoutMs) {
         guardedClick(waitForLabeledClickable(label, timeoutMs, description), description);
     }
+
+    // BEGIN SYNTHETIC LOGIN SUBMIT SHORT TAP
+    private boolean syntheticLoginSubmitAttempted;
+
+    private void clickSyntheticLoginSubmitOnce() throws Exception {
+        assertTrue("Synthetic login submit was already attempted", !syntheticLoginSubmitAttempted);
+        UiObject2 before = freshSyntheticLoginSubmitTarget();
+        Rect beforeBounds = new Rect(before.getVisibleBounds());
+        String beforeClass = before.getClassName();
+        String beforePackage = before.getApplicationPackage();
+        String beforeText = before.getText();
+        String beforeDescription = before.getContentDescription();
+        instrumentation.getUiAutomation().waitForIdle(250L, 3_000L);
+        UiObject2 after = freshSyntheticLoginSubmitTarget();
+        Rect afterBounds = new Rect(after.getVisibleBounds());
+        assertEquals("Synthetic login submit geometry changed", beforeBounds, afterBounds);
+        assertEquals("Synthetic login submit role changed", beforeClass, after.getClassName());
+        assertEquals("Synthetic login submit owner changed", beforePackage, after.getApplicationPackage());
+        assertEquals("Synthetic login submit label changed", beforeText, after.getText());
+        assertEquals("Synthetic login submit description changed", beforeDescription, after.getContentDescription());
+        syntheticLoginSubmitAttempted = true;
+        long startedMs = SystemClock.uptimeMillis();
+        boolean dispatched = device.click(afterBounds.centerX(), afterBounds.centerY());
+        long dispatchMs = SystemClock.uptimeMillis() - startedMs;
+        assertTrue("Synthetic login submit dispatch failed", dispatched);
+        assertTrue("Synthetic login submit exceeded short-tap dispatch cap", dispatchMs >= 0 && dispatchMs <= 250L);
+        SystemClock.sleep(500);
+    }
+
+    private UiObject2 freshSyntheticLoginSubmitTarget() {
+        assertEquals("Synthetic login submit outside login phase", "server-login", phase);
+        assertTrue("Synthetic login submit after measured window began", !noInputWindowStarted);
+        assertNoOutOfScopeApproval();
+        assertEquals("Synthetic login lost product foreground ownership", PRODUCT_PACKAGE, device.getCurrentPackageName());
+        assertTrue("Synthetic login input method remained visible",
+                !device.hasObject(By.pkg(Pattern.compile(".*inputmethod.*"))));
+        assertTrue("Synthetic login submit requires API34 accessibility cache refresh",
+                android.os.Build.VERSION.SDK_INT >= 34);
+        assertTrue("Synthetic login submit accessibility cache refresh failed",
+                instrumentation.getUiAutomation().clearCache());
+        List<UiObject2> matches = device.findObjects(By.clazz("android.widget.Button")
+                .pkg(PRODUCT_PACKAGE).text(exactLabel("Sign in")).clickable(true).enabled(true));
+        assertEquals("Expected one exact enabled clickable synthetic login button", 1, matches.size());
+        UiObject2 target = matches.get(0);
+        assertEquals("Synthetic login submit had unknown role", "android.widget.Button", target.getClassName());
+        assertEquals("Synthetic login submit was not product-owned", PRODUCT_PACKAGE, target.getApplicationPackage());
+        assertEquals("Synthetic login submit label was not exact", "Sign in", target.getText());
+        assertTrue("Synthetic login submit was not enabled/clickable", target.isEnabled() && target.isClickable());
+        assertEquals("Synthetic login submit was not on default display",
+                android.view.Display.DEFAULT_DISPLAY, target.getDisplayId());
+        Rect bounds = target.getVisibleBounds();
+        assertTrue("Synthetic login submit bounds were not fully visible",
+                bounds.width() > 0 && bounds.height() > 0 && bounds.left >= 0 && bounds.top >= 0
+                        && bounds.right <= device.getDisplayWidth() && bounds.bottom <= device.getDisplayHeight());
+        return target;
+    }
+    // END SYNTHETIC LOGIN SUBMIT SHORT TAP
 
     private void guardedClick(UiObject2 object, String description) {
         assertTrue("Input attempted after measured no-input window began", !noInputWindowStarted);
