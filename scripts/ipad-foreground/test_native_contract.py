@@ -319,6 +319,54 @@ class NativePolicyTests(unittest.TestCase):
                 census.assert_not_called()
             self.assertEqual(run.result['resourceDiagnostic']['refusal']['role'], 'runtime')
 
+    def test_local_calibrated_start_floor_is_stricter_and_provisional(self):
+        self.assertEqual(runner.LOCAL_START_FREE, 8_657_043_456)
+        self.assertEqual(runner.LOCAL_START_FREE, runner.guard.REMAINING_FREE + runner.LOCAL_COMBINED_MAX_ALLOCATED + 256 * 1024 * 1024)
+        for free, accepted in ((runner.LOCAL_START_FREE - 1, False), (runner.LOCAL_START_FREE, True), (runner.LOCAL_START_FREE + 1, True)):
+            with self.subTest(free=free), patch.object(runner.guard, 'free_bytes', return_value=free):
+                if accepted: runner.admit_local_start(Path('/owned'))
+                else:
+                    with self.assertRaisesRegex(runner.Refusal, 'LOCAL_START_8P0625_GIB_REQUIRED'):
+                        runner.admit_local_start(Path('/owned'))
+        policy = runner.local_resource_policy()
+        self.assertIs(policy['provisional'], True)
+        self.assertEqual(policy['basis'], 'complete-census-nonterminal-long-mp4')
+        self.assertEqual((policy['basisDeviceFiles'], policy['basisDeviceSymlinks'], policy['basisCombinedAllocatedBytes']),
+                         (6411, 10, 1_525_731_328))
+        self.assertEqual(policy['deviceFileAndSymlinkLimit'], 9000)
+        self.assertEqual(policy['runtimeAndReceiptFileAndSymlinkLimit'], 6000)
+        self.assertEqual(policy['combinedAllocatedLimitBytes'], 1_946_157_056)
+        self.assertEqual(policy['combinedAcceptanceBytes'], 1_946_157_056 - 4096)
+
+    def test_profile_scoped_file_and_combined_allocation_boundaries(self):
+        local_acceptance = runner.LOCAL_COMBINED_MAX_ALLOCATED - 4096
+        hosted_acceptance = runner.guard.MAX_ALLOCATED - 4096
+        cases = (
+            ('local-device-9000', 'local-xcode27', 1, 1, 8990, 10, 3000, None),
+            ('local-device-9001', 'local-xcode27', 1, 1, 8991, 10, 3000, 'RUNTIME_FILE_COUNT_LIMIT'),
+            ('local-runtime-6001', 'local-xcode27', 6001, 1, 1, 0, 3000, 'RUNTIME_FILE_COUNT_LIMIT'),
+            ('local-receipt-6001', 'local-xcode27', 1, 6001, 1, 0, 3000, 'RUNTIME_FILE_COUNT_LIMIT'),
+            ('hosted-device-6001', 'hosted', 1, 1, 5991, 10, 3000, 'RUNTIME_FILE_COUNT_LIMIT'),
+            ('hosted-combined', 'hosted', 1, 1, 1, 0, hosted_acceptance + 1, 'OWNED_DEVICE_AND_RUNTIME_CAP'),
+            ('local-combined-below', 'local-xcode27', 1, 1, 1, 0, local_acceptance - 1, None),
+            ('local-combined-at', 'local-xcode27', 1, 1, 1, 0, local_acceptance, None),
+            ('local-combined-above', 'local-xcode27', 1, 1, 1, 0, local_acceptance + 1, 'OWNED_DEVICE_AND_RUNTIME_CAP'),
+        )
+        for name, profile, runtime_files, receipt_files, device_files, symlinks, combined, failure in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                run = self.resource_run(Path(tmp)); run.host_profile = profile
+                run.device = str(uuid.uuid4()).upper(); run.device_identity = (10, 3)
+                run.local_devices = Path(tmp) / 'devices'; run.cheap_monitor = lambda: None
+                runtime = self.resource_facts(files=runtime_files, allocated=512)
+                receipt = self.resource_facts(files=receipt_files, allocated=512)
+                device = self.resource_facts(files=device_files, symlinks=symlinks, allocated=combined - 1024)
+                with patch.object(runner.guard, 'measure', side_effect=[runtime, receipt]), \
+                     patch.object(runner, 'measure_owned_device', return_value=(device, (10, 3))):
+                    if failure:
+                        with self.assertRaisesRegex((runner.Refusal, runner.guard.Refusal), failure): run.full_census()
+                    else: run.full_census()
+                self.assertTrue(run.result['resourceDiagnostic']['last']['complete'])
+
     def test_full_census_measures_all_roles_before_old_acceptance_refusal(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = self.resource_run(Path(tmp)); run.device = str(uuid.uuid4()).upper(); run.device_identity = (10, 3)

@@ -35,6 +35,9 @@ SELECTOR = 'SafariNativeInputTests/IPadForegroundTests/testInstalledPwaForegroun
 ABSOLUTE_SECONDS = 1500
 CLEANUP_SECONDS = 60
 CENSUS_INTERVAL_SECONDS = 30
+LOCAL_DEVICE_MAX_FILES = 9000
+LOCAL_COMBINED_MAX_ALLOCATED = 1_946_157_056
+LOCAL_START_FREE = 8_657_043_456
 RESOURCE_CODES = frozenset(('ABSOLUTE_DEADLINE', 'REMAINING_6_GIB_REQUIRED', 'RUNTIME_ROOT_CHANGED',
     'RECEIPT_ROOT_CHANGED', 'OWNED_DEVICE_UUID_PATH', 'OWNED_DEVICE_DIRECTORY_REQUIRED', 'OWNED_DEVICE_IDENTITY_CHANGED',
     'OWNED_DEVICE_VOLUME_MISMATCH', 'RUNTIME_FILE_COUNT_LIMIT', 'RUNTIME_1P5_GIB_CAP', 'DIAGNOSTIC_250_MIB_CAP',
@@ -215,6 +218,19 @@ def admit_local_paths(root, receipt):
             os.path.ismount(work) and root.is_relative_to(work) and receipt.is_relative_to(work) and
             root.parent.resolve() == root.parent and receipt.parent.resolve() == receipt.parent and
             root.parent.stat().st_dev == work.stat().st_dev == receipt.parent.stat().st_dev, 'LOCAL_WORK_VOLUME_REQUIRED')
+
+
+def local_resource_policy():
+    return {'provisional': True, 'basis': 'complete-census-nonterminal-long-mp4',
+            'basisDeviceFiles': 6411, 'basisDeviceSymlinks': 10, 'basisCombinedAllocatedBytes': 1_525_731_328,
+            'deviceFileAndSymlinkLimit': LOCAL_DEVICE_MAX_FILES, 'runtimeAndReceiptFileAndSymlinkLimit': guard.MAX_FILES,
+            'combinedAllocatedLimitBytes': LOCAL_COMBINED_MAX_ALLOCATED,
+            'combinedAcceptanceBytes': LOCAL_COMBINED_MAX_ALLOCATED - 4096,
+            'runtimeAllocatedLimitBytes': guard.MAX_ALLOCATED, 'startFreeBytes': LOCAL_START_FREE}
+
+
+def admit_local_start(root):
+    require(guard.free_bytes(root) >= LOCAL_START_FREE, 'LOCAL_START_8P0625_GIB_REQUIRED')
 
 
 def bounded_local_git(arguments, *, stop_on_output=False):
@@ -406,6 +422,7 @@ class Run:
                 'sameVolumeAsWork': self.local_tmp_identity[0] == work.stat().st_dev,
                 'allocationScope': 'host-managed-not-censused'}
         guard.admit_start(self.root.parent)
+        if host_profile == 'local-xcode27': admit_local_start(self.root.parent)
         self.root.mkdir(mode=0o700)
         for name in ('tmp', 'Derived', 'configs', 'fixture'):
             (self.root / name).mkdir(mode=0o700)
@@ -420,6 +437,7 @@ class Run:
             'postBootCensusCompleted': False,
             'peak': {'combinedAllocatedBytes': 0, 'combinedIsLowerBound': False, 'roles': {}}, 'refusal': None}
         if host_profile == 'local-xcode27':
+            self.result['localResourcePolicy'] = local_resource_policy()
             self.result['resourceDiagnostic']['bootstatusContinuousChecks'] = ['deadline', 'free-space', 'owned-identities', 'owned-volume-bindings']
         self.env = dict(os.environ, DEVELOPER_DIR=LOCAL_DEVELOPER if host_profile == 'local-xcode27' else DEVELOPER, TMPDIR=str(self.root / 'tmp'),
                         CLANG_MODULE_CACHE_PATH=str(self.root / 'tmp/clang-modules'),
@@ -549,7 +567,8 @@ class Run:
             self.record_census(roles, complete, started)
             if complete: self.last_census_completed = time.monotonic()
         for role, value in roles.items():
-            if value is not None and value['files'] + value['symlinkCount'] > guard.MAX_FILES:
+            limit = LOCAL_DEVICE_MAX_FILES if role == 'device' and getattr(self, 'host_profile', 'hosted') == 'local-xcode27' else guard.MAX_FILES
+            if value is not None and value['files'] + value['symlinkCount'] > limit:
                 error = guard.Refusal('RUNTIME_FILE_COUNT_LIMIT'); self.resource_refusal(error, role); raise error
         if roles['runtime']['allocatedBytes'] > guard.MAX_ALLOCATED - 4096:
             error = guard.Refusal('RUNTIME_1P5_GIB_CAP'); self.resource_refusal(error, 'runtime'); raise error
@@ -557,7 +576,8 @@ class Run:
             error = guard.Refusal('DIAGNOSTIC_250_MIB_CAP'); self.resource_refusal(error, 'runtime'); raise error
         if roles['runtime']['diagnosticLogicalBytes'] + roles['receipt']['logicalBytes'] > guard.MAX_DIAGNOSTIC - 4096:
             error = Refusal('COMBINED_DIAGNOSTIC_CAP'); self.resource_refusal(error, 'receipt'); raise error
-        if sum(value['allocatedBytes'] for value in roles.values() if value is not None) > guard.MAX_ALLOCATED - 4096:
+        combined_limit = LOCAL_COMBINED_MAX_ALLOCATED if getattr(self, 'host_profile', 'hosted') == 'local-xcode27' else guard.MAX_ALLOCATED
+        if sum(value['allocatedBytes'] for value in roles.values() if value is not None) > combined_limit - 4096:
             error = Refusal('OWNED_DEVICE_AND_RUNTIME_CAP'); self.resource_refusal(error, 'device' if roles['device'] else 'runtime'); raise error
 
     def monitor(self, *, force=False):
@@ -1028,10 +1048,12 @@ def main():
         if run is None:
             Path(args.receipt).parent.mkdir(parents=True, exist_ok=True)
             source_sha = os.environ.get('GITHUB_SHA', '')
-            Path(args.receipt).write_text(json.dumps({'schemaVersion': 1, 'case': args.case, 'status': 'refused', 'code': code,
+            refusal = {'schemaVersion': 1, 'case': args.case, 'status': 'refused', 'code': code,
                 'primaryCode': code, 'cleanupCode': None, 'sourceSha': source_sha if re.fullmatch('[a-f0-9]{40}', source_sha) else None,
                 'sourceShaAdmitted': False, 'phase': 'initialization', 'lastCommand': None, 'commandSuccess': {},
-                'cleanupObservationUnavailable': False, 'fullQualification': False}) + '\n')
+                'cleanupObservationUnavailable': False, 'fullQualification': False}
+            if args.host_profile == 'local-xcode27': refusal['localResourcePolicy'] = local_resource_policy()
+            Path(args.receipt).write_text(json.dumps(refusal) + '\n')
             return 1
         run.result['code'] = code
         run.result['primaryCode'] = code
