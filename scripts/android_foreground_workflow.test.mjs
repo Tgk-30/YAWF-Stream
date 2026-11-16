@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
+import test, { before } from "node:test";
 
 const workflow = readFileSync(new URL("../.github/workflows/android-foreground-qa.yml", import.meta.url), "utf8");
 const driver = readFileSync(new URL(
@@ -82,7 +82,7 @@ function contract(source) {
   assert.match(source, /deadline=\$\(\(SECONDS \+ 15\)\)\n          while :; do\n            current="\$\(process_identity "\$adb_pid"\)"\n            test "\$\{current%%:\*\}" = "\$adb_uid"\n            test "\$\{current##\*:\}" = "\$adb_start"/);
   assert.ok(source.includes('if [ "$current" = "$adb_uid:$adb_pid:$adb_start" ]; then\n              adb_identity="$current"'));
   assert.ok(source.includes('          done\n          test "$adb_identity" = "$adb_uid:$adb_pid:$adb_start"\n          test "${#adb_pids[@]}" -eq 1\n          test "${adb_pids[0]}" = "$adb_pid"'));
-  assert.match(source, /adb_identity="\$\(process_identity "\$adb_pid"\)"/);
+  assert.match(source, /adb_initial_identity="\$\(process_identity "\$adb_pid"\)"/);
   assert.match(source, /test "\$\{adb_identity%%:\*\}" = "\$\(id -u\)"/);
   assert.equal(source.split(
     'ss -ltnp | grep -Eq "127\\\\.0\\\\.0\\\\.1:${ADB_SERVER_PORT}.*pid=${adb_pid},"',
@@ -165,6 +165,9 @@ function contract(source) {
   assert.match(source, /retention-days: 7/);
   assert.match(source, /if: success\(\)/);
 }
+
+// A broken positive contract must never make negative mutations appear causal.
+before(() => contract(workflow));
 
 test("workflow is a manual, public, credential-free native UI observation", () => {
   contract(workflow);
