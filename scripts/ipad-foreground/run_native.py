@@ -30,6 +30,12 @@ DEVELOPER = '/Applications/Xcode_26.5.app/Contents/Developer'
 SELECTOR = 'SafariNativeInputTests/IPadForegroundTests/testInstalledPwaForeground'
 ABSOLUTE_SECONDS = 1500
 CLEANUP_SECONDS = 60
+COMMAND_LABELS = frozenset(('xcode-version', 'runtimes', 'device-types', 'inventory', 'ffmpeg-filters',
+                            'ffmpeg-encoders', 'create-device', 'build', 'boot', 'bootstatus',
+                            'network-canary', 'ffmpeg-network-canary', 'fixture', 'native-test',
+                            'evaluate', 'export-attachments'))
+PHASES = frozenset(('initialization', 'host-admission', 'toolchain-admission', 'device-creation',
+                    'native-build', 'device-boot', 'fixture-admission', 'native-test', 'evidence'))
 
 
 class Refusal(Exception):
@@ -70,6 +76,32 @@ def profile(root):
             '(allow network-outbound (remote ip "127.0.0.1:*"))\n'
             '(deny file-write* (require-all '
             f'(require-not (subpath "{text}")) (require-not (literal "/dev/null"))))\n')
+
+
+def canary_diagnostic(exit_code, stdout, stderr):
+    """Return bounded classifications only; never retain child text in receipts."""
+    code = exit_code if isinstance(exit_code, int) and not isinstance(exit_code, bool) and -255 <= exit_code <= 255 else None
+    number = None
+    if isinstance(stdout, bytes) and len(stdout) <= 16 and re.fullmatch(rb'\s*[0-9]{1,3}\s*', stdout):
+        parsed = int(stdout.strip())
+        if parsed <= 255: number = parsed
+    present = isinstance(stderr, bytes) and bool(stderr)
+    kind = 'none'
+    if present and len(stderr) > 32768:
+        kind = 'oversize'
+    elif present:
+        text = stderr.lower()
+        if b'sandbox' in text and any(x in text for x in (b'syntax error', b'error parsing', b'invalid profile', b'unexpected token', b'unknown filter', b'unknown operation')):
+            kind = 'sandbox-profile-parse'
+        elif b'sandbox' in text and any(x in text for x in (b'sandbox_init', b'failed to apply', b'sandbox_apply')):
+            kind = 'sandbox-apply'
+        elif b'sandbox-exec:' in text and b'execvp' in text and b'python3' in text and any(x in text for x in (b'operation not permitted', b'permission denied')):
+            kind = 'python-exec-denied'
+        elif any(x in text for x in (b'xcrun:', b'xcode-select:', b'no developer tools', b'command line developer tools')):
+            kind = 'python-shim'
+        else:
+            kind = 'other'
+    return {'exitCode': code, 'errno': number, 'stderrPresent': present, 'stderrClass': kind}
 
 
 def measure_owned_device(device, runtime_root, expected_identity):
@@ -115,15 +147,21 @@ class Run:
         self.deadline = self.started + ABSOLUTE_SECONDS
         self.device = None
         self.device_identity = None
+        self.create_attempted = False
         self.device_name = 'YAWFQA' + secrets.token_hex(5)
         self.fixture = None
         self.fixture_log = None
         self.commands = []
         self.before = None
         self.marker_seq = None
+        source_sha = os.environ.get('GITHUB_SHA', '')
         self.result = {'schemaVersion': 1, 'case': case, 'scope': 'hosted-ipad-simulator-foreground',
                        'status': 'refused', 'fullQualification': False, 'deviceCreated': False,
-                       'deviceDeleted': False, 'fixtureBoundaryOnly': True, 'simulatorWideEgressIsolation': False}
+                       'deviceDeleted': False, 'fixtureBoundaryOnly': True, 'simulatorWideEgressIsolation': False,
+                       'sourceSha': source_sha if re.fullmatch('[a-f0-9]{40}', source_sha) else None,
+                       'sourceShaAdmitted': False, 'phase': 'initialization', 'lastCommand': None,
+                       'commandSuccess': {}, 'primaryCode': None, 'cleanupCode': None,
+                       'cleanupObservationUnavailable': False}
         require(self.root.is_absolute() and not self.root.exists() and self.root.parent.resolve() == self.root.parent,
                 'FRESH_CANONICAL_ROOT_REQUIRED')
         require(self.receipt.is_absolute() and self.receipt.parent.is_dir() and self.receipt.parent.resolve() == self.receipt.parent and
@@ -136,6 +174,19 @@ class Run:
                         CLANG_MODULE_CACHE_PATH=str(self.root / 'tmp/clang-modules'),
                         SWIFT_MODULE_CACHE_PATH=str(self.root / 'tmp/swift-modules'))
         self.token = secrets.token_hex(32)
+
+    def set_phase(self, phase):
+        require(phase in PHASES, 'INVALID_PHASE')
+        self.result['phase'] = phase
+
+    def start_command(self, label):
+        require(label in COMMAND_LABELS, 'INVALID_COMMAND_LABEL')
+        self.result['lastCommand'] = label
+        self.result['commandSuccess'][label] = False
+
+    def finish_command(self, label):
+        require(label in COMMAND_LABELS and self.result['lastCommand'] == label, 'INVALID_COMMAND_LABEL')
+        self.result['commandSuccess'][label] = True
 
     def monitor(self):
         require(time.monotonic() < self.deadline - CLEANUP_SECONDS, 'ABSOLUTE_DEADLINE')
@@ -165,20 +216,36 @@ class Run:
         if process.poll() is None: process.wait(timeout=4)
 
     def command(self, label, args, seconds, *, env=None, monitor=True):
+        self.start_command(label)
         log = self.root / f'{len(self.commands):03d}-{label}.log'
+        canary = label == 'network-canary'
+        stderr_path = self.root / f'{len(self.commands):03d}-network-canary-stderr.log'
+        if canary:
+            self.result['networkCanary'] = {'exitCode': None, 'errno': None, 'stderrPresent': False, 'stderrClass': 'not-started'}
         with log.open('xb') as output:
-            process = subprocess.Popen(args, stdout=output, stderr=subprocess.STDOUT,
-                                       env=env or self.env, start_new_session=True)
-            end = min(self.deadline - CLEANUP_SECONDS, time.monotonic() + seconds)
+            stderr_file = stderr_path.open('xb') if canary else None
             try:
-                while process.poll() is None and time.monotonic() < end:
-                    if monitor: self.monitor()
-                    time.sleep(.5)
-                require(process.poll() is not None, 'COMMAND_TIMEOUT_' + label.upper())
-                require(process.returncode == 0, 'COMMAND_FAILED_' + label.upper())
+                process = subprocess.Popen(args, stdout=output, stderr=stderr_file if canary else subprocess.STDOUT,
+                                           env=env or self.env, start_new_session=True)
+                end = min(self.deadline - CLEANUP_SECONDS, time.monotonic() + seconds)
+                try:
+                    while process.poll() is None and time.monotonic() < end:
+                        if monitor: self.monitor()
+                        time.sleep(.5)
+                    require(process.poll() is not None, 'COMMAND_TIMEOUT_' + label.upper())
+                    require(process.returncode == 0, 'COMMAND_FAILED_' + label.upper())
+                finally:
+                    try: self.stop(process)
+                    finally:
+                        if canary:
+                            output.flush(); stderr_file.flush()
+                            stdout = log.read_bytes() if log.stat().st_size <= 16 else b''
+                            stderr = stderr_path.read_bytes() if stderr_path.stat().st_size <= 32768 else b'x' * 32769
+                            self.result['networkCanary'] = canary_diagnostic(process.returncode, stdout, stderr)
             finally:
-                self.stop(process)
+                if stderr_file is not None: stderr_file.close()
         require(log.stat().st_size <= 4 * 1024 * 1024, 'COMMAND_OUTPUT_LIMIT')
+        self.finish_command(label)
         self.commands.append(label)
         return log.read_text(errors='replace')
 
@@ -188,6 +255,7 @@ class Run:
         return {item['udid']: (runtime, item) for runtime, items in info['devices'].items() for item in items}
 
     def prepare(self):
+        self.set_phase('host-admission')
         require(os.uname().machine == 'arm64' and Path(DEVELOPER).is_dir(), 'EXPECTED_HOST_AND_XCODE')
         version = self.command('xcode-version', ['/usr/bin/xcodebuild', '-version'], 20)
         require('Xcode 26.5' in version and 'Build version 17F42' in version, 'XCODE_VERSION_REFUSED')
@@ -201,6 +269,8 @@ class Run:
         require(all(unavailable(port) for port in (43120, 43121)), 'OWNED_PORTS_REQUIRED')
         require(re.fullmatch('[a-f0-9]{40}', os.environ.get('GITHUB_SHA', '')) is not None, 'SOURCE_SHA_REQUIRED')
         self.result['sourceSha'] = os.environ['GITHUB_SHA']
+        self.result['sourceShaAdmitted'] = True
+        self.set_phase('toolchain-admission')
         self.result['sourceHashes'] = {name: sha(REPO / name) for name in (
             'web/src/components/VideoPlayer.tsx', 'web/src/components/EmbeddedPlayer.tsx',
             'server/src/transcodeSession.ts', 'server/src/transcode.ts', 'server/src/app.ts')}
@@ -218,6 +288,8 @@ class Run:
         encoders = self.command('ffmpeg-encoders', [str(ffmpeg), '-hide_banner', '-encoders'], 20)
         require(re.search(r'\bdrawtext\b', filters) and re.search(r'\blibx264\b', encoders) and re.search(r'\baac\b', encoders), 'FFMPEG_CAPABILITIES')
         self.monitor()
+        self.set_phase('device-creation')
+        self.create_attempted = True
         created = self.command('create-device', ['/usr/bin/xcrun', 'simctl', 'create', self.device_name, DEVICE, RUNTIME], 30)
         candidate = created.strip()
         require(str(uuid.UUID(candidate)).lower() == candidate.lower() and candidate not in self.before, 'NEW_DEVICE_UUID_REQUIRED')
@@ -227,28 +299,34 @@ class Run:
         self.monitor()
         fresh = self.inventory()
         require(self.device in fresh and fresh[self.device][0] == RUNTIME and fresh[self.device][1].get('deviceTypeIdentifier') == DEVICE and fresh[self.device][1].get('name') == self.device_name, 'NEW_DEVICE_IDENTITY')
+        self.set_phase('native-build')
         self.command('build', ['/usr/bin/xcodebuild', 'build-for-testing', '-project', str(PROJECT), '-scheme', 'NativeQA',
                               '-destination', 'platform=iOS Simulator,id=' + self.device, '-derivedDataPath', str(self.root / 'Derived'),
                               '-parallel-testing-enabled', 'NO', '-jobs', '1', 'CODE_SIGNING_ALLOWED=NO'], 300)
         runs = list((self.root / 'Derived/Build/Products').glob('*.xctestrun'))
         require(len(runs) == 1 and runs[0].is_file() and not runs[0].is_symlink(), 'ONE_XCTESTRUN_REQUIRED')
         self.xctestrun = runs[0]
+        self.set_phase('device-boot')
         self.command('boot', ['/usr/bin/xcrun', 'simctl', 'boot', self.device], 30)
         self.command('bootstatus', ['/usr/bin/xcrun', 'simctl', 'bootstatus', self.device, '-b'], 120)
 
     def start_fixture(self):
+        self.set_phase('fixture-admission')
         sandbox = self.root / 'configs/fixture.sb'
         sandbox.write_text(profile(self.root))
         # Both controls must fail by sandbox permission, not an unreachable network.
         canary = "import errno,socket; s=socket.socket(); e=s.connect_ex(('192.0.2.1',9)); print(e); raise SystemExit(0 if e in (errno.EPERM,errno.EACCES) else 1)"
         self.command('network-canary', ['/usr/bin/sandbox-exec', '-f', str(sandbox), '/usr/bin/python3', '-c', canary], 10)
+        self.start_command('ffmpeg-network-canary')
         ff_canary = subprocess.run(['/usr/bin/sandbox-exec', '-f', str(sandbox), str(self.ffmpeg), '-nostdin', '-hide_banner',
                                     '-loglevel', 'error', '-i', 'http://192.0.2.1:9/qa', '-f', 'null', '-'],
                                    env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=10)
         require(ff_canary.returncode != 0 and any(x in ff_canary.stderr for x in (b'Operation not permitted', b'Permission denied')), 'FFMPEG_NETWORK_CANARY')
+        self.finish_command('ffmpeg-network-canary')
         self.monitor()
         env = dict(self.env, HOME=str(self.root), IPAD_QA_CONTROL_TOKEN=self.token)
         self.fixture_log = (self.root / 'fixture.log').open('xb')
+        self.start_command('fixture')
         self.fixture = subprocess.Popen(['/usr/bin/sandbox-exec', '-f', str(sandbox), str(self.node),
             str(REPO / 'server/node_modules/tsx/dist/cli.mjs'), str(REPO / 'scripts/android_external_player_server_fixture.mts'),
             '--repo', str(REPO), '--output', str(self.root / 'fixture'), '--foreground-long', '--ipad-foreground'],
@@ -261,11 +339,14 @@ class Run:
             if status.exists():
                 value = read_json(status)
                 if value.get('status') == 'refused': raise Refusal('FIXTURE_REFUSED')
-                if value.get('status') == 'ready': return
+                if value.get('status') == 'ready':
+                    self.finish_command('fixture')
+                    return
             time.sleep(.5)
         raise Refusal('FIXTURE_READY_TIMEOUT')
 
     def native(self):
+        self.set_phase('native-test')
         config = plistlib.loads(self.xctestrun.read_bytes())
         products = self.xctestrun.parent
         def expand(value):
@@ -292,6 +373,7 @@ class Run:
                    '-default-test-execution-time-allowance', '900', '-maximum-test-execution-time-allowance', '900']
         pattern = re.compile(r'IPAD_QA_WINDOW_BEGIN_(DIRECT|HLS|STALL)_(15|180|480)_([a-f0-9]{32})_(\d+)_(\d+)')
         begin = None
+        self.start_command('native-test')
         with logpath.open('xb') as log:
             process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=self.env, start_new_session=True)
             end = min(self.deadline - CLEANUP_SECONDS, time.monotonic() + 900)
@@ -326,6 +408,8 @@ class Run:
         begin = matches[0]
         require(begin[0] == lane.upper() and int(begin[1]) == seconds, 'NATIVE_LANE_MISMATCH')
         require('Executed 1 test, with 0 failures' in text, 'EXACT_ONE_NATIVE_TEST_REQUIRED')
+        self.finish_command('native-test')
+        self.set_phase('evidence')
         # Permit late asynchronous collector delivery, without touching media.
         time.sleep(3)
         self.monitor()
@@ -377,32 +461,54 @@ class Run:
         try:
             if self.fixture_log: self.fixture_log.close()
         except Exception: errors.append('FIXTURE_LOG_CLOSE')
-        # A failed create may still have created a uniquely named new device.
-        try:
-            result = subprocess.run(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], env=self.env,
-                                    capture_output=True, timeout=15, check=True)
-            items = [(runtime, x) for runtime, rows in json.loads(result.stdout)['devices'].items() for x in rows]
-            candidates = [x for runtime, x in items if x.get('name') == self.device_name and runtime == RUNTIME and
-                          self.before is not None and x.get('udid') not in self.before]
-            if self.device is None and len(candidates) == 1:
-                self.device = candidates[0]['udid']; self.result['deviceCreated'] = True
-            if self.device:
-                require(len(candidates) == 1 and candidates[0]['udid'].lower() == self.device.lower(), 'CLEANUP_IDENTITY')
-                if candidates[0].get('state') == 'Booted':
-                    subprocess.run(['/usr/bin/xcrun', 'simctl', 'shutdown', self.device], env=self.env, capture_output=True, timeout=15, check=True)
-                subprocess.run(['/usr/bin/xcrun', 'simctl', 'delete', self.device], env=self.env, capture_output=True, timeout=15, check=True)
-                after_raw = subprocess.run(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], env=self.env,
-                                           capture_output=True, timeout=10, check=True)
-                after = {x['udid'] for rows in json.loads(after_raw.stdout)['devices'].values() for x in rows}
-                require(self.device not in after and set(self.before).issubset(after), 'POST_CLEANUP_DEVICE_CENSUS')
-                self.result['deviceDeleted'] = True
-        except Exception: errors.append('OWNED_DEVICE_CLEANUP')
+        # No create command means no owned device can have been created by this
+        # run. A failed earlier inventory is an observation gap, not a failed
+        # deletion. An attempted create always requires the existing census.
+        if not self.create_attempted and self.device is None:
+            self.result['cleanupObservation'] = 'not-required-no-create'
+            if self.before is None and self.result['commandSuccess'].get('inventory') is False:
+                self.result['cleanupObservationUnavailable'] = True
+            if self.result['status'] in ('admission-only', 'observation-only'):
+                self.result['status'] = 'refused'
+                self.result['primaryCode'] = 'DEVICE_CREATION_NOT_ATTEMPTED'
+                self.result['code'] = 'DEVICE_CREATION_NOT_ATTEMPTED'
+        else:
+            try:
+                require(self.before is not None, 'CLEANUP_BASELINE_MISSING')
+                result = subprocess.run(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], env=self.env,
+                                        capture_output=True, timeout=15, check=True)
+                items = [(runtime, x) for runtime, rows in json.loads(result.stdout)['devices'].items() for x in rows]
+                candidates = [x for runtime, x in items if x.get('name') == self.device_name and runtime == RUNTIME and x.get('udid') not in self.before]
+                require(len(candidates) <= 1, 'CLEANUP_AMBIGUOUS_DEVICE')
+                if self.device is None and len(candidates) == 1:
+                    self.device = candidates[0]['udid']; self.result['deviceCreated'] = True
+                if self.device:
+                    require(len(candidates) == 1 and candidates[0]['udid'].lower() == self.device.lower(), 'CLEANUP_IDENTITY')
+                    if candidates[0].get('state') == 'Booted':
+                        subprocess.run(['/usr/bin/xcrun', 'simctl', 'shutdown', self.device], env=self.env, capture_output=True, timeout=15, check=True)
+                    subprocess.run(['/usr/bin/xcrun', 'simctl', 'delete', self.device], env=self.env, capture_output=True, timeout=15, check=True)
+                    after_raw = subprocess.run(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], env=self.env,
+                                               capture_output=True, timeout=10, check=True)
+                    after = {x['udid'] for rows in json.loads(after_raw.stdout)['devices'].values() for x in rows}
+                    require(self.device not in after and set(self.before).issubset(after), 'POST_CLEANUP_DEVICE_CENSUS')
+                    self.result['deviceDeleted'] = True
+                self.result['cleanupObservation'] = 'observed'
+            except Refusal:
+                self.result['cleanupObservation'] = 'unsafe'
+                errors.append('OWNED_DEVICE_CLEANUP')
+            except Exception:
+                self.result['cleanupObservation'] = 'unavailable'
+                self.result['cleanupObservationUnavailable'] = True
+                errors.append('OWNED_DEVICE_CLEANUP')
         try:
             if not all(unavailable(port) for port in (43120, 43121)): errors.append('FIXTURE_PORTS_STILL_OPEN')
         except Exception: errors.append('FIXTURE_PORT_CENSUS')
         self.result['cleanupErrors'] = errors
         self.result['elapsedSeconds'] = round(time.monotonic() - self.started, 3)
-        if errors: self.result['status'] = 'refused'; self.result['code'] = 'CLEANUP_FAILED'
+        if errors:
+            self.result['status'] = 'refused'
+            self.result['cleanupCode'] = 'CLEANUP_FAILED'
+            if not self.result.get('code'): self.result['code'] = 'CLEANUP_FAILED'
         self.receipt.parent.mkdir(parents=True, exist_ok=True)
         self.receipt.write_text(json.dumps(self.result, sort_keys=True) + '\n')
         os.chmod(self.receipt, 0o600)
@@ -425,9 +531,14 @@ def main():
         if not re.fullmatch('[A-Za-z0-9_-]{1,64}', code): code = 'UNEXPECTED_FAILURE'
         if run is None:
             Path(args.receipt).parent.mkdir(parents=True, exist_ok=True)
-            Path(args.receipt).write_text(json.dumps({'schemaVersion': 1, 'case': args.case, 'status': 'refused', 'code': code, 'fullQualification': False}) + '\n')
+            source_sha = os.environ.get('GITHUB_SHA', '')
+            Path(args.receipt).write_text(json.dumps({'schemaVersion': 1, 'case': args.case, 'status': 'refused', 'code': code,
+                'primaryCode': code, 'cleanupCode': None, 'sourceSha': source_sha if re.fullmatch('[a-f0-9]{40}', source_sha) else None,
+                'sourceShaAdmitted': False, 'phase': 'initialization', 'lastCommand': None, 'commandSuccess': {},
+                'cleanupObservationUnavailable': False, 'fullQualification': False}) + '\n')
             return 1
         run.result['code'] = code
+        run.result['primaryCode'] = code
     finally:
         if run is not None:
             if not run.cleanup(): return 1

@@ -1,8 +1,10 @@
 """Hosted-only policy tests. They do not run a simulator or prove native playback."""
 import importlib.util
 import os
+import json
 from pathlib import Path
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -16,6 +18,27 @@ spec.loader.exec_module(runner)
 
 
 class NativePolicyTests(unittest.TestCase):
+    def diagnostic_run(self, root):
+        run = runner.Run.__new__(runner.Run)
+        run.root = root
+        run.receipt = root / 'receipt.json'
+        run.commands = []
+        run.deadline = time.monotonic() + 200
+        run.started = time.monotonic()
+        run.fixture = None
+        run.fixture_log = None
+        run.device = None
+        run.device_name = 'YAWFQATEST'
+        run.create_attempted = False
+        run.before = None
+        run.env = {}
+        run.stop = lambda _process: None
+        run.monitor = lambda: None
+        run.result = {'status': 'refused', 'fullQualification': False, 'deviceCreated': False, 'deviceDeleted': False,
+                      'phase': 'host-admission', 'lastCommand': None, 'commandSuccess': {},
+                      'primaryCode': None, 'cleanupCode': None, 'cleanupObservationUnavailable': False}
+        return run
+
     def test_profile_denies_network_and_allows_only_fixture_loopback(self):
         profile = runner.profile(Path('/qa/owned'))
         self.assertIn('(deny network*)', profile)
@@ -99,6 +122,116 @@ class NativePolicyTests(unittest.TestCase):
         self.assertIn('item.isSelected || (item.value as? String) == "1"', section)
         self.assertIn('button(menu, "Close playback settings")', section)
         self.assertIn('QUALITY_MENU_REOPEN_LIMIT', section)
+
+    def test_only_fixed_phases_and_command_labels_can_enter_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self.diagnostic_run(Path(tmp))
+            run.set_phase('host-admission')
+            run.start_command('inventory')
+            self.assertEqual(run.result['lastCommand'], 'inventory')
+            self.assertIs(run.result['commandSuccess']['inventory'], False)
+            run.finish_command('inventory')
+            self.assertIs(run.result['commandSuccess']['inventory'], True)
+            with self.assertRaisesRegex(runner.Refusal, 'INVALID_COMMAND_LABEL'):
+                run.start_command('/private/secret-marker')
+            with self.assertRaisesRegex(runner.Refusal, 'INVALID_PHASE'):
+                run.set_phase('/private/secret-marker')
+            self.assertNotIn('secret-marker', json.dumps(run.result))
+            for label in ('build', 'boot', 'bootstatus'):
+                run.start_command(label)
+                run.finish_command(label)
+                self.assertIs(run.result['commandSuccess'][label], True)
+
+    def test_constructor_records_but_does_not_preadmit_source_sha(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            receipts = base / 'receipts'; receipts.mkdir()
+            with patch.dict(runner.os.environ, {'GITHUB_SHA': 'a' * 40}), \
+                 patch.object(runner.guard, 'admit_start'):
+                run = runner.Run(base / 'runtime', receipts / 'status.json', 'admission-direct', {})
+            self.assertEqual(run.result['sourceSha'], 'a' * 40)
+            self.assertIs(run.result['sourceShaAdmitted'], False)
+            self.assertEqual(run.result['phase'], 'initialization')
+
+    def test_command_failure_and_timeout_leave_command_label_and_false_completion(self):
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout), tempfile.TemporaryDirectory() as tmp:
+                run = self.diagnostic_run(Path(tmp))
+                process = SimpleNamespace(poll=lambda: None if timeout else 1, returncode=None if timeout else 1)
+                with patch.object(runner.subprocess, 'Popen', return_value=process):
+                    expected = 'COMMAND_TIMEOUT_INVENTORY' if timeout else 'COMMAND_FAILED_INVENTORY'
+                    with self.assertRaisesRegex(runner.Refusal, expected):
+                        run.command('inventory', ['unused'], 0 if timeout else 20)
+                self.assertEqual(run.result['lastCommand'], 'inventory')
+                self.assertIs(run.result['commandSuccess']['inventory'], False)
+
+    def test_no_create_does_not_report_a_failed_device_deletion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self.diagnostic_run(Path(tmp))
+            run.result.update({'code': 'COMMAND_TIMEOUT_INVENTORY', 'primaryCode': 'COMMAND_TIMEOUT_INVENTORY',
+                               'lastCommand': 'inventory', 'commandSuccess': {'inventory': False}})
+            with patch.object(runner.subprocess, 'run', side_effect=OSError('private-marker')) as inventory, \
+                 patch.object(runner, 'unavailable', return_value=True):
+                self.assertTrue(run.cleanup())
+            inventory.assert_not_called()
+            receipt = json.loads(run.receipt.read_text())
+            self.assertEqual(receipt['primaryCode'], 'COMMAND_TIMEOUT_INVENTORY')
+            self.assertEqual(receipt['code'], 'COMMAND_TIMEOUT_INVENTORY')
+            self.assertIsNone(receipt['cleanupCode'])
+            self.assertEqual(receipt['cleanupErrors'], [])
+            self.assertTrue(receipt['cleanupObservationUnavailable'])
+            self.assertEqual(receipt['cleanupObservation'], 'not-required-no-create')
+            self.assertNotIn('private-marker', json.dumps(receipt))
+
+    def test_attempted_create_cleanup_failure_never_masks_primary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self.diagnostic_run(Path(tmp))
+            run.before = {}
+            run.create_attempted = True
+            run.result.update({'code': 'COMMAND_FAILED_CREATE-DEVICE', 'primaryCode': 'COMMAND_FAILED_CREATE-DEVICE'})
+            with patch.object(runner.subprocess, 'run', side_effect=OSError('private-marker')), \
+                 patch.object(runner, 'unavailable', return_value=True):
+                self.assertFalse(run.cleanup())
+            receipt = json.loads(run.receipt.read_text())
+            self.assertEqual(receipt['code'], 'COMMAND_FAILED_CREATE-DEVICE')
+            self.assertEqual(receipt['primaryCode'], 'COMMAND_FAILED_CREATE-DEVICE')
+            self.assertEqual(receipt['cleanupCode'], 'CLEANUP_FAILED')
+            self.assertEqual(receipt['cleanupErrors'], ['OWNED_DEVICE_CLEANUP'])
+            self.assertTrue(receipt['cleanupObservationUnavailable'])
+            self.assertNotIn('private-marker', json.dumps(receipt))
+
+    def test_network_canary_only_publishes_bounded_numeric_and_classification(self):
+        self.assertEqual(runner.canary_diagnostic(1, b'60\n', b''),
+                         {'exitCode': 1, 'errno': 60, 'stderrPresent': False, 'stderrClass': 'none'})
+        self.assertIsNone(runner.canary_diagnostic(1, b'256\n', b'')['errno'])
+        self.assertIsNone(runner.canary_diagnostic(1, b'1\nsecret', b'')['errno'])
+        for text, expected in ((b'sandbox-exec: syntax error private-marker', 'sandbox-profile-parse'),
+                               (b'sandbox-exec: sandbox_init failed private-marker', 'sandbox-apply'),
+                               (b'sandbox-exec: execvp python3: Operation not permitted private-marker', 'python-exec-denied'),
+                               (b'xcrun: no developer tools private-marker', 'python-shim'),
+                               (b'unknown private-marker', 'other')):
+            value = runner.canary_diagnostic(1, b'1\n', text)
+            self.assertTrue(value['stderrPresent'])
+            self.assertEqual(value['stderrClass'], expected)
+            self.assertNotIn('private-marker', json.dumps(value))
+        self.assertEqual(runner.canary_diagnostic(None, b'', b'x' * 32769)['stderrClass'], 'oversize')
+
+    def test_failed_network_canary_captures_errno_without_output_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self.diagnostic_run(Path(tmp))
+            process = SimpleNamespace(poll=lambda: 1, returncode=1)
+            def fake_popen(_args, **kwargs):
+                kwargs['stdout'].write(b'60\n')
+                kwargs['stderr'].write(b'xcrun: no developer tools private-marker')
+                return process
+            with patch.object(runner.subprocess, 'Popen', side_effect=fake_popen):
+                with self.assertRaisesRegex(runner.Refusal, 'COMMAND_FAILED_NETWORK-CANARY'):
+                    run.command('network-canary', ['unused'], 20)
+            self.assertEqual(run.result['lastCommand'], 'network-canary')
+            self.assertIs(run.result['commandSuccess']['network-canary'], False)
+            self.assertEqual(run.result['networkCanary'], {'exitCode': 1, 'errno': 60,
+                             'stderrPresent': True, 'stderrClass': 'python-shim'})
+            self.assertNotIn('private-marker', json.dumps(run.result))
 
 
 if __name__ == '__main__':
