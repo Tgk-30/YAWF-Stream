@@ -36,6 +36,9 @@ COMMAND_LABELS = frozenset(('xcode-version', 'runtimes', 'device-types', 'invent
                             'evaluate', 'export-attachments'))
 PHASES = frozenset(('initialization', 'host-admission', 'toolchain-admission', 'device-creation',
                     'native-build', 'device-boot', 'fixture-admission', 'native-test', 'evidence'))
+PROFILE_OPERATORS = frozenset(('version', 'allow', 'default', 'deny', 'network*', 'network-inbound',
+                               'network-outbound', 'local', 'remote', 'ip', 'file-write*', 'require-all',
+                               'require-not', 'subpath', 'literal'))
 
 
 class Refusal(Exception):
@@ -87,12 +90,19 @@ def canary_diagnostic(exit_code, stdout, stderr):
         if parsed <= 255: number = parsed
     present = isinstance(stderr, bytes) and bool(stderr)
     kind = 'none'
+    operator, parser_line = None, None
     if present and len(stderr) > 32768:
         kind = 'oversize'
     elif present:
         text = stderr.lower()
-        if b'sandbox' in text and any(x in text for x in (b'syntax error', b'error parsing', b'invalid profile', b'unexpected token', b'unknown filter', b'unknown operation')):
+        if b'unbound variable' in text or b'unbound-variable' in text:
+            kind = 'unbound-variable'
+        elif any(x in text for x in (b'syntax error', b'error parsing', b'invalid profile', b'unexpected token', b'unknown filter', b'unknown operation')):
             kind = 'sandbox-profile-parse'
+        elif b'sbpl' in text:
+            kind = 'sbpl-diagnostic'
+        elif re.search(rb'\binvalid\b', text):
+            kind = 'invalid-diagnostic'
         elif b'sandbox' in text and any(x in text for x in (b'sandbox_init', b'failed to apply', b'sandbox_apply')):
             kind = 'sandbox-apply'
         elif b'sandbox-exec:' in text and b'execvp' in text and b'python3' in text and any(x in text for x in (b'operation not permitted', b'permission denied')):
@@ -101,7 +111,14 @@ def canary_diagnostic(exit_code, stdout, stderr):
             kind = 'python-shim'
         else:
             kind = 'other'
-    return {'exitCode': code, 'errno': number, 'stderrPresent': present, 'stderrClass': kind}
+        if kind in ('unbound-variable', 'sandbox-profile-parse', 'sbpl-diagnostic', 'invalid-diagnostic'):
+            tokens = re.findall(rb'(?:unbound[- ]variable|unknown (?:operation|filter)|invalid operator)\s*[:=]?\s*[\x27\x22\x60]?([a-z][a-z0-9*-]{0,31})(?![a-z0-9*-])', text)
+            admitted = {token.decode('ascii') for token in tokens if token.decode('ascii') in PROFILE_OPERATORS}
+            if len(admitted) == 1: operator = admitted.pop()
+            lines = {int(value) for value in re.findall(rb'\bline(?:\s+number)?\s*[:#]?\s*([0-9]{1,4})\b', text)}
+            if len(lines) == 1 and 1 <= next(iter(lines)) <= 1000: parser_line = next(iter(lines))
+    return {'exitCode': code, 'errno': number, 'stderrPresent': present, 'stderrClass': kind,
+            'operator': operator, 'parserLine': parser_line}
 
 
 def measure_owned_device(device, runtime_root, expected_identity):
@@ -151,6 +168,8 @@ class Run:
         self.device_name = 'YAWFQA' + secrets.token_hex(5)
         self.fixture = None
         self.fixture_log = None
+        self.network_admitted = False
+        self.network_profile_sha = None
         self.commands = []
         self.before = None
         self.marker_seq = None
@@ -161,7 +180,7 @@ class Run:
                        'sourceSha': source_sha if re.fullmatch('[a-f0-9]{40}', source_sha) else None,
                        'sourceShaAdmitted': False, 'phase': 'initialization', 'lastCommand': None,
                        'commandSuccess': {}, 'primaryCode': None, 'cleanupCode': None,
-                       'cleanupObservationUnavailable': False}
+                       'cleanupObservationUnavailable': False, 'networkAdmitted': False}
         require(self.root.is_absolute() and not self.root.exists() and self.root.parent.resolve() == self.root.parent,
                 'FRESH_CANONICAL_ROOT_REQUIRED')
         require(self.receipt.is_absolute() and self.receipt.parent.is_dir() and self.receipt.parent.resolve() == self.receipt.parent and
@@ -221,7 +240,8 @@ class Run:
         canary = label == 'network-canary'
         stderr_path = self.root / f'{len(self.commands):03d}-network-canary-stderr.log'
         if canary:
-            self.result['networkCanary'] = {'exitCode': None, 'errno': None, 'stderrPresent': False, 'stderrClass': 'not-started'}
+            self.result['networkCanary'] = {'exitCode': None, 'errno': None, 'stderrPresent': False,
+                                            'stderrClass': 'not-started', 'operator': None, 'parserLine': None}
         with log.open('xb') as output:
             stderr_file = stderr_path.open('xb') if canary else None
             try:
@@ -287,6 +307,7 @@ class Run:
         filters = self.command('ffmpeg-filters', [str(ffmpeg), '-hide_banner', '-filters'], 20)
         encoders = self.command('ffmpeg-encoders', [str(ffmpeg), '-hide_banner', '-encoders'], 20)
         require(re.search(r'\bdrawtext\b', filters) and re.search(r'\blibx264\b', encoders) and re.search(r'\baac\b', encoders), 'FFMPEG_CAPABILITIES')
+        self.admit_network()
         self.monitor()
         self.set_phase('device-creation')
         self.create_attempted = True
@@ -310,8 +331,7 @@ class Run:
         self.command('boot', ['/usr/bin/xcrun', 'simctl', 'boot', self.device], 30)
         self.command('bootstatus', ['/usr/bin/xcrun', 'simctl', 'bootstatus', self.device, '-b'], 120)
 
-    def start_fixture(self):
-        self.set_phase('fixture-admission')
+    def admit_network(self):
         sandbox = self.root / 'configs/fixture.sb'
         sandbox.write_text(profile(self.root))
         # Both controls must fail by sandbox permission, not an unreachable network.
@@ -324,6 +344,15 @@ class Run:
         require(ff_canary.returncode != 0 and any(x in ff_canary.stderr for x in (b'Operation not permitted', b'Permission denied')), 'FFMPEG_NETWORK_CANARY')
         self.finish_command('ffmpeg-network-canary')
         self.monitor()
+        self.network_profile_sha = sha(sandbox)
+        self.network_admitted = True
+        self.result['networkAdmitted'] = True
+
+    def start_fixture(self):
+        self.set_phase('fixture-admission')
+        sandbox = self.root / 'configs/fixture.sb'
+        require(self.network_admitted is True and sandbox.is_file() and not sandbox.is_symlink() and
+                self.network_profile_sha is not None and sha(sandbox) == self.network_profile_sha, 'NETWORK_ADMISSION_REQUIRED')
         env = dict(self.env, HOME=str(self.root), IPAD_QA_CONTROL_TOKEN=self.token)
         self.fixture_log = (self.root / 'fixture.log').open('xb')
         self.start_command('fixture')

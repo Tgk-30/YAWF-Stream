@@ -27,6 +27,8 @@ class NativePolicyTests(unittest.TestCase):
         run.started = time.monotonic()
         run.fixture = None
         run.fixture_log = None
+        run.network_admitted = False
+        run.network_profile_sha = None
         run.device = None
         run.device_name = 'YAWFQATEST'
         run.create_attempted = False
@@ -202,7 +204,8 @@ class NativePolicyTests(unittest.TestCase):
 
     def test_network_canary_only_publishes_bounded_numeric_and_classification(self):
         self.assertEqual(runner.canary_diagnostic(1, b'60\n', b''),
-                         {'exitCode': 1, 'errno': 60, 'stderrPresent': False, 'stderrClass': 'none'})
+                         {'exitCode': 1, 'errno': 60, 'stderrPresent': False, 'stderrClass': 'none',
+                          'operator': None, 'parserLine': None})
         self.assertIsNone(runner.canary_diagnostic(1, b'256\n', b'')['errno'])
         self.assertIsNone(runner.canary_diagnostic(1, b'1\nsecret', b'')['errno'])
         for text, expected in ((b'sandbox-exec: syntax error private-marker', 'sandbox-profile-parse'),
@@ -215,6 +218,21 @@ class NativePolicyTests(unittest.TestCase):
             self.assertEqual(value['stderrClass'], expected)
             self.assertNotIn('private-marker', json.dumps(value))
         self.assertEqual(runner.canary_diagnostic(None, b'', b'x' * 32769)['stderrClass'], 'oversize')
+
+    def test_canary_sbpl_operator_and_line_are_allowlisted_and_never_raw(self):
+        cases = (
+            (b'unbound variable: network-outbound at line 4 /private/secret', 'unbound-variable', 'network-outbound', 4),
+            (b'unknown operation: network-inbound line: 6 /private/secret', 'sandbox-profile-parse', 'network-inbound', 6),
+            (b'SBPL diagnostic line 7 /private/secret', 'sbpl-diagnostic', None, 7),
+            (b'invalid argument line 8 /private/secret', 'invalid-diagnostic', None, 8),
+            (b'unbound variable: secret-marker line 1201', 'unbound-variable', None, None),
+            (b'unbound variable: network-outbound-evil line 1 line 2', 'unbound-variable', None, None),
+        )
+        for raw, kind, operator, line in cases:
+            with self.subTest(kind=kind, line=line):
+                result = runner.canary_diagnostic(65, b'', raw)
+                self.assertEqual((result['stderrClass'], result['operator'], result['parserLine']), (kind, operator, line))
+                self.assertNotIn('secret', json.dumps(result))
 
     def test_failed_network_canary_captures_errno_without_output_text(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -230,8 +248,52 @@ class NativePolicyTests(unittest.TestCase):
             self.assertEqual(run.result['lastCommand'], 'network-canary')
             self.assertIs(run.result['commandSuccess']['network-canary'], False)
             self.assertEqual(run.result['networkCanary'], {'exitCode': 1, 'errno': 60,
-                             'stderrPresent': True, 'stderrClass': 'python-shim'})
+                             'stderrPresent': True, 'stderrClass': 'python-shim', 'operator': None, 'parserLine': None})
             self.assertNotIn('private-marker', json.dumps(run.result))
+
+    def test_network_admission_precedes_create_and_fixture_requires_same_profile(self):
+        source = (HERE / 'run_native.py').read_text()
+        prepare = source.split('    def prepare(self):', 1)[1].split('    def admit_network(self):', 1)[0]
+        self.assertLess(prepare.index('self.admit_network()'), prepare.index('self.create_attempted = True'))
+        self.assertLess(prepare.index('self.admit_network()'), prepare.index("self.command('build'"))
+        fixture = source.split('    def start_fixture(self):', 1)[1].split('    def native(self):', 1)[0]
+        self.assertIn('self.network_admitted is True', fixture)
+        self.assertIn('sha(sandbox) == self.network_profile_sha', fixture)
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self.diagnostic_run(Path(tmp))
+            with patch.object(runner.subprocess, 'Popen') as spawn:
+                with self.assertRaisesRegex(runner.Refusal, 'NETWORK_ADMISSION_REQUIRED'):
+                    run.start_fixture()
+                spawn.assert_not_called()
+
+    def test_network_admission_requires_both_unchanged_negative_controls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / 'configs').mkdir()
+            run = self.diagnostic_run(root)
+            run.ffmpeg = Path('/test/ffmpeg')
+            run.result['networkAdmitted'] = False
+            with patch.object(run, 'command', return_value='') as python_canary, \
+                 patch.object(runner.subprocess, 'run', return_value=SimpleNamespace(returncode=1, stderr=b'Operation not permitted')) as ffmpeg_canary:
+                run.admit_network()
+            self.assertTrue(run.network_admitted)
+            self.assertTrue(run.result['networkAdmitted'])
+            self.assertEqual(run.network_profile_sha, runner.sha(root / 'configs/fixture.sb'))
+            args = python_canary.call_args.args
+            self.assertEqual(args[0], 'network-canary')
+            self.assertIn('errno.EPERM,errno.EACCES', args[1][-1])
+            self.assertEqual(args[2], 10)
+            self.assertEqual(ffmpeg_canary.call_args.kwargs['timeout'], 10)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / 'configs').mkdir()
+            run = self.diagnostic_run(root)
+            run.ffmpeg = Path('/test/ffmpeg')
+            run.result['networkAdmitted'] = False
+            with patch.object(run, 'command', return_value=''), \
+                 patch.object(runner.subprocess, 'run', return_value=SimpleNamespace(returncode=1, stderr=b'Network is unreachable')):
+                with self.assertRaisesRegex(runner.Refusal, 'FFMPEG_NETWORK_CANARY'):
+                    run.admit_network()
+            self.assertFalse(run.network_admitted)
+            self.assertFalse(run.result['networkAdmitted'])
 
 
 if __name__ == '__main__':
