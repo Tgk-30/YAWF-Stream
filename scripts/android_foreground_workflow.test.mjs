@@ -27,6 +27,8 @@ function contract(source) {
     "scripts/android_foreground_workflow.test.mjs",
     "scripts/android_foreground_refusal.py",
     "scripts/android_foreground_refusal_test.py",
+    "scripts/android_foreground_observer_diagnostic.mjs",
+    "scripts/android_foreground_observer_diagnostic.test.mjs",
   ]) assert.ok(source.includes(`- ${path}`));
   assert.match(source, /workflow_dispatch:[\s\S]*run_mode:[\s\S]*options: \[admission, full\]/);
   assert.match(source, /playback_case:[\s\S]*options: \[direct, hls\]/);
@@ -184,6 +186,13 @@ function contract(source) {
   assert.match(source, /if os\.environ\['NATIVE_TEST_OK'\]=='true':\s*assert set\(names\)==expected/);
   assert.match(source, /else:\s*assert set\(names\)<=expected and 'instrumentation-foreground-playback-receipt\.json' in names/);
   assert.match(source, /assert len\(names\)==len\(set\(names\)\), 'Duplicate native evidence filename'/);
+  assert.match(source, /FIXTURE_VALIDATOR="\$GITHUB_WORKSPACE\/fixture-source\/scripts\/ipad-foreground\/passive_observer\.mjs"/);
+  const observerExport = source.indexOf('node scripts/android_foreground_observer_diagnostic.mjs', refusalParser);
+  assert.ok(refusalParser < observerExport && observerExport < boundedCopy);
+  assert.match(source, /--input "\$fixture_output\/ipad-observations\.jsonl"/);
+  assert.match(source, /--validator "\$GITHUB_WORKSPACE\/fixture-source\/scripts\/ipad-foreground\/passive_observer\.mjs"/);
+  assert.match(source, /--output "\$EVIDENCE\/passive-observations\.json"/);
+  assert.match(source, /evidence_bytes\+=len\(data\); assert evidence_bytes<=42\*1024\*1024/);
   assert.match(source, /path: android-foreground-evidence/);
   assert.doesNotMatch(source, /path:.*instrumentation\.txt/);
 }

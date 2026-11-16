@@ -13,6 +13,8 @@ on:
       - scripts/android_foreground_workflow.test.mjs
       - scripts/android_foreground_refusal.py
       - scripts/android_foreground_refusal_test.py
+      - scripts/android_foreground_observer_diagnostic.mjs
+      - scripts/android_foreground_observer_diagnostic.test.mjs
   workflow_dispatch:
     inputs:
       run_mode:
@@ -188,8 +190,9 @@ jobs:
           set -euo pipefail
           (cd fixture-source/web && npm ci && npm run build)
           (cd fixture-source/server && npm ci)
-          node --test scripts/android_foreground_playback_receipt.test.mjs \
-            scripts/android_foreground_workflow.test.mjs
+          FIXTURE_VALIDATOR="$GITHUB_WORKSPACE/fixture-source/scripts/ipad-foreground/passive_observer.mjs" \
+            node --test scripts/android_foreground_playback_receipt.test.mjs \
+            scripts/android_foreground_workflow.test.mjs scripts/android_foreground_observer_diagnostic.test.mjs
           python3 -I -B scripts/android_foreground_refusal_test.py
           gradle --project-dir scripts/android-runtime-instrumentation --no-daemon --max-workers=2 \
             :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
@@ -413,6 +416,10 @@ jobs:
           set -e
           python3 -I -B scripts/android_foreground_refusal.py \
             --input "$RUNNER_TEMP/instrumentation.txt" --output "$EVIDENCE/refusal.json"
+          node scripts/android_foreground_observer_diagnostic.mjs \
+            --input "$fixture_output/ipad-observations.jsonl" \
+            --validator "$GITHUB_WORKSPACE/fixture-source/scripts/ipad-foreground/passive_observer.mjs" \
+            --output "$EVIDENCE/passive-observations.json"
           native_test_ok=false
           if [ "$instrumentation_status" -eq 0 ] && grep -Fq 'OK (1 test)' "$RUNNER_TEMP/instrumentation.txt"; then
             native_test_ok=true
@@ -439,12 +446,15 @@ jobs:
               assert set(names)<=expected and 'instrumentation-foreground-playback-receipt.json' in names, 'Unexpected partial native evidence inventory'
           assert len(names)==len(set(names)), 'Duplicate native evidence filename'
           out=Path(os.environ['EVIDENCE'])
+          assert all(p.is_file() and not p.is_symlink() for p in out.iterdir()), 'Unsafe evidence output entry'
+          evidence_bytes=sum(p.stat().st_size for p in out.iterdir())
           total=0
           for name in sorted(names):
               data=subprocess.check_output(adb+base+['cat',folder+'/'+name])
               limit=8*1024*1024 if name.endswith('.png') else 64*1024
               assert 0<len(data)<=limit
               total+=len(data); assert total<=40*1024*1024+64*1024
+              evidence_bytes+=len(data); assert evidence_bytes<=42*1024*1024
               (out/name).write_bytes(data)
           PY
           test "$instrumentation_status" -eq 0
