@@ -41,7 +41,7 @@ class NativePolicyTests(unittest.TestCase):
         run.cheap_monitor = lambda: None
         run.last_census_completed = None
         run.result = {'status': 'refused', 'fullQualification': False, 'deviceCreated': False, 'deviceDeleted': False,
-                      'phase': 'host-admission', 'lastCommand': None, 'commandSuccess': {},
+                      'phase': 'host-admission', 'lastCommand': None, 'commandSuccess': {}, 'successfulCommandGroups': {},
                       'primaryCode': None, 'cleanupCode': None, 'cleanupObservationUnavailable': False,
                       'resourceDiagnostic': {'bootstatusDeferredPolls': 0, 'postBootCensusCompleted': False}}
         return run
@@ -387,6 +387,82 @@ class NativePolicyTests(unittest.TestCase):
                         run.command('inventory', ['unused'], 0 if timeout else 20)
                 self.assertEqual(run.result['lastCommand'], 'inventory')
                 self.assertIs(run.result['commandSuccess']['inventory'], False)
+
+    def test_successful_finite_command_probes_without_signalling_or_stopping(self):
+        for probe_error, expected in ((None, True), (ProcessLookupError(), False),
+                                      (PermissionError('privateSentinel'), 'unavailable')):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as tmp:
+                run = self.diagnostic_run(Path(tmp))
+                process = SimpleNamespace(pid=4321, poll=lambda: 0, returncode=0)
+                with patch.object(runner.subprocess, 'Popen', return_value=process), \
+                     patch.object(runner.os, 'killpg', side_effect=probe_error) as probe, \
+                     patch.object(run, 'stop') as stop:
+                    run.command('build', ['unused'], 20)
+                stop.assert_not_called()
+                probe.assert_called_once_with(4321, 0)
+                self.assertTrue(run.result['commandSuccess']['build'])
+                self.assertEqual(run.result['successfulCommandGroups']['build'], {
+                    'lingering': expected, 'state': 'point-in-time-unattributed',
+                    'anyUnattributed': expected is not False})
+                self.assertNotIn('privateSentinel', json.dumps(run.result))
+                self.assertNotIn('4321', json.dumps(run.result))
+
+    def test_unsuccessful_finite_command_always_stops_group(self):
+        for mode in ('nonzero', 'timeout', 'monitor'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                run = self.diagnostic_run(Path(tmp))
+                process = SimpleNamespace(pid=4321, poll=lambda: 1 if mode == 'nonzero' else None,
+                                          returncode=1 if mode == 'nonzero' else None)
+                if mode == 'monitor':
+                    run.monitor = lambda **_kwargs: (_ for _ in ()).throw(runner.Refusal('MONITOR_FAILURE'))
+                with patch.object(runner.subprocess, 'Popen', return_value=process), \
+                     patch.object(run, 'stop') as stop, patch.object(runner.os, 'killpg') as probe:
+                    with self.assertRaises(runner.Refusal):
+                        run.command('build', ['unused'], 0 if mode == 'timeout' else 20)
+                stop.assert_called_once_with(process)
+                probe.assert_not_called()
+                self.assertFalse(run.result['commandSuccess']['build'])
+                self.assertEqual(run.result['successfulCommandGroups'], {})
+
+    def test_unattributed_success_allows_boot_but_refuses_fixture_even_after_later_clear(self):
+        for first in (True, 'unavailable'):
+            with self.subTest(first=first), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / 'configs').mkdir()
+                sandbox = root / 'configs/fixture.sb'
+                sandbox.write_text('owned-profile')
+                run = self.diagnostic_run(root)
+                run.network_admitted = True
+                run.network_profile_sha = runner.sha(sandbox)
+                run.result['resourceDiagnostic']['postBootCensusCompleted'] = True
+                process = SimpleNamespace(pid=4321, poll=lambda: 0, returncode=0)
+                error = None if first is True else PermissionError('privateSentinel')
+                with patch.object(runner.subprocess, 'Popen', return_value=process), \
+                     patch.object(runner.os, 'killpg', side_effect=error), patch.object(run, 'stop') as stop:
+                    run.command('bootstatus', ['unused'], 120)
+                    stop.assert_not_called()
+                self.assertTrue(run.result['commandSuccess']['bootstatus'])
+                with patch.object(runner.os, 'killpg', side_effect=ProcessLookupError()):
+                    run.observe_successful_group('bootstatus', process)
+                group = run.result['successfulCommandGroups']['bootstatus']
+                self.assertFalse(group['lingering'])
+                self.assertTrue(group['anyUnattributed'])
+                with patch.object(runner.subprocess, 'Popen') as spawn:
+                    with self.assertRaisesRegex(runner.Refusal, 'SUCCESS_GROUP_UNATTRIBUTED'):
+                        run.start_fixture()
+                    spawn.assert_not_called()
+                self.assertFalse((root / 'fixture.log').exists())
+                self.assertFalse(run.result['fullQualification'])
+                self.assertNotIn('privateSentinel', json.dumps(run.result))
+
+    def test_fixture_cleanup_still_stops_persistent_fixture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self.diagnostic_run(Path(tmp))
+            fixture = object()
+            run.fixture = fixture
+            with patch.object(run, 'stop') as stop, patch.object(runner, 'unavailable', return_value=True):
+                run.cleanup()
+            stop.assert_called_once_with(fixture)
 
     def test_bootstatus_defers_due_censuses_without_changing_snapshot_age(self):
         for label in ('bootstatus', 'build'):

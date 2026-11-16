@@ -315,7 +315,7 @@ class Run:
                        'deviceDeleted': False, 'fixtureBoundaryOnly': True, 'simulatorWideEgressIsolation': False,
                        'sourceSha': source_sha if re.fullmatch('[a-f0-9]{40}', source_sha) else None,
                        'sourceShaAdmitted': False, 'phase': 'initialization', 'lastCommand': None,
-                       'commandSuccess': {}, 'primaryCode': None, 'cleanupCode': None,
+                       'commandSuccess': {}, 'successfulCommandGroups': {}, 'primaryCode': None, 'cleanupCode': None,
                        'cleanupObservationUnavailable': False, 'networkAdmitted': False}
         require(self.root.is_absolute() and not self.root.exists() and self.root.parent.resolve() == self.root.parent,
                 'FRESH_CANONICAL_ROOT_REQUIRED')
@@ -486,6 +486,20 @@ class Run:
         except ProcessLookupError: pass
         if process.poll() is None: process.wait(timeout=4)
 
+    def observe_successful_group(self, label, process):
+        require(label in COMMAND_LABELS, 'INVALID_COMMAND_LABEL')
+        try:
+            os.killpg(process.pid, 0)
+            lingering = True
+        except ProcessLookupError:
+            lingering = False
+        except Exception:
+            lingering = 'unavailable'
+        groups = self.result['successfulCommandGroups']
+        previous = groups.get(label, {})
+        groups[label] = {'lingering': lingering, 'state': 'point-in-time-unattributed',
+                         'anyUnattributed': previous.get('anyUnattributed', False) or lingering is not False}
+
     def command(self, label, args, seconds, *, env=None, monitor=True):
         self.start_command(label)
         log = self.root / f'{len(self.commands):03d}-{label}.log'
@@ -501,6 +515,7 @@ class Run:
                                            env=env or self.env, start_new_session=True)
                 end = min(self.deadline - CLEANUP_SECONDS, time.monotonic() + seconds)
                 boot_diagnostic = BootStatusDiagnostic(time.monotonic()) if label == 'bootstatus' else None
+                successful = False
                 def poll():
                     if boot_diagnostic is not None: boot_diagnostic.poll_count += 1
                     return process.poll()
@@ -520,12 +535,15 @@ class Run:
                     completed = poll()
                     require(completed is not None and time.monotonic() < end, 'COMMAND_TIMEOUT_' + label.upper())
                     require(process.returncode == 0, 'COMMAND_FAILED_' + label.upper())
+                    successful = True
                 finally:
                     if boot_diagnostic is not None:
                         boot_end = time.monotonic()
                         boot_diagnostic.observe_log(output.fileno(), boot_end)
                         self.result['bootstatusDiagnostic'] = boot_diagnostic.finish(boot_end, end, process.returncode)
-                    try: self.stop(process)
+                    try:
+                        if successful: self.observe_successful_group(label, process)
+                        else: self.stop(process)
                     finally:
                         if canary:
                             output.flush(); stderr_file.flush()
@@ -626,6 +644,8 @@ class Run:
         require(self.network_admitted is True and sandbox.is_file() and not sandbox.is_symlink() and
                 self.network_profile_sha is not None and sha(sandbox) == self.network_profile_sha, 'NETWORK_ADMISSION_REQUIRED')
         require(self.result.get('resourceDiagnostic', {}).get('postBootCensusCompleted') is True, 'POST_BOOT_CENSUS_REQUIRED')
+        require(all(value.get('anyUnattributed') is False for value in self.result['successfulCommandGroups'].values()),
+                'SUCCESS_GROUP_UNATTRIBUTED')
         env = dict(self.env, HOME=str(self.root), IPAD_QA_CONTROL_TOKEN=self.token)
         self.fixture_log = (self.root / 'fixture.log').open('xb')
         self.start_command('fixture')
