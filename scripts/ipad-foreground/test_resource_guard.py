@@ -155,6 +155,88 @@ class ResourceGuardTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(guard.Refusal):
                 guard.measure(path)
 
+    def test_diagnostic_scan_can_measure_past_old_acceptance_without_admitting_it(self):
+        self.assertEqual(guard.MAX_FILES, 6000)
+        self.assertEqual(guard.MEASUREMENT_ENTRIES, 24000)
+        self.assertEqual(guard.MEASUREMENT_SECONDS, 60)
+        (self.root / 'first').write_bytes(b'1')
+        (self.root / 'second').write_bytes(b'2')
+        with patch.object(guard, 'MAX_FILES', 1):
+            with self.assertRaisesRegex(guard.Refusal, 'RUNTIME_FILE_COUNT_LIMIT'):
+                guard.measure(self.root)
+            budget = guard.CensusBudget(lambda: None)
+            observed = guard.measure(self.root, census=budget)
+        self.assertTrue(observed['complete'])
+        self.assertEqual(observed['files'], 2)
+        self.assertEqual(observed['entryCount'], 3)
+        self.assertEqual(budget.entries, 3)
+
+    def test_shared_measurement_ceiling_retains_partial_scalar_facts(self):
+        (self.root / 'first').write_bytes(b'1')
+        (self.root / 'second').write_bytes(b'2')
+        budget = guard.CensusBudget(lambda: None, max_entries=2)
+        with self.assertRaisesRegex(guard.Refusal, 'MEASUREMENT_ENTRY_LIMIT') as caught:
+            guard.measure(self.root, census=budget)
+        partial = caught.exception.census_partial
+        self.assertFalse(partial['complete'])
+        self.assertEqual(partial['entryCount'], 2)
+        self.assertEqual(budget.entries, 2)
+        self.assertNotIn(str(self.root), str(partial))
+
+    def test_cooperative_callback_and_absolute_census_deadline(self):
+        clock = SimpleNamespace(now=0.0)
+        calls = []
+        budget = guard.CensusBudget(lambda: calls.append(clock.now), clock=lambda: clock.now)
+        for value in (0.1, 0.49, 0.5, 0.75, 1.0):
+            clock.now = value
+            budget.tick()
+        self.assertEqual(calls, [0.5, 1.0])
+        clock.now = 60
+        with self.assertRaisesRegex(guard.Refusal, 'MEASUREMENT_60S_LIMIT'):
+            budget.tick()
+
+    def test_callback_schedule_is_anchored_to_call_start(self):
+        clock = SimpleNamespace(now=0.0)
+        calls = []
+        def check():
+            calls.append(clock.now)
+            clock.now += 0.25
+        budget = guard.CensusBudget(check, clock=lambda: clock.now)
+        clock.now = 0.5; budget.tick()
+        clock.now = 1.0; budget.tick()
+        self.assertEqual(calls, [0.5, 1.0])
+
+    def test_entry_and_time_ceilings_are_shared_across_role_scans(self):
+        first = self.root / 'first-role'; first.mkdir(); (first / 'a').write_bytes(b'a')
+        second = self.root / 'second-role'; second.mkdir(); (second / 'b').write_bytes(b'b')
+        budget = guard.CensusBudget(lambda: None, max_entries=3)
+        self.assertTrue(guard.measure(first, census=budget)['complete'])
+        with self.assertRaisesRegex(guard.Refusal, 'MEASUREMENT_ENTRY_LIMIT') as caught:
+            guard.measure(second, census=budget)
+        self.assertEqual(caught.exception.census_partial['entryCount'], 1)
+        self.assertFalse(caught.exception.census_partial['complete'])
+        self.assertEqual(budget.entries, 3)
+        clock = SimpleNamespace(now=0.0)
+        timed = guard.CensusBudget(lambda: None, clock=lambda: clock.now)
+        clock.now = 60.0
+        with self.assertRaisesRegex(guard.Refusal, 'MEASUREMENT_60S_LIMIT') as timeout:
+            guard.measure(first, census=timed)
+        self.assertEqual(timeout.exception.census_partial['entryCount'], 0)
+        self.assertFalse(timeout.exception.census_partial['complete'])
+
+    def test_callback_refusal_keeps_partial_and_never_serializes_paths(self):
+        (self.root / 'privateSentinel').write_bytes(b'x')
+        clock = SimpleNamespace(now=0.0)
+        def now():
+            clock.now += 0.26
+            return clock.now
+        def refuse(): raise guard.Refusal('REMAINING_6_GIB_REQUIRED')
+        budget = guard.CensusBudget(refuse, clock=now)
+        with self.assertRaisesRegex(guard.Refusal, 'REMAINING_6_GIB_REQUIRED') as caught:
+            guard.measure(self.root, census=budget)
+        self.assertFalse(caught.exception.census_partial['complete'])
+        self.assertNotIn('privateSentinel', str(caught.exception.census_partial))
+
 
 if __name__ == "__main__":
     unittest.main()

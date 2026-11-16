@@ -9,16 +9,44 @@ from pathlib import Path
 import errno
 import os
 import stat
+import time
 
 START_FREE = 8_053_063_680
 REMAINING_FREE = 6_442_450_944
 MAX_ALLOCATED = 1_610_612_736
 MAX_DIAGNOSTIC = 262_144_000
 MAX_FILES = 6_000
+MEASUREMENT_ENTRIES = 24_000
+MEASUREMENT_SECONDS = 60
 
 
 class Refusal(RuntimeError):
     pass
+
+
+class CensusBudget:
+    """Shared diagnostic ceiling, independent of the unchanged admission caps."""
+    def __init__(self, callback, *, clock=None, max_entries=MEASUREMENT_ENTRIES,
+                 seconds=MEASUREMENT_SECONDS):
+        self.callback = callback
+        self.clock = clock if clock is not None else time.monotonic
+        self.max_entries = max_entries
+        self.started = self.clock()
+        self.deadline = self.started + seconds
+        self.next_check = self.started + 0.5
+        self.entries = 0
+
+    def tick(self, *, entry=False):
+        now = self.clock()
+        if now >= self.deadline: raise Refusal('MEASUREMENT_60S_LIMIT')
+        if now >= self.next_check:
+            self.next_check = now + 0.5
+            self.callback()
+            now = self.clock()
+            if now >= self.deadline: raise Refusal('MEASUREMENT_60S_LIMIT')
+        if entry:
+            if self.entries >= self.max_entries: raise Refusal('MEASUREMENT_ENTRY_LIMIT')
+            self.entries += 1
 
 
 def _flags():
@@ -43,10 +71,13 @@ def _root_fd(root):
         raise
 
 
-def measure(root):
+def measure(root, *, census=None):
     result = {"allocatedBytes": 0, "logicalBytes": 0,
               "diagnosticLogicalBytes": 0, "files": 0,
               "directories": 0, "symlinkCount": 0, "disappearedChildren": 0}
+    if census is not None:
+        result["entryCount"] = 0
+        result["complete"] = False
     seen = set()
 
     def account(info):
@@ -67,6 +98,9 @@ def measure(root):
         result["directories"] += 1
         with os.scandir(fd) as entries:
             for entry in entries:
+                if census is not None:
+                    census.tick(entry=True)
+                    result["entryCount"] += 1
                 try:
                     info = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
                 except FileNotFoundError:
@@ -77,7 +111,7 @@ def measure(root):
                     # read, stat through, or traverse its potentially external target.
                     account(info)
                     result["symlinkCount"] += 1
-                    if result["files"] + result["symlinkCount"] > MAX_FILES:
+                    if census is None and result["files"] + result["symlinkCount"] > MAX_FILES:
                         raise Refusal("RUNTIME_FILE_COUNT_LIMIT")
                     result["logicalBytes"] += info.st_size
                     if (parts + (entry.name,))[0] not in ("Derived", "tmp", "configs"):
@@ -104,18 +138,30 @@ def measure(root):
                     account(info)
                     if stat.S_ISREG(info.st_mode):
                         result["files"] += 1
-                        if result["files"] + result["symlinkCount"] > MAX_FILES:
+                        if census is None and result["files"] + result["symlinkCount"] > MAX_FILES:
                             raise Refusal("RUNTIME_FILE_COUNT_LIMIT")
                         result["logicalBytes"] += info.st_size
                         # Derived build products, temporary scratch, and private
                         # XCTest configs are not retained diagnostic receipts.
                         if (parts + (entry.name,))[0] not in ("Derived", "tmp", "configs"):
                             result["diagnosticLogicalBytes"] += info.st_size
-    fd = _root_fd(root)
     try:
-        visit(fd, ())
-    finally:
-        os.close(fd)
+        if census is not None:
+            census.tick(entry=True)
+            result["entryCount"] += 1
+        fd = _root_fd(root)
+        try:
+            visit(fd, ())
+        finally:
+            os.close(fd)
+        if census is not None:
+            census.tick()
+            result["complete"] = True
+    except Exception as error:
+        if census is not None:
+            try: error.census_partial = dict(result)
+            except Exception: pass
+        raise
     return result
 
 

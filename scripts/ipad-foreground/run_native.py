@@ -31,6 +31,14 @@ DEVELOPER = '/Applications/Xcode_26.5.app/Contents/Developer'
 SELECTOR = 'SafariNativeInputTests/IPadForegroundTests/testInstalledPwaForeground'
 ABSOLUTE_SECONDS = 1500
 CLEANUP_SECONDS = 60
+CENSUS_INTERVAL_SECONDS = 30
+RESOURCE_CODES = frozenset(('ABSOLUTE_DEADLINE', 'REMAINING_6_GIB_REQUIRED', 'RUNTIME_ROOT_CHANGED',
+    'RECEIPT_ROOT_CHANGED', 'OWNED_DEVICE_UUID_PATH', 'OWNED_DEVICE_DIRECTORY_REQUIRED', 'OWNED_DEVICE_IDENTITY_CHANGED',
+    'OWNED_DEVICE_VOLUME_MISMATCH', 'RUNTIME_FILE_COUNT_LIMIT', 'RUNTIME_1P5_GIB_CAP', 'DIAGNOSTIC_250_MIB_CAP',
+    'COMBINED_DIAGNOSTIC_CAP', 'OWNED_DEVICE_AND_RUNTIME_CAP', 'MEASUREMENT_60S_LIMIT', 'MEASUREMENT_ENTRY_LIMIT',
+    'DIRECTORY_REPLACED', 'DIRECTORY_IDENTITY_CHANGED', 'DIRECTORY_REQUIRED', 'BLOCK_COUNT_UNAVAILABLE',
+    'DIRECTORY_NOFOLLOW_UNAVAILABLE', 'ABSOLUTE_OWNED_ROOT_REQUIRED'))
+RESOURCE_FIELDS = ('allocatedBytes', 'logicalBytes', 'diagnosticLogicalBytes', 'files', 'directories', 'symlinkCount', 'entryCount')
 COMMAND_LABELS = frozenset(('xcode-version', 'runtimes', 'device-types', 'inventory', 'ffmpeg-filters',
                             'ffmpeg-encoders', 'create-device', 'build', 'boot', 'bootstatus',
                             'network-canary', 'ffmpeg-network-canary', 'fixture', 'native-test',
@@ -185,6 +193,19 @@ def native_refusal_code(text):
     return match.group(1) if match else None
 
 
+def directory_facts(path, failure):
+    try:
+        fd = guard._root_fd(path)
+        try:
+            info = os.fstat(fd)
+            volume = os.fstatvfs(fd)
+            return (info.st_dev, info.st_ino), volume.f_bavail * volume.f_frsize
+        finally:
+            os.close(fd)
+    except OSError:
+        raise Refusal(failure) from None
+
+
 class BootStatusDiagnostic:
     """Only monotonic timings, counts and owned-log size, never log contents."""
     def __init__(self, started):
@@ -236,7 +257,7 @@ class BootStatusDiagnostic:
                 'firstGrowthMs': self.first_growth, 'lastGrowthMs': self.last_growth, 'exitClass': exit_class}
 
 
-def measure_owned_device(device, runtime_root, expected_identity):
+def measure_owned_device(device, runtime_root, expected_identity, *, census=None):
     """Admit and recheck the exact device directory without following links."""
     device = Path(device)
     try:
@@ -254,7 +275,7 @@ def measure_owned_device(device, runtime_root, expected_identity):
             require(info.st_dev == os.fstat(root_fd).st_dev, 'OWNED_DEVICE_VOLUME_MISMATCH')
         finally:
             os.close(root_fd)
-        usage = guard.measure(device)
+        usage = guard.measure(device, census=census) if census is not None else guard.measure(device)
         verify_fd = guard._root_fd(device)
         try:
             final = os.fstat(verify_fd)
@@ -304,6 +325,12 @@ class Run:
         self.root.mkdir(mode=0o700)
         for name in ('tmp', 'Derived', 'configs', 'fixture'):
             (self.root / name).mkdir(mode=0o700)
+        self.root_identity, _ = directory_facts(self.root, 'RUNTIME_ROOT_CHANGED')
+        self.receipt_identity, _ = directory_facts(self.receipt.parent, 'RECEIPT_ROOT_CHANGED')
+        self.last_census_completed = None
+        self.result['resourceDiagnostic'] = {'schemaVersion': 1, 'fullScanCount': 0, 'totalScanMs': 0.0,
+            'maxScanMs': 0.0, 'minFreeBytes': None, 'last': None,
+            'peak': {'combinedAllocatedBytes': 0, 'combinedIsLowerBound': False, 'roles': {}}, 'refusal': None}
         self.env = dict(os.environ, DEVELOPER_DIR=DEVELOPER, TMPDIR=str(self.root / 'tmp'),
                         CLANG_MODULE_CACHE_PATH=str(self.root / 'tmp/clang-modules'),
                         SWIFT_MODULE_CACHE_PATH=str(self.root / 'tmp/swift-modules'))
@@ -322,18 +349,113 @@ class Run:
         require(label in COMMAND_LABELS and self.result['lastCommand'] == label, 'INVALID_COMMAND_LABEL')
         self.result['commandSuccess'][label] = True
 
-    def monitor(self):
-        require(time.monotonic() < self.deadline - CLEANUP_SECONDS, 'ABSOLUTE_DEADLINE')
-        usage = guard.admit_runtime(self.root)
-        public_usage = guard.measure(self.receipt.parent)
-        allocated = usage['allocatedBytes'] + public_usage['allocatedBytes']
-        require(usage['diagnosticLogicalBytes'] + public_usage['logicalBytes'] <= guard.MAX_DIAGNOSTIC - 4096,
-                'COMBINED_DIAGNOSTIC_CAP')
-        if self.device:
-            device = Path.home() / 'Library/Developer/CoreSimulator/Devices' / self.device
-            device_usage, self.device_identity = measure_owned_device(device, self.root, self.device_identity)
-            allocated += device_usage['allocatedBytes']
-        require(allocated <= guard.MAX_ALLOCATED - 4096, 'OWNED_DEVICE_AND_RUNTIME_CAP')
+    def resource_context(self):
+        phase = self.result.get('phase')
+        if phase not in PHASES: phase = 'initialization'
+        fixture = self.result.get('fixtureDiagnostic')
+        stage = fixture.get('stage') if isinstance(fixture, dict) else None
+        if stage not in FIXTURE_STAGES: stage = None
+        return {'phase': phase, 'lastFixtureStage': stage}
+
+    def resource_refusal(self, error, role):
+        code = str(error) if str(error) in RESOURCE_CODES else 'RESOURCE_CHECK_FAILED'
+        self.result['resourceDiagnostic']['refusal'] = {**self.resource_context(), 'role': role, 'code': code}
+
+    def cheap_monitor(self):
+        role = 'runtime'
+        try:
+            require(time.monotonic() < self.deadline - CLEANUP_SECONDS, 'ABSOLUTE_DEADLINE')
+            identity, free = directory_facts(self.root, 'RUNTIME_ROOT_CHANGED')
+            require(identity == self.root_identity, 'RUNTIME_ROOT_CHANGED')
+            role = 'receipt'
+            receipt_identity, receipt_free = directory_facts(self.receipt.parent, 'RECEIPT_ROOT_CHANGED')
+            require(receipt_identity == self.receipt_identity, 'RECEIPT_ROOT_CHANGED')
+            minimum = min(free, receipt_free)
+            if self.device:
+                role = 'device'
+                try: require(str(uuid.UUID(self.device)).upper() == self.device.upper(), 'OWNED_DEVICE_UUID_PATH')
+                except ValueError: raise Refusal('OWNED_DEVICE_UUID_PATH') from None
+                device = Path.home() / 'Library/Developer/CoreSimulator/Devices' / self.device
+                device_identity, device_free = directory_facts(device, 'OWNED_DEVICE_DIRECTORY_REQUIRED')
+                require(device_identity[0] == identity[0], 'OWNED_DEVICE_VOLUME_MISMATCH')
+                if self.device_identity is not None:
+                    require(device_identity == self.device_identity, 'OWNED_DEVICE_IDENTITY_CHANGED')
+                else:
+                    self.device_identity = device_identity
+                minimum = min(minimum, device_free)
+            diagnostic = self.result['resourceDiagnostic']
+            previous = diagnostic['minFreeBytes']
+            diagnostic['minFreeBytes'] = minimum if previous is None else min(previous, minimum)
+            require(minimum >= guard.REMAINING_FREE, 'REMAINING_6_GIB_REQUIRED')
+        except Exception as error:
+            self.resource_refusal(error, role)
+            raise
+
+    def record_census(self, roles, complete, started):
+        diagnostic = self.result['resourceDiagnostic']
+        elapsed = round(max(0.0, time.monotonic() - started) * 1000, 3)
+        diagnostic['fullScanCount'] += 1
+        diagnostic['totalScanMs'] = round(diagnostic['totalScanMs'] + elapsed, 3)
+        diagnostic['maxScanMs'] = max(diagnostic['maxScanMs'], elapsed)
+        combined = sum(value['allocatedBytes'] for value in roles.values() if value is not None)
+        safe_roles = {}
+        for role, value in roles.items():
+            if value is None:
+                safe_roles[role] = None
+                continue
+            safe_roles[role] = {key: value[key] for key in RESOURCE_FIELDS}
+            safe_roles[role]['complete'] = value['complete']
+            peak = diagnostic['peak']['roles'].setdefault(role, {**{key: 0 for key in RESOURCE_FIELDS}, 'complete': True})
+            for key in RESOURCE_FIELDS: peak[key] = max(peak[key], value[key])
+            peak['complete'] = peak['complete'] and value['complete']
+        if combined > diagnostic['peak']['combinedAllocatedBytes']:
+            diagnostic['peak']['combinedAllocatedBytes'] = combined
+            diagnostic['peak']['combinedIsLowerBound'] = not complete
+        diagnostic['last'] = {**self.resource_context(), 'snapshotKind': 'last-census-not-current',
+                              'complete': complete, 'roles': safe_roles, 'combinedAllocatedBytes': combined,
+                              'combinedIsLowerBound': not complete}
+
+    def full_census(self):
+        started = time.monotonic()
+        roles = {'runtime': None, 'receipt': None, 'device': None}
+        role = 'runtime'
+        complete = False
+        budget = guard.CensusBudget(self.cheap_monitor)
+        try:
+            roles['runtime'] = guard.measure(self.root, census=budget)
+            role = 'receipt'
+            roles['receipt'] = guard.measure(self.receipt.parent, census=budget)
+            if self.device:
+                role = 'device'
+                device = Path.home() / 'Library/Developer/CoreSimulator/Devices' / self.device
+                roles['device'], self.device_identity = measure_owned_device(device, self.root, self.device_identity, census=budget)
+            self.cheap_monitor()
+            complete = True
+        except Exception as error:
+            partial = getattr(error, 'census_partial', None)
+            if isinstance(partial, dict): roles[role] = partial
+            if self.result['resourceDiagnostic']['refusal'] is None:
+                self.resource_refusal(error, role)
+            raise
+        finally:
+            self.record_census(roles, complete, started)
+            if complete: self.last_census_completed = time.monotonic()
+        for role, value in roles.items():
+            if value is not None and value['files'] + value['symlinkCount'] > guard.MAX_FILES:
+                error = guard.Refusal('RUNTIME_FILE_COUNT_LIMIT'); self.resource_refusal(error, role); raise error
+        if roles['runtime']['allocatedBytes'] > guard.MAX_ALLOCATED - 4096:
+            error = guard.Refusal('RUNTIME_1P5_GIB_CAP'); self.resource_refusal(error, 'runtime'); raise error
+        if roles['runtime']['diagnosticLogicalBytes'] > guard.MAX_DIAGNOSTIC - 4096:
+            error = guard.Refusal('DIAGNOSTIC_250_MIB_CAP'); self.resource_refusal(error, 'runtime'); raise error
+        if roles['runtime']['diagnosticLogicalBytes'] + roles['receipt']['logicalBytes'] > guard.MAX_DIAGNOSTIC - 4096:
+            error = Refusal('COMBINED_DIAGNOSTIC_CAP'); self.resource_refusal(error, 'receipt'); raise error
+        if sum(value['allocatedBytes'] for value in roles.values() if value is not None) > guard.MAX_ALLOCATED - 4096:
+            error = Refusal('OWNED_DEVICE_AND_RUNTIME_CAP'); self.resource_refusal(error, 'device' if roles['device'] else 'runtime'); raise error
+
+    def monitor(self, *, force=False):
+        self.cheap_monitor()
+        if force or self.last_census_completed is None or time.monotonic() - self.last_census_completed >= CENSUS_INTERVAL_SECONDS:
+            self.full_census()
 
     def stop(self, process):
         if not process: return
@@ -380,7 +502,8 @@ class Run:
                                     boot_diagnostic.monitor_finished(monitor_start, monitor_end)
                                     boot_diagnostic.observe_log(output.fileno(), monitor_end)
                         time.sleep(.5)
-                    require(poll() is not None, 'COMMAND_TIMEOUT_' + label.upper())
+                    completed = poll()
+                    require(completed is not None and time.monotonic() < end, 'COMMAND_TIMEOUT_' + label.upper())
                     require(process.returncode == 0, 'COMMAND_FAILED_' + label.upper())
                 finally:
                     if boot_diagnostic is not None:
@@ -449,19 +572,21 @@ class Run:
         self.device = candidate.upper()
         self.result['deviceCreated'] = True
         # Refuse rather than quietly exclude owned simulator allocations.
-        self.monitor()
+        self.monitor(force=True)
         fresh = self.inventory()
         require(self.device in fresh and fresh[self.device][0] == RUNTIME and fresh[self.device][1].get('deviceTypeIdentifier') == DEVICE and fresh[self.device][1].get('name') == self.device_name, 'NEW_DEVICE_IDENTITY')
         self.set_phase('native-build')
         self.command('build', ['/usr/bin/xcodebuild', 'build-for-testing', '-project', str(PROJECT), '-scheme', 'NativeQA',
                               '-destination', 'platform=iOS Simulator,id=' + self.device, '-derivedDataPath', str(self.root / 'Derived'),
                               '-parallel-testing-enabled', 'NO', '-jobs', '1', 'CODE_SIGNING_ALLOWED=NO'], 300)
+        self.monitor(force=True)
         runs = list((self.root / 'Derived/Build/Products').glob('*.xctestrun'))
         require(len(runs) == 1 and runs[0].is_file() and not runs[0].is_symlink(), 'ONE_XCTESTRUN_REQUIRED')
         self.xctestrun = runs[0]
         self.set_phase('device-boot')
         self.command('boot', ['/usr/bin/xcrun', 'simctl', 'boot', self.device], 30)
         self.command('bootstatus', ['/usr/bin/xcrun', 'simctl', 'bootstatus', self.device, '-b'], 120)
+        self.monitor(force=True)
 
     def admit_network(self):
         sandbox = self.root / 'configs/fixture.sb'
@@ -505,6 +630,7 @@ class Run:
             if isinstance(value, dict):
                 if value.get('status') == 'refused': raise Refusal('FIXTURE_REFUSED')
                 if value.get('status') == 'ready':
+                    self.monitor(force=True)
                     self.finish_command('fixture')
                     return
             time.sleep(.5)
@@ -582,6 +708,7 @@ class Run:
         require(begin[0] == lane.upper() and int(begin[1]) == seconds, 'NATIVE_LANE_MISMATCH')
         require('Executed 1 test, with 0 failures' in text, 'EXACT_ONE_NATIVE_TEST_REQUIRED')
         self.finish_command('native-test')
+        self.monitor(force=True)
         self.set_phase('evidence')
         # Permit late asynchronous collector delivery, without touching media.
         time.sleep(3)
@@ -620,6 +747,7 @@ class Run:
             staging = self.root / 'tmp/validated-anchors'
             anchors.extract(export, staging, lane, seconds, self.result['sourceSha'], self.result['assetProvenance'])
             self.result['anchorManifestSha256'] = sha(staging / 'manifest.json')
+            self.monitor(force=True)
             require(not output.exists() and self.root.stat().st_dev == self.receipt.parent.stat().st_dev, 'ATOMIC_ANCHOR_PUBLISH_REQUIRED')
             staging.rename(output)
             self.monitor()
