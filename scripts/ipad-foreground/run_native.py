@@ -74,9 +74,9 @@ def profile(root):
     text = str(root)
     require(not any(x in text for x in ('"', '\\', '\n', '\r', '\0')), 'SANDBOX_PATH_REFUSED')
     return ('(version 1)\n(allow default)\n(deny network*)\n'
-            '(allow network-inbound (local ip "127.0.0.1:43120"))\n'
-            '(allow network-inbound (local ip "127.0.0.1:43121"))\n'
-            '(allow network-outbound (remote ip "127.0.0.1:*"))\n'
+            '(allow network-inbound (local ip "localhost:43120"))\n'
+            '(allow network-inbound (local ip "localhost:43121"))\n'
+            '(allow network-outbound (remote ip "localhost:*"))\n'
             '(deny file-write* (require-all '
             f'(require-not (subpath "{text}")) (require-not (literal "/dev/null"))))\n')
 
@@ -119,6 +119,17 @@ def canary_diagnostic(exit_code, stdout, stderr):
             if len(lines) == 1 and 1 <= next(iter(lines)) <= 1000: parser_line = next(iter(lines))
     return {'exitCode': code, 'errno': number, 'stderrPresent': present, 'stderrClass': kind,
             'operator': operator, 'parserLine': parser_line}
+
+
+def native_refusal_code(text):
+    if not isinstance(text, str) or len(text) > 8 * 1024 * 1024:
+        return None
+    prefix = 'IPAD_QA_NATIVE_REFUSAL='
+    lines = [line[:-1] if line.endswith('\r') else line for line in text.split('\n') if line.startswith(prefix)]
+    if len(lines) != 1:
+        return None
+    match = re.fullmatch(r'IPAD_QA_NATIVE_REFUSAL=([A-Za-z0-9_-]{1,96})', lines[0])
+    return match.group(1) if match else None
 
 
 def measure_owned_device(device, runtime_root, expected_identity):
@@ -428,6 +439,14 @@ class Run:
                                     (self.root / 'fixture/hold-segments').write_text('hold\n')
                     time.sleep(.5)
                 require(process.poll() is not None, 'NATIVE_TIMEOUT')
+                if process.returncode != 0:
+                    try:
+                        log.flush()
+                        if logpath.stat().st_size <= 8 * 1024 * 1024:
+                            refusal = native_refusal_code(logpath.read_text(errors='replace'))
+                            if refusal is not None: self.result['nativeRefusalCode'] = refusal
+                    except (OSError, UnicodeError):
+                        pass
                 require(process.returncode == 0, 'NATIVE_TEST_FAILED')
             finally:
                 self.stop(process)

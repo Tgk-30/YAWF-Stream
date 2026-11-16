@@ -351,7 +351,7 @@ final class IPadForegroundTests: XCTestCase {
         }
         throw QARefusal.failed("FULL_WINDOW_OBSERVATION_REQUIRED")
     }
-    func testInstalledPwaForeground() async throws {
+    private func runInstalledPwaForeground() async throws {
         try config()
         try await install()
         try await login()
@@ -389,5 +389,22 @@ final class IPadForegroundTests: XCTestCase {
         fflush(stdout)
         // No playback pass is asserted here. The host evaluates private event,
         // producer, manifest, decoded-clock, and held-segment evidence separately.
+    }
+
+    func testInstalledPwaForeground() async throws {
+        do {
+            try await runInstalledPwaForeground()
+        } catch {
+            var code = "UNEXPECTED_FAILURE"
+            if let refusal = error as? QARefusal, case let .failed(raw) = refusal,
+               !raw.isEmpty && raw.utf8.count <= 96 && raw.utf8.allSatisfy({ byte in
+                   (65...90).contains(byte) || (97...122).contains(byte) || (48...57).contains(byte) || byte == 95 || byte == 45
+               }) {
+                code = raw
+            }
+            print("IPAD_QA_NATIVE_REFUSAL=\(code)")
+            fflush(stdout)
+            throw error
+        }
     }
 }

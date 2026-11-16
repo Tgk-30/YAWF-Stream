@@ -3,6 +3,7 @@ import importlib.util
 import os
 import json
 from pathlib import Path
+import plistlib
 import tempfile
 import time
 from types import SimpleNamespace
@@ -44,9 +45,10 @@ class NativePolicyTests(unittest.TestCase):
     def test_profile_denies_network_and_allows_only_fixture_loopback(self):
         profile = runner.profile(Path('/qa/owned'))
         self.assertIn('(deny network*)', profile)
-        self.assertIn('(remote ip "127.0.0.1:*")', profile)
-        self.assertIn('(local ip "127.0.0.1:43120")', profile)
-        self.assertIn('(local ip "127.0.0.1:43121")', profile)
+        self.assertIn('(remote ip "localhost:*")', profile)
+        self.assertIn('(local ip "localhost:43120")', profile)
+        self.assertIn('(local ip "localhost:43121")', profile)
+        self.assertNotIn('127.0.0.1', profile)
         self.assertNotIn('(allow network*)', profile)
         self.assertIn('(require-not (subpath "/qa/owned"))', profile)
         with self.assertRaises(runner.Refusal): runner.profile(Path('/qa/"bad'))
@@ -124,6 +126,48 @@ class NativePolicyTests(unittest.TestCase):
         self.assertIn('item.isSelected || (item.value as? String) == "1"', section)
         self.assertIn('button(menu, "Close playback settings")', section)
         self.assertIn('QUALITY_MENU_REOPEN_LIMIT', section)
+
+    def test_native_refusal_marker_is_single_exact_and_sanitized(self):
+        marker = 'IPAD_QA_NATIVE_REFUSAL='
+        for code in ('TIMED_WAIT', 'a_B-9', 'a' * 96, 'UNEXPECTED_FAILURE'):
+            self.assertEqual(runner.native_refusal_code('other\n' + marker + code + '\n'), code)
+        for text in (marker, marker + 'a' * 97, marker + '/private/token', marker + 'space code',
+                     marker + 'OK\n' + marker + 'OTHER', marker + 'OK\n' + marker + '/invalid',
+                     'prefix ' + marker + 'CODE', marker + 'CODE\u2028secret', 'x' * (8 * 1024 * 1024 + 1)):
+            self.assertIsNone(runner.native_refusal_code(text))
+        swift = (HERE / 'NativeQA/UITests/SafariNativeInputTests.swift').read_text()
+        wrapper = swift.split('    func testInstalledPwaForeground() async throws {', 1)[1]
+        self.assertIn('try await runInstalledPwaForeground()', wrapper)
+        self.assertIn('raw.utf8.count <= 96', wrapper)
+        self.assertIn('raw.utf8.allSatisfy', wrapper)
+        self.assertEqual(wrapper.count('IPAD_QA_NATIVE_REFUSAL='), 1)
+        self.assertIn('throw error', wrapper)
+        self.assertNotIn('localizedDescription', wrapper)
+
+    def test_native_nonzero_records_only_one_marker_and_keeps_failure(self):
+        for body, expected in ((b'IPAD_QA_NATIVE_REFUSAL=TIMED_WAIT\n', 'TIMED_WAIT'),
+                               (b'IPAD_QA_NATIVE_REFUSAL=/private/secret\n', None),
+                               (b'IPAD_QA_NATIVE_REFUSAL=ONE\nIPAD_QA_NATIVE_REFUSAL=TWO\n', None)):
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / 'configs').mkdir()
+                run = self.diagnostic_run(root)
+                run.case = 'admission-direct'
+                run.device = str(uuid.uuid4()).upper()
+                run.token = 'a' * 64
+                run.xctestrun = root / 'test.xctestrun'
+                run.xctestrun.write_bytes(plistlib.dumps({'SafariNativeInputTests': {'EnvironmentVariables': {}}}))
+                process = SimpleNamespace(poll=lambda: 1, returncode=1)
+                def fake_popen(_args, **kwargs):
+                    kwargs['stdout'].write(body)
+                    return process
+                with patch.object(runner.subprocess, 'Popen', side_effect=fake_popen):
+                    with self.assertRaisesRegex(runner.Refusal, 'NATIVE_TEST_FAILED'):
+                        run.native()
+                self.assertEqual(run.result.get('nativeRefusalCode'), expected)
+                self.assertEqual(run.result['lastCommand'], 'native-test')
+                self.assertIs(run.result['commandSuccess']['native-test'], False)
+                self.assertNotIn('/private/secret', json.dumps(run.result))
 
     def test_only_fixed_phases_and_command_labels_can_enter_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:
