@@ -1,8 +1,9 @@
 """Fail-closed accounting for one disposable hosted iPad QA runtime.
 
-Allocation counts unique device/inode blocks, including directories. Retained
-output has a separate logical-byte limit. A disappearing child can be ignored;
-symlinks, access errors and directory replacement cannot be treated as free space.
+Allocation counts unique device/inode blocks, including directories and link
+metadata, without following symlink targets. Retained output has a separate
+logical-byte limit. Root components, access errors and directory replacement
+remain fail-closed; a disappearing child can be ignored.
 """
 from pathlib import Path
 import errno
@@ -45,7 +46,7 @@ def _root_fd(root):
 def measure(root):
     result = {"allocatedBytes": 0, "logicalBytes": 0,
               "diagnosticLogicalBytes": 0, "files": 0,
-              "directories": 0, "disappearedChildren": 0}
+              "directories": 0, "symlinkCount": 0, "disappearedChildren": 0}
     seen = set()
 
     def account(info):
@@ -72,7 +73,16 @@ def measure(root):
                     result["disappearedChildren"] += 1
                     continue
                 if stat.S_ISLNK(info.st_mode):
-                    raise Refusal("RUNTIME_SYMLINK_REFUSED")
+                    # Only the link inode is part of this census. Never resolve,
+                    # read, stat through, or traverse its potentially external target.
+                    account(info)
+                    result["symlinkCount"] += 1
+                    if result["files"] + result["symlinkCount"] > MAX_FILES:
+                        raise Refusal("RUNTIME_FILE_COUNT_LIMIT")
+                    result["logicalBytes"] += info.st_size
+                    if (parts + (entry.name,))[0] not in ("Derived", "tmp", "configs"):
+                        result["diagnosticLogicalBytes"] += info.st_size
+                    continue
                 if stat.S_ISDIR(info.st_mode):
                     try:
                         child = os.open(entry.name, _flags(), dir_fd=fd)
@@ -94,7 +104,7 @@ def measure(root):
                     account(info)
                     if stat.S_ISREG(info.st_mode):
                         result["files"] += 1
-                        if result["files"] > MAX_FILES:
+                        if result["files"] + result["symlinkCount"] > MAX_FILES:
                             raise Refusal("RUNTIME_FILE_COUNT_LIMIT")
                         result["logicalBytes"] += info.st_size
                         # Derived build products, temporary scratch, and private
