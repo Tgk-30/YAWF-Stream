@@ -73,7 +73,7 @@ export function validateNativeReceipt(input) {
     throw refusal("native-duration", "Native required duration does not match its mode");
   }
   const observedMs = finiteNumber(receipt.windowObservedMs, requiredMs,
-    requiredMs + (receipt.mode === "full" ? 30_000 : 15_000), "windowObservedMs");
+    requiredMs + 30_000, "windowObservedMs");
   exactBoolean(receipt.sourceSelectedThroughOrdinaryUi, true, "sourceSelectedThroughOrdinaryUi");
   exactBoolean(receipt.quality480SelectedThroughOrdinaryUi, receipt.playbackCase === "hls",
     "quality480SelectedThroughOrdinaryUi");

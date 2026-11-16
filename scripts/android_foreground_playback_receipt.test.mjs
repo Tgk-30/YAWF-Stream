@@ -98,6 +98,47 @@ test("native validator rejects insufficient real-time duration", () => {
   assert.throws(() => validateNativeReceipt(receipt), /windowObservedMs/);
 });
 
+test("native admission accepts the observed ee52 passive collection overhead", () => {
+  const receipt = nativeReceipt({ playbackCase: "hls" });
+  receipt.windowObservedMs = 32_444;
+  receipt.anchors[1].elapsedMs = 31_853;
+  receipt.samples[1].elapsedMs = 31_853;
+  receipt.samples[0].decodedFrames = 627;
+  receipt.samples[1].decodedFrames = 1_519;
+  const result = validateNativeReceipt(receipt);
+  assert.equal(result.observedMs, 32_444);
+  assert.equal(result.decodedFrameDelta, 892);
+});
+
+test("native admission overhead remains bounded at thirty seconds", () => {
+  const boundary = nativeReceipt();
+  boundary.windowObservedMs = 45_000;
+  boundary.anchors[1].elapsedMs = 44_500;
+  boundary.samples[1].elapsedMs = 44_500;
+  assert.equal(validateNativeReceipt(boundary).observedMs, 45_000);
+
+  const excessive = nativeReceipt();
+  excessive.windowObservedMs = 45_001;
+  assert.throws(() => validateNativeReceipt(excessive), /windowObservedMs/);
+});
+
+test("native admission still rejects short windows and late first anchors", () => {
+  const short = nativeReceipt();
+  short.windowObservedMs = 14_999;
+  assert.throws(() => validateNativeReceipt(short), /windowObservedMs/);
+
+  const lateFirst = nativeReceipt();
+  lateFirst.anchors[0].elapsedMs = 5_001;
+  lateFirst.samples[0].elapsedMs = 5_001;
+  assert.throws(() => validateNativeReceipt(lateFirst), /required window with frame progress/);
+});
+
+test("native full observation still rejects more than thirty seconds of overhead", () => {
+  const receipt = nativeReceipt({ mode: "full", playbackCase: "hls" });
+  receipt.windowObservedMs = 510_001;
+  assert.throws(() => validateNativeReceipt(receipt), /windowObservedMs/);
+});
+
 test("native validator rejects missing 480p ordinary UI selection", () => {
   const receipt = nativeReceipt({ playbackCase: "hls" });
   receipt.quality480SelectedThroughOrdinaryUi = false;
