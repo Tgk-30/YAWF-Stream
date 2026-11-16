@@ -36,13 +36,13 @@ on:
         required: true
         type: choice
         default: direct
-        options: [direct, hls]
+        options: [direct, hls, auto-mkv]
 
 permissions:
   contents: read
 
 concurrency:
-  group: android-foreground-qa-${{ github.ref }}-${{ github.event_name == 'push' && 'branch-matrix' || inputs.run_mode || 'admission' }}
+  group: android-foreground-qa-${{ github.ref }}-${{ github.event_name == 'push' && 'branch-matrix' || inputs.playback_case || 'direct' }}-${{ inputs.run_mode || 'admission' }}
   cancel-in-progress: false
 
 jobs:
@@ -70,7 +70,7 @@ jobs:
       PUBLIC_APK_BYTES: "88812417"
       PUBLIC_APK_SHA256: c585e5f3344fd9c0cdef28e30ddb44f6ca355540088461e95fe0503695ff00b4
       PUBLIC_SOURCE_SHA: 017098f3c609c0b275d91d0f658f77b1d371eaef
-      FIXTURE_SOURCE_SHA: 25574d680ec58ce96975014c5e7f6e35a4b87b01
+      FIXTURE_SOURCE_SHA: 60e59b3dc62cec0f491e3789b2a0ed80f31cc43a
       PUBLIC_APK_URL: https://github.com/Tgk-30/YAWF-Stream/releases/download/android-v2.3.105/YAWF.Stream_Android_2.3.105.apk
       SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
       AVD_NAME: yawf-foreground-phone105-api36
@@ -108,6 +108,12 @@ jobs:
           umask 077
           test "$(git -C public-source rev-parse HEAD)" = "$PUBLIC_SOURCE_SHA"
           test "$(git -C fixture-source rev-parse HEAD)" = "$FIXTURE_SOURCE_SHA"
+          test "$(sha256sum fixture-source/scripts/ipad-foreground/passive_observer.mjs | awk '{print $1}')" = 73d12d475d280ce430993bcbd709a38e4b8f970cbd9e58d39fabe9a2259b0369
+          if [ "$REQUESTED_CASE" = auto-mkv ]; then
+            test "${{ github.event_name }}" = workflow_dispatch
+            test "$REQUESTED_MODE" = full
+            test "$REQUESTED_PRESENTATION" = normal-diagnostic
+          fi
           free_bytes="$(df -PB1 "$RUNNER_TEMP" | awk 'NR==2 {print $4}')"
           test "$free_bytes" -ge $((12 * 1024 * 1024 * 1024))
           mkdir -p "$EVIDENCE"
@@ -236,7 +242,11 @@ jobs:
           presentation="$REQUESTED_PRESENTATION"
           case "$presentation" in details) :;; normal-diagnostic) test "$mode" = full && test "${{ github.event_name }}" = workflow_dispatch;; *) exit 2;; esac
           case "$mode" in admission) instrument_timeout=300;; full) instrument_timeout=900;; *) exit 2;; esac
-          case "$playback_case" in direct|hls) :;; *) exit 2;; esac
+          case "$playback_case" in
+            direct|hls) :;;
+            auto-mkv) test "$mode" = full && test "$presentation" = normal-diagnostic && test "${{ github.event_name }}" = workflow_dispatch;;
+            *) exit 2;;
+          esac
 
           export ANDROID_USER_HOME="$RUNNER_TEMP/yawf-foreground-android"
           export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
@@ -367,11 +377,13 @@ jobs:
           ipad_qa_control_token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
           test "${#ipad_qa_control_token}" -eq 64
           test -z "${ipad_qa_control_token//[0-9a-f]/}"
+          fixture_extra=()
+          if [ "$playback_case" = auto-mkv ]; then fixture_extra=(--source-mkv); fi
           IPAD_QA_CONTROL_TOKEN="$ipad_qa_control_token" setsid node \
             --import "$GITHUB_WORKSPACE/fixture-source/server/node_modules/tsx/dist/loader.mjs" \
             "$GITHUB_WORKSPACE/fixture-source/scripts/android_external_player_server_fixture.mts" \
             --repo "$GITHUB_WORKSPACE/fixture-source" --output "$fixture_output" \
-            --foreground-long --ipad-foreground > "$RUNNER_TEMP/fixture.log" 2>&1 &
+            --foreground-long --ipad-foreground "${fixture_extra[@]}" > "$RUNNER_TEMP/fixture.log" 2>&1 &
           fixture_pid=$!
           unset ipad_qa_control_token
           fixture_identity="$(process_identity "$fixture_pid")"

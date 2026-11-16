@@ -13,12 +13,65 @@ const encode = x => Buffer.from(JSON.stringify(x) + '\n');
 const row = { kind: 'browser', elapsedMs: 42, observation: { safe: true } };
 const valid = x => Object.keys(x).join(',') === 'safe' && x.safe === true;
 const hash = x => createHash('sha256').update(x).digest('hex');
+const generation = 'a'.repeat(64), stream = 'b'.repeat(64), argvHash = 'c'.repeat(64);
+const hls = overrides => ({ kind: 'hls-response', elapsedMs: 10, method: 'GET', status: 200, stream, generation,
+  asset: '480p_segment.ts', segment: 0, quality: null, start: null, frontier: null, endlist: null, ...overrides });
+const producer = overrides => ({ kind: 'producer-start', elapsedMs: 9, ordinal: 1, generation, argvHash,
+  inputLocal: true, codec: 'libx264', hls: true, eventPlaylist: true, segmentSeconds: 6, fixed480: true, ...overrides });
 
 test('collect retains validated browser data and counts but drops other rows', () => {
   const input = Buffer.concat([encode(row), encode({ kind: 'server', secret: 'https://private.invalid/' })]);
   const result = collect(input, valid);
-  assert.deepEqual(result, { rows: [row], otherRows: 1 });
+  assert.deepEqual(result, { rows: [row], otherRows: 1, hlsFirstFragmentDiagnostic: {
+    scope: 'server-generation-stream-diagnostic-only', browserCorrelationEstablished: false,
+    firstBrowserClocks: { loadedmetadata: null, playing: null }, firstSuccessfulGetFragments: [],
+  } });
   assert(!JSON.stringify(result).includes('private.invalid'));
+});
+
+test('derives only bounded first-fragment, manifest, producer and uncorrelated browser clocks', () => {
+  const browser = (elapsedMs, event, at, currentTime) => ({ kind: 'browser', elapsedMs, observation: { event, at, currentTime, safe: true } });
+  const browserValid = value => ['loadedmetadata', 'playing'].includes(value.event) && Number.isFinite(value.at) &&
+    Number.isFinite(value.currentTime) && value.safe === true;
+  const manifest = hls({ elapsedMs: 4, asset: 'index.m3u8', segment: null, quality: '480p', start: '0', frontier: '12.5', endlist: '0' });
+  const input = Buffer.concat([
+    encode(manifest), encode(producer({ elapsedMs: 5 })),
+    encode(browser(6, 'loadedmetadata', 100, 0)), encode(hls({ elapsedMs: 7, segment: 3 })),
+    encode(hls({ elapsedMs: 8, segment: 4 })), encode(browser(9, 'playing', 200, 2.25)),
+    encode({ kind: 'server-future', elapsedMs: 'private', url: 'https://private.invalid/' }),
+  ]);
+  const result = collect(input, browserValid);
+  assert.equal(result.otherRows, 5);
+  assert.deepEqual(result.hlsFirstFragmentDiagnostic, {
+    scope: 'server-generation-stream-diagnostic-only', browserCorrelationEstablished: false,
+    firstBrowserClocks: {
+      loadedmetadata: { event: 'loadedmetadata', elapsedMs: 6, documentClockMs: 100, mediaClockSeconds: 0 },
+      playing: { event: 'playing', elapsedMs: 9, documentClockMs: 200, mediaClockSeconds: 2.25 },
+    },
+    firstSuccessfulGetFragments: [{
+      generation, stream, fragmentOrdinal: 3,
+      response: { elapsedMs: 7, status: 200, quality: '480p', startSeconds: 0, frontierSeconds: 12.5, endlist: false },
+      producerStartCount: 1,
+      producerStart: { generation, elapsedMs: 5, ordinal: 1, inputLocal: true, fixed480: true },
+    }],
+  });
+  assert(!JSON.stringify(result).includes('private.invalid'));
+});
+
+test('recognized server records require exact shapes, enums, bounds and monotonic accepted clocks', () => {
+  const malformed = [
+    hls({ url: 'https://private.invalid/' }), hls({ method: 'POST' }), hls({ status: 99 }), hls({ stream: 'x'.repeat(64) }),
+    hls({ generation: 'x'.repeat(64) }), hls({ asset: 'private.ts' }), hls({ segment: 100_000 }),
+    hls({ quality: 'private' }), hls({ start: '01' }), hls({ start: '86401' }), hls({ frontier: 'Infinity' }),
+    hls({ frontier: '604801' }), hls({ endlist: 'true' }), hls({ elapsedMs: 86_400_001 }),
+    producer({ ordinal: 0 }), producer({ generation: 'x'.repeat(64) }), producer({ argvHash: 'x'.repeat(64) }),
+    producer({ codec: 'private' }), producer({ hls: 1 }), producer({ segmentSeconds: 5 }), producer({ private: true }),
+  ];
+  for (const value of malformed) assert.throws(() => collect(encode(value), valid));
+  assert.throws(() => collect(Buffer.concat([encode(hls({ elapsedMs: 10 })), encode(producer({ elapsedMs: 9 }))]), valid));
+  assert.throws(() => collect(encode(hls({ asset: 'index.m3u8', segment: 0 })), valid));
+  assert.throws(() => collect(encode(hls({ asset: '480p_segment.ts', segment: null })), valid));
+  assert.doesNotThrow(() => collect(encode(hls({ asset: 'index.m3u8', segment: null, start: '120', frontier: '600.1234567' })), valid));
 });
 
 test('rejects malformed, duplicate, extra or unsafe browser values and row limits', () => {

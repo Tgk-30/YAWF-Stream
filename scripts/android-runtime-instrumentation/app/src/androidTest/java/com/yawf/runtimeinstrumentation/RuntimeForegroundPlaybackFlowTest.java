@@ -65,6 +65,7 @@ public final class RuntimeForegroundPlaybackFlowTest {
             "1080p Synthetic Fixture Movie 2026 1080p WEB-DL x264 Synthetic Fixture Movie 2026 1080p WEB-DL x264 1080p · H.264 · WEB-DL · - · 0 seeders · Synthetic Fixture Cache unknown";
     private static final String USERNAME = "fixture-owner";
     private static final String PASSWORD = "fixture-owner-password";
+    private static final String MKV_FILE = "Synthetic.Fixture.Movie.2026.1080p.WEB-DL.x264.mkv";
     private static final String DIRECT_ENGINE = "Webview direct";
     private static final String HLS_ENGINE = "Webview HLS transcode";
 
@@ -117,7 +118,8 @@ public final class RuntimeForegroundPlaybackFlowTest {
         assertTrue("Unsupported presentation", presentation.equals("details") || presentation.equals("normal-diagnostic"));
         assertTrue("Normal diagnostic requires full mode", !presentation.equals("normal-diagnostic") || mode.equals("full"));
         assertTrue("Unsupported playbackMode", mode.equals("admission") || mode.equals("full"));
-        assertTrue("Unsupported playbackCase", playbackCase.equals("direct") || playbackCase.equals("hls"));
+        assertTrue("Unsupported playbackCase", playbackCase.equals("direct") || playbackCase.equals("hls") || playbackCase.equals("auto-mkv"));
+        assertTrue("Auto MKV requires full normal diagnostic", !playbackCase.equals("auto-mkv") || (mode.equals("full") && presentation.equals("normal-diagnostic")));
         windowMs = mode.equals("full") ? FULL_WINDOW_MS : ADMISSION_WINDOW_MS;
 
         String evidenceSubdir = arguments.getString("evidenceSubdir", EVIDENCE_SUBDIR);
@@ -301,8 +303,13 @@ public final class RuntimeForegroundPlaybackFlowTest {
         phase = "opening-read-only-details";
         openDetailsOnce();
         UiObject2 details = waitForUniqueDetailsDialog(SHORT_WAIT_MS);
-        String expectedEngine = playbackCase.equals("hls") ? HLS_ENGINE : DIRECT_ENGINE;
+        String expectedEngine = playbackCase.equals("direct") ? DIRECT_ENGINE : HLS_ENGINE;
         waitForExactTextWithin(details, expectedEngine, MEDIA_WAIT_MS, "expected playback engine");
+        if (playbackCase.equals("auto-mkv")) {
+            assertEquals("Expected selected MKV file in player details", MKV_FILE,
+                    readDefinitionValue(details, "File", exactLabel(MKV_FILE)));
+            assertTrue("Auto MKV must not select quality manually", !qualitySelected);
+        }
         FrameSample readyStats = waitForReadableStats(details, MEDIA_WAIT_MS);
         if (presentation.equals("normal-diagnostic")) {
             runNormalDiagnostic(details, readyStats);
@@ -840,7 +847,11 @@ public final class RuntimeForegroundPlaybackFlowTest {
             normal.put("playbackCase", playbackCase);
             normal.put("windowRequiredMs", FULL_WINDOW_MS);
             normal.put("windowObservedMs", windowStartedMs >= 0 && windowEndedMs >= windowStartedMs ? windowEndedMs - windowStartedMs : 0);
-            normal.put("preWindowEngine", playbackCase.equals("hls") ? HLS_ENGINE : DIRECT_ENGINE);
+            normal.put("preWindowEngine", playbackCase.equals("direct") ? DIRECT_ENGINE : HLS_ENGINE);
+            if (playbackCase.equals("auto-mkv")) {
+                normal.put("preWindowFile", MKV_FILE);
+                normal.put("manualQualitySelected", qualitySelected);
+            }
             normal.put("preWindowDecodedFrames", normalPreWindow == null ? JSONObject.NULL : normalPreWindow.decodedFrames);
             normal.put("detailsClosedBeforeWindow", normalDetailsClosed);
             normal.put("preWindowPlayingControlVerified", normalPlayingControl);

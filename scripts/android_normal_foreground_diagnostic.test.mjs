@@ -43,3 +43,27 @@ test('normal observation is separate and fails semantic mutants', () => {
     assert.throws(() => validate(value, dir));
   } finally { rmSync(dir, {recursive: true, force: true}); }
 });
+
+test('auto MKV is an HLS capture only, with exact file and no quality action', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'normal-mkv-'));
+  try {
+    const value = fixture(dir);
+    value.playbackCase = 'auto-mkv';
+    value.preWindowFile = 'Synthetic.Fixture.Movie.2026.1080p.WEB-DL.x264.mkv';
+    value.manualQualitySelected = false;
+    for (const anchor of value.anchors) {
+      const data = Buffer.from(`image-${anchor.ordinal - 1}`);
+      anchor.file = anchor.file.replace('-hls.png', '-auto-mkv.png');
+      writeFileSync(join(dir, anchor.file), data);
+    }
+    assert.equal(validate(value, dir).outcome, 'normal-viewing-capture-collected');
+    assert.throws(() => validateNativeReceipt(value));
+    for (const mutate of [
+      x => x.preWindowFile = 'Synthetic.Fixture.Movie.2026.1080p.WEB-DL.x264.mp4',
+      x => delete x.preWindowFile, x => x.manualQualitySelected = true,
+      x => x.preWindowEngine = 'Webview direct', x => x.fullQualification = true,
+      x => x.hostedAdmission = true, x => x.productionCauseEstablished = true,
+      x => x.anchors[0].file = 'normal-anchor-01-hls.png',
+    ]) { const copy = structuredClone(value); mutate(copy); assert.throws(() => validate(copy, dir)); }
+  } finally { rmSync(dir, {recursive: true, force: true}); }
+});

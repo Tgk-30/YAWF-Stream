@@ -117,7 +117,7 @@ function contract(source) {
     "scripts/android_foreground_observer_diagnostic.test.mjs",
   ]) assert.ok(source.includes(`- ${path}`));
   assert.match(source, /workflow_dispatch:[\s\S]*run_mode:[\s\S]*options: \[admission, full\]/);
-  assert.match(source, /playback_case:[\s\S]*options: \[direct, hls\]/);
+  assert.match(source, /playback_case:[\s\S]*options: \[direct, hls, auto-mkv\]/);
   assert.match(source, /permissions:\n  contents: read/);
   assert.doesNotMatch(source, /pull_request:|schedule:|contents: write|packages: write/);
   assert.equal((source.match(/persist-credentials: false/g) ?? []).length, 3);
@@ -139,7 +139,7 @@ function contract(source) {
   assert.match(source, /PUBLIC_APK_BYTES: "88812417"/);
   assert.match(source, /PUBLIC_APK_SHA256: c585e5f3344fd9c0cdef28e30ddb44f6ca355540088461e95fe0503695ff00b4/);
   assert.match(source, /PUBLIC_SOURCE_SHA: 017098f3c609c0b275d91d0f658f77b1d371eaef/);
-  assert.match(source, /FIXTURE_SOURCE_SHA: 25574d680ec58ce96975014c5e7f6e35a4b87b01/);
+  assert.match(source, /FIXTURE_SOURCE_SHA: 60e59b3dc62cec0f491e3789b2a0ed80f31cc43a/);
   assert.match(source, /github\.com\/Tgk-30\/YAWF-Stream\/releases\/download\/android-v2\.3\.105\/YAWF\.Stream_Android_2\.3\.105\.apk/);
   assert.match(source, /--proto '=https' --proto-redir '=https'/);
   assert.match(source, /--connect-timeout 15 --max-time 180/);
@@ -560,4 +560,36 @@ test('normal viewing is explicit manual full only and preserves the no-input epo
   assert.match(body, /player\.findObjects\(By\.desc\(exactLabel\("Play"\)\)\)/);
   assert.match(body, /captureNormalAnchor\(index \+ 1, elapsedMs\);[\s\S]*clearCache\(\)[\s\S]*assertNormalOwnership\(\)/);
   assert.match(driver, /!presentation\.equals\("normal-diagnostic"\) \|\| mode\.equals\("full"\)/);
+});
+
+function autoMkvContract(source, java) {
+  assert.match(source, /FIXTURE_SOURCE_SHA: 60e59b3dc62cec0f491e3789b2a0ed80f31cc43a/);
+  assert.match(source, /sha256sum fixture-source\/scripts\/ipad-foreground\/passive_observer\.mjs[^\n]*73d12d475d280ce430993bcbd709a38e4b8f970cbd9e58d39fabe9a2259b0369/);
+  assert.match(source, /if \[ "\$REQUESTED_CASE" = auto-mkv \]; then\s*test "\$\{\{ github\.event_name \}\}" = workflow_dispatch\s*test "\$REQUESTED_MODE" = full\s*test "\$REQUESTED_PRESENTATION" = normal-diagnostic/);
+  assert.match(source, /fixture_extra=\(\)\s*if \[ "\$playback_case" = auto-mkv \]; then fixture_extra=\(--source-mkv\); fi/);
+  assert.match(source, /--foreground-long --ipad-foreground "\$\{fixture_extra\[@\]\}"/);
+  assert.match(java, /!playbackCase\.equals\("auto-mkv"\) \|\| \(mode\.equals\("full"\) && presentation\.equals\("normal-diagnostic"\)\)/);
+  assert.match(java, /if \(playbackCase\.equals\("hls"\)\) \{\s*phase = "selecting-480p"/);
+  assert.match(java, /readDefinitionValue\(details, "File", exactLabel\(MKV_FILE\)\)/);
+  assert.match(java, /assertTrue\("Auto MKV must not select quality manually", !qualitySelected\)/);
+  assert.match(java, /playbackCase\.equals\("direct"\) \? DIRECT_ENGINE : HLS_ENGINE/);
+}
+test('auto MKV is manual full only with exact source and no quality action', () => {
+  autoMkvContract(workflow, driver);
+  for (const [from, to] of [
+    ['test "$REQUESTED_MODE" = full', 'test "$REQUESTED_MODE" = admission'],
+    ['test "$REQUESTED_PRESENTATION" = normal-diagnostic', 'test "$REQUESTED_PRESENTATION" = details'],
+    ['fixture_extra=(--source-mkv)', 'fixture_extra=()'],
+  ]) {
+    assert.equal(workflow.split(from).length, 2);
+    assert.throws(() => autoMkvContract(workflow.replace(from, to), driver));
+  }
+  for (const [from, to] of [
+    ['readDefinitionValue(details, "File", exactLabel(MKV_FILE))', 'MKV_FILE'],
+    ['assertTrue("Auto MKV must not select quality manually", !qualitySelected)', 'assertTrue("Auto MKV must not select quality manually", true)'],
+    ['if (playbackCase.equals("hls")) {\n            phase = "selecting-480p"', 'if (!playbackCase.equals("direct")) {\n            phase = "selecting-480p"'],
+  ]) {
+    assert.equal(driver.split(from).length, 2);
+    assert.throws(() => autoMkvContract(workflow, driver.replace(from, to)));
+  }
 });

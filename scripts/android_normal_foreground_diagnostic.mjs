@@ -9,10 +9,12 @@ const bounded = (v, min, max) => typeof v === 'number' && Number.isFinite(v) && 
 const sha = b => createHash('sha256').update(b).digest('hex');
 function requireThat(v) { if (!v) throw new Error('NORMAL_DIAGNOSTIC_REFUSED'); }
 export function validate(receipt, directory) {
-  requireThat(keys(receipt, ['schemaVersion','scope','outcome','playbackCase','windowRequiredMs','windowObservedMs','preWindowEngine','preWindowDecodedFrames','detailsClosedBeforeWindow','preWindowPlayingControlVerified','windowStartUptimeMs','noInputDuringWindow','hostedAdmission','fullQualification','productionCauseEstablished','observerAbiIntegrated','manualBurnedClockReviewRequired','anchors']));
+  const autoMkv = receipt?.playbackCase === 'auto-mkv';
+  requireThat(keys(receipt, [...(autoMkv ? ['preWindowFile','manualQualitySelected'] : []), 'schemaVersion','scope','outcome','playbackCase','windowRequiredMs','windowObservedMs','preWindowEngine','preWindowDecodedFrames','detailsClosedBeforeWindow','preWindowPlayingControlVerified','windowStartUptimeMs','noInputDuringWindow','hostedAdmission','fullQualification','productionCauseEstablished','observerAbiIntegrated','manualBurnedClockReviewRequired','anchors']));
   requireThat(receipt.schemaVersion === 1 && receipt.scope === 'android-normal-viewing-diagnostic-only' && receipt.outcome === 'normal-viewing-capture-collected');
-  requireThat(['direct','hls'].includes(receipt.playbackCase));
-  requireThat(receipt.preWindowEngine === (receipt.playbackCase === 'hls' ? 'Webview HLS transcode' : 'Webview direct'));
+  requireThat(['direct','hls','auto-mkv'].includes(receipt.playbackCase));
+  if (autoMkv) requireThat(receipt.preWindowFile === 'Synthetic.Fixture.Movie.2026.1080p.WEB-DL.x264.mkv' && receipt.manualQualitySelected === false);
+  requireThat(receipt.preWindowEngine === (receipt.playbackCase === 'direct' ? 'Webview direct' : 'Webview HLS transcode'));
   requireThat(Number.isSafeInteger(receipt.preWindowDecodedFrames) && receipt.preWindowDecodedFrames > 0);
   requireThat(receipt.windowRequiredMs === 480000 && bounded(receipt.windowObservedMs, 480000, 540000));
   requireThat(receipt.detailsClosedBeforeWindow === true && receipt.preWindowPlayingControlVerified === true && Number.isSafeInteger(receipt.windowStartUptimeMs) && receipt.windowStartUptimeMs > 0 && receipt.noInputDuringWindow === true && receipt.manualBurnedClockReviewRequired === true);
