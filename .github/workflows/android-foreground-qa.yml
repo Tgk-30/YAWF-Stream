@@ -288,7 +288,7 @@ jobs:
           }
           cleanup() {
             status=$?
-            trap - EXIT
+            trap - EXIT ERR
             set +e
             if [ -n "$emulator_pid" ]; then
               current="$(process_identity "$emulator_pid" 2>/dev/null)"
@@ -306,6 +306,7 @@ jobs:
             exit "$status"
           }
           trap cleanup EXIT
+          trap 'qa_error_status=$?; printf "ANDROID_QA_REFUSED_LINE=%d EXIT=%d\n" "$LINENO" "$qa_error_status" >&2' ERR
 
           if ss -ltnH | awk '{print $4}' | grep -Eq '(^|:)(5037|5142|5568|5569)$'; then
             echo 'Refusing an existing ADB or emulator listener on any bind address' >&2

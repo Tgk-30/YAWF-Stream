@@ -98,6 +98,8 @@ function contract(source) {
   assert.match(source, /reverse --remove tcp:43120/);
   assert.match(source, /reverse --remove tcp:43121/);
   assert.match(source, /process_identity\(\)/);
+  assert.ok(source.includes('trap - EXIT ERR'));
+  assert.ok(source.includes('ANDROID_QA_REFUSED_LINE=%d EXIT=%d\\n'));
   assert.match(source, /snapshot_owned_group\(\)/);
   assert.match(source, /stat\[2\].*stat\[19\]/);
   assert.match(source, /fixture_identity="\$\(process_identity "\$fixture_pid"\)"/);
