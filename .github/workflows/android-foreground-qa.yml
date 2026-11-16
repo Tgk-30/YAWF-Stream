@@ -1,0 +1,455 @@
+name: Android foreground playback QA
+
+on:
+  push:
+    branches:
+      - codex/android-foreground114-qa
+      - codex/android-foreground114-full-qa
+    paths:
+      - .github/workflows/android-foreground-qa.yml
+      - scripts/android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeForegroundPlaybackFlowTest.java
+      - scripts/android_foreground_playback_receipt.mjs
+      - scripts/android_foreground_playback_receipt.test.mjs
+      - scripts/android_foreground_workflow.test.mjs
+  workflow_dispatch:
+    inputs:
+      run_mode:
+        description: Native UI observation duration
+        required: true
+        type: choice
+        default: admission
+        options: [admission, full]
+      playback_case:
+        description: Ordinary player route
+        required: true
+        type: choice
+        default: direct
+        options: [direct, hls]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-foreground-qa-${{ github.ref }}-${{ github.event_name == 'push' && 'branch-matrix' || inputs.run_mode || 'admission' }}
+  cancel-in-progress: false
+
+jobs:
+  native-ui-observation:
+    if: >-
+      github.repository_owner == 'Tgk-30' &&
+      github.repository == 'Tgk-30/YAWF-Stream' &&
+      github.actor == github.repository_owner &&
+      github.ref_type == 'branch' &&
+      (github.ref_name == 'codex/android-foreground114-qa' ||
+       github.ref_name == 'codex/android-foreground114-full-qa')
+    name: Public phone105 foreground UI on fresh API 36
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        playback_case: ${{ github.event_name == 'push' && fromJSON('["direct","hls"]') || fromJSON(format('["{0}"]', inputs.playback_case || 'direct')) }}
+    env:
+      REQUESTED_MODE: ${{ github.event_name == 'push' && github.ref_name == 'codex/android-foreground114-full-qa' && 'full' || github.event_name == 'workflow_dispatch' && inputs.run_mode == 'full' && 'full' || 'admission' }}
+      REQUESTED_CASE: ${{ matrix.playback_case }}
+      PUBLIC_VERSION: 2.3.105
+      PUBLIC_VERSION_CODE: "2003105"
+      PUBLIC_APK_BYTES: "88812417"
+      PUBLIC_APK_SHA256: c585e5f3344fd9c0cdef28e30ddb44f6ca355540088461e95fe0503695ff00b4
+      PUBLIC_SOURCE_SHA: 017098f3c609c0b275d91d0f658f77b1d371eaef
+      FIXTURE_SOURCE_SHA: 25574d680ec58ce96975014c5e7f6e35a4b87b01
+      PUBLIC_APK_URL: https://github.com/Tgk-30/YAWF-Stream/releases/download/android-v2.3.105/YAWF.Stream_Android_2.3.105.apk
+      SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
+      AVD_NAME: yawf-foreground-phone105-api36
+      EMULATOR_SERIAL: emulator-5568
+      ADB_SERVER_PORT: "5142"
+      ADB_SERVER_SOCKET: tcp:127.0.0.1:5142
+      ANDROID_ADB_SERVER_PORT: "5142"
+      ADB_MDNS_AUTO_CONNECT: "0"
+      EVIDENCE: android-foreground-evidence
+
+    steps:
+      - name: Checkout QA driver without credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout immutable public phone105 source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.PUBLIC_SOURCE_SHA }}
+          path: public-source
+          persist-credentials: false
+
+      - name: Checkout immutable current fixture source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FIXTURE_SOURCE_SHA }}
+          path: fixture-source
+          persist-credentials: false
+
+      - name: Admit exact sources and remote storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(git -C public-source rev-parse HEAD)" = "$PUBLIC_SOURCE_SHA"
+          test "$(git -C fixture-source rev-parse HEAD)" = "$FIXTURE_SOURCE_SHA"
+          free_bytes="$(df -PB1 "$RUNNER_TEMP" | awk 'NR==2 {print $4}')"
+          test "$free_bytes" -ge $((12 * 1024 * 1024 * 1024))
+          mkdir -p "$EVIDENCE"
+
+      - name: Set up JDK 17 and Android tools
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up exact Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.22.3"
+          check-latest: false
+
+      - name: Set up Android SDK command line tools
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Set up pinned Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.1"
+
+      - name: Install official API 36 emulator image
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libpulse0 ffmpeg fonts-dejavu-core
+          metadata="$RUNNER_TEMP/sdkmanager-list.txt"
+          timeout 180s sdkmanager --list --channel=0 > "$metadata"
+          SYSTEM_IMAGE_PACKAGE="$SYSTEM_IMAGE_PACKAGE" SDK_METADATA="$metadata" python3 - <<'PY'
+          import os
+          from pathlib import Path
+          package=os.environ['SYSTEM_IMAGE_PACKAGE']
+          text=Path(os.environ['SDK_METADATA']).read_text()
+          section=None; sections=set()
+          for line in text.splitlines():
+              heading=line.strip().casefold()
+              if heading=='installed packages:': section='installed'; continue
+              if heading=='available packages:': section='available'; continue
+              if heading=='available updates:': section=None; continue
+              if section in {'installed','available'} and '|' in line and line.split('|',1)[0].strip()==package:
+                  sections.add(section)
+          assert sections, 'Official SDK metadata did not advertise the exact installed or available image path'
+          PY
+          sdkmanager "platform-tools" "emulator" "platforms;android-36" \
+            "build-tools;36.0.0" "$SYSTEM_IMAGE_PACKAGE"
+          sdk_root="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          test -x "$sdk_root/emulator/emulator"
+          test -x "$sdk_root/build-tools/36.0.0/apksigner"
+          test -x "$sdk_root/build-tools/36.0.0/aapt2"
+          {
+            echo "$sdk_root/emulator"
+            echo "$sdk_root/platform-tools"
+            echo "$sdk_root/build-tools/36.0.0"
+          } >> "$GITHUB_PATH"
+
+      - name: Download and verify exact public phone105 APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="$RUNNER_TEMP/YAWF.Stream_Android_2.3.105.apk"
+          curl --fail --location --silent --show-error \
+            --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 180 \
+            --max-filesize "$PUBLIC_APK_BYTES" --retry 3 --retry-all-errors \
+            --output "$apk" "$PUBLIC_APK_URL"
+          test "$(wc -c < "$apk" | tr -d ' ')" = "$PUBLIC_APK_BYTES"
+          printf '%s  %s\n' "$PUBLIC_APK_SHA256" "$apk" | sha256sum --check -
+          test "$(apkanalyzer manifest application-id "$apk")" = com.tgk30.debridstreamer
+          test "$(apkanalyzer manifest version-name "$apk")" = "$PUBLIC_VERSION"
+          test "$(apkanalyzer manifest version-code "$apk")" = "$PUBLIC_VERSION_CODE"
+          python3 public-source/scripts/verify_android_apk.py \
+            --apk "$apk" --version "$PUBLIC_VERSION" \
+            --certificate-pin public-source/web/src-tauri/SIGNING_CERT_SHA256 \
+            --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}" > "$RUNNER_TEMP/apk-verification.txt"
+          cert_pin="$(tr -d '[:space:]' < public-source/web/src-tauri/SIGNING_CERT_SHA256)"
+          test "${#cert_pin}" -eq 64
+          test -z "${cert_pin//[0-9A-Fa-f]/}"
+          echo "PRODUCT_APK=$apk" >> "$GITHUB_ENV"
+          echo "PUBLIC_CERT_SHA256=${cert_pin,,}" >> "$GITHUB_ENV"
+
+      - name: Build current long fixture and isolated native UI driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd fixture-source/web && npm ci && npm run build)
+          (cd fixture-source/server && npm ci)
+          node --test scripts/android_foreground_playback_receipt.test.mjs \
+            scripts/android_foreground_workflow.test.mjs
+          gradle --project-dir scripts/android-runtime-instrumentation --no-daemon --max-workers=2 \
+            :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+          app=scripts/android-runtime-instrumentation/app/build/outputs/apk/debug/app-debug.apk
+          tests=scripts/android-runtime-instrumentation/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          test -f "$app" -a -f "$tests"
+          apkanalyzer manifest print "$app" > "$RUNNER_TEMP/driver-app-manifest.xml"
+          apkanalyzer manifest print "$tests" > "$RUNNER_TEMP/driver-test-manifest.xml"
+          if grep -Eqi 'INTERNET|BIND_ACCESSIBILITY_SERVICE|MANAGE_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE|REQUEST_INSTALL_PACKAGES|QUERY_ALL_PACKAGES' \
+            "$RUNNER_TEMP/driver-app-manifest.xml" "$RUNNER_TEMP/driver-test-manifest.xml"; then
+            echo 'Forbidden instrumentation permission' >&2
+            exit 1
+          fi
+          echo "HARNESS_APP_APK=$app" >> "$GITHUB_ENV"
+          echo "HARNESS_TEST_APK=$tests" >> "$GITHUB_ENV"
+          free_bytes="$(df -PB1 "$RUNNER_TEMP" | awk 'NR==2 {print $4}')"
+          test "$free_bytes" -ge $((6 * 1024 * 1024 * 1024))
+
+      - name: Run bounded ordinary native UI observation
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -c /dev/kvm
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            sudo chown "$(id -u):$(id -g)" /dev/kvm
+            sudo chmod 0600 /dev/kvm
+          fi
+          mode="$REQUESTED_MODE"
+          playback_case="$REQUESTED_CASE"
+          case "$mode" in admission) instrument_timeout=300;; full) instrument_timeout=900;; *) exit 2;; esac
+          case "$playback_case" in direct|hls) :;; *) exit 2;; esac
+
+          export ANDROID_USER_HOME="$RUNNER_TEMP/yawf-foreground-android"
+          export ANDROID_EMULATOR_HOME="$ANDROID_USER_HOME"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          test ! -e "$ANDROID_USER_HOME"
+          mkdir -p "$ANDROID_AVD_HOME"
+          fixture_output="$RUNNER_TEMP/yawf-foreground-fixture"
+          emulator_pid=''; emulator_identity=''; fixture_pid=''; fixture_identity=''; adb_pid=''; adb_identity=''
+          process_identity() {
+            python3 - "$1" <<'PYIDENTITY'
+          import os,sys
+          pid=int(sys.argv[1]); path=f'/proc/{pid}'
+          stat=open(path+'/stat').read().rsplit(') ',1)[1].split()
+          print(f'{os.stat(path).st_uid}:{stat[2]}:{stat[19]}')
+          PYIDENTITY
+          }
+          snapshot_owned_group() {
+            python3 - "$1" "$2" "$(id -u)" <<'PYSNAPSHOT'
+          import os,sys
+          group=int(sys.argv[1]); output=sys.argv[2]; uid=int(sys.argv[3]); rows=[]
+          for name in os.listdir('/proc'):
+              if not name.isdigit(): continue
+              path=f'/proc/{name}'
+              try:
+                  if os.stat(path).st_uid!=uid: continue
+                  stat=open(path+'/stat').read().rsplit(') ',1)[1].split()
+                  if int(stat[2])==group: rows.append((int(name),stat[19]))
+              except (FileNotFoundError,PermissionError,ProcessLookupError): pass
+          assert any(pid==group for pid,_ in rows), 'Owned process-group leader was absent'
+          with open(output,'x') as target:
+              for pid,start in sorted(rows): target.write(f'{pid} {start}\n')
+          PYSNAPSHOT
+          }
+          stop_owned_group() {
+            leader="$1"
+            expected="$2"
+            [ -n "$leader" ] || return 0
+            current="$(process_identity "$leader")" || return 1
+            [ "$current" = "$expected" ] || return 1
+            snapshot="$RUNNER_TEMP/owned-group-${leader}.txt"
+            test ! -e "$snapshot"
+            snapshot_owned_group "$leader" "$snapshot" || return 1
+            kill -TERM -- "-$leader" 2>/dev/null || true
+            for _ in $(seq 1 20); do
+              pgrep -g "$leader" >/dev/null 2>&1 || break
+              sleep 0.25
+            done
+            while read -r pid start; do
+              current="$(process_identity "$pid" 2>/dev/null)" || continue
+              [ "$current" = "$(id -u):$leader:$start" ] || continue
+              kill -KILL "$pid" 2>/dev/null || true
+            done < "$snapshot"
+            wait "$leader" 2>/dev/null || true
+          }
+          stop_owned_adb() {
+            [ -n "$adb_pid" ] || return 0
+            current="$(process_identity "$adb_pid")" || return 1
+            [ "$current" = "$adb_identity" ] || return 1
+            timeout 10s adb -H 127.0.0.1 -P "$ADB_SERVER_PORT" kill-server >/dev/null 2>&1 || true
+            for _ in $(seq 1 20); do
+              current="$(process_identity "$adb_pid" 2>/dev/null)" || return 0
+              [ "$current" = "$adb_identity" ] || return 1
+              sleep 0.25
+            done
+            kill "$adb_pid" 2>/dev/null || true
+            wait "$adb_pid" 2>/dev/null || true
+          }
+          cleanup() {
+            status=$?
+            trap - EXIT
+            set +e
+            if [ -n "$emulator_pid" ]; then
+              current="$(process_identity "$emulator_pid" 2>/dev/null)"
+              if [ "$current" = "$emulator_identity" ]; then
+                timeout 10s adb -H 127.0.0.1 -P "$ADB_SERVER_PORT" -s "$EMULATOR_SERIAL" reverse --remove tcp:43120 >/dev/null 2>&1
+                timeout 10s adb -H 127.0.0.1 -P "$ADB_SERVER_PORT" -s "$EMULATOR_SERIAL" reverse --remove tcp:43121 >/dev/null 2>&1
+                stop_owned_group "$emulator_pid" "$emulator_identity" || status=1
+              else
+                status=1
+              fi
+            fi
+            stop_owned_group "$fixture_pid" "$fixture_identity" || status=1
+            stop_owned_adb || status=1
+            rm -rf "$fixture_output" "$ANDROID_USER_HOME"
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          if ss -ltnH | awk '{print $4}' | grep -Eq '(^|:)(5037|5142|5568|5569)$'; then
+            echo 'Refusing an existing ADB or emulator listener on any bind address' >&2
+            exit 1
+          fi
+          adb -H 127.0.0.1 -P "$ADB_SERVER_PORT" start-server
+          mapfile -t adb_pids < <(ss -ltnp | grep -E "127\\.0\\.0\\.1:${ADB_SERVER_PORT}[[:space:]]" \
+            | sed -nE 's/.*pid=([0-9]+),.*/\1/p' | sort -u)
+          test "${#adb_pids[@]}" -eq 1
+          adb_pid="${adb_pids[0]}"
+          adb_identity="$(process_identity "$adb_pid")"
+          test "${adb_identity%%:*}" = "$(id -u)"
+          ss -ltnp | grep -Eq "127\\.0\\.0\\.1:${ADB_SERVER_PORT}.*pid=${adb_pid},"
+          test -z "$(adb -H 127.0.0.1 -P "$ADB_SERVER_PORT" devices | awk 'NR>1 && NF>0')"
+
+          ffmpeg -hide_banner -filters > "$RUNNER_TEMP/ffmpeg-filters.txt" 2>&1
+          grep -Eq '\bdrawtext\b' "$RUNNER_TEMP/ffmpeg-filters.txt"
+          test -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+          setsid node fixture-source/server/node_modules/tsx/dist/cli.mjs \
+            fixture-source/scripts/android_external_player_server_fixture.mts \
+            --repo "$GITHUB_WORKSPACE/fixture-source" --output "$fixture_output" \
+            --foreground-long --ipad-foreground > "$RUNNER_TEMP/fixture.log" 2>&1 &
+          fixture_pid=$!
+          fixture_identity="$(process_identity "$fixture_pid")"
+          test "$fixture_identity" = "$(id -u):${fixture_pid}:${fixture_identity##*:}"
+          deadline=$((SECONDS + 240))
+          until grep -Fq '[fixture] READY server-mode-ui loopback' "$RUNNER_TEMP/fixture.log"; do
+            kill -0 "$fixture_pid"
+            test "$SECONDS" -lt "$deadline"
+            sleep 1
+          done
+          ss -ltnp | grep "pid=$fixture_pid," > "$RUNNER_TEMP/fixture-listeners.txt"
+          test "$(wc -l < "$RUNNER_TEMP/fixture-listeners.txt" | tr -d ' ')" -eq 2
+          grep -Eq '127\.0\.0\.1:43120' "$RUNNER_TEMP/fixture-listeners.txt"
+          grep -Eq '127\.0\.0\.1:43121' "$RUNNER_TEMP/fixture-listeners.txt"
+
+          printf 'no\n' | avdmanager create avd --name "$AVD_NAME" --package "$SYSTEM_IMAGE_PACKAGE" --device pixel_2
+          setsid emulator -avd "$AVD_NAME" -port 5568 -no-window -no-audio -no-snapshot \
+            -no-boot-anim -gpu swiftshader_indirect -feature -Vulkan -cores 2 -memory 2048 \
+            > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          emulator_pid=$!
+          emulator_identity="$(process_identity "$emulator_pid")"
+          test "$emulator_identity" = "$(id -u):${emulator_pid}:${emulator_identity##*:}"
+          deadline=$((SECONDS + 300))
+          until [ "$(timeout 5s adb -H 127.0.0.1 -P "$ADB_SERVER_PORT" -s "$EMULATOR_SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do
+            kill -0 "$emulator_pid"
+            test "$SECONDS" -lt "$deadline"
+            sleep 2
+          done
+          adb_cmd=(adb -H 127.0.0.1 -P "$ADB_SERVER_PORT" -s "$EMULATOR_SERIAL")
+          test "$("${adb_cmd[@]}" shell getprop ro.boot.qemu.avd_name | tr -d '\r')" = "$AVD_NAME"
+          test "$("${adb_cmd[@]}" shell getprop ro.build.version.sdk | tr -d '\r')" = 36
+          test "$("${adb_cmd[@]}" shell getprop ro.product.cpu.abi | tr -d '\r')" = x86_64
+          "${adb_cmd[@]}" shell dumpsys account | python3 -c \
+            'import re,sys; c=re.findall(r"Accounts: (\d+)",sys.stdin.read()); assert c and all(int(x)==0 for x in c)'
+          "${adb_cmd[@]}" shell dumpsys webviewupdate | grep -F com.google.android.webview > "$RUNNER_TEMP/stock-webview.txt"
+          "${adb_cmd[@]}" reverse tcp:43120 tcp:43120
+          "${adb_cmd[@]}" reverse tcp:43121 tcp:43121
+          "${adb_cmd[@]}" install "$PRODUCT_APK" | grep -Eq '^Success\r?$'
+          installed="$("${adb_cmd[@]}" shell pm path com.tgk30.debridstreamer | tr -d '\r' | sed -n 's/^package://p')"
+          test -n "$installed"
+          test "$(printf '%s\n' "$installed" | wc -l | tr -d ' ')" = 1
+          test "$("${adb_cmd[@]}" shell sha256sum "$installed" | awk '{print $1}')" = "$PUBLIC_APK_SHA256"
+          "${adb_cmd[@]}" install "$HARNESS_APP_APK" | grep -Eq '^Success\r?$'
+          "${adb_cmd[@]}" install "$HARNESS_TEST_APK" | grep -Eq '^Success\r?$'
+
+          set +e
+          timeout "${instrument_timeout}s" "${adb_cmd[@]}" shell am instrument -w -r \
+            -e class com.yawf.runtimeinstrumentation.RuntimeForegroundPlaybackFlowTest \
+            -e evidenceSubdir foreground-playback-flow -e playbackMode "$mode" \
+            -e playbackCase "$playback_case" \
+            com.yawf.runtimeinstrumentation.test/androidx.test.runner.AndroidJUnitRunner \
+            > "$RUNNER_TEMP/instrumentation.txt" 2>&1
+          instrumentation_status=$?
+          set -e
+          test "$instrumentation_status" -eq 0
+          grep -Fq 'OK (1 test)' "$RUNNER_TEMP/instrumentation.txt"
+          test ! -e "$fixture_output/ipad-observer-refused"
+          test -s "$fixture_output/ipad-observations.jsonl"
+          test "$(wc -c < "$fixture_output/ipad-observations.jsonl" | tr -d ' ')" -le $((8 * 1024 * 1024))
+          grep -Fq '"kind":"browser"' "$fixture_output/ipad-observations.jsonl"
+
+          EVIDENCE="$EVIDENCE" MODE="$mode" CASE="$playback_case" python3 - <<'PY'
+          import os,re,subprocess
+          from pathlib import Path
+          adb=['adb','-H','127.0.0.1','-P',os.environ['ADB_SERVER_PORT'],'-s',os.environ['EMULATOR_SERIAL']]
+          base=['exec-out','run-as','com.yawf.runtimeinstrumentation']
+          folder='files/foreground-playback-flow'
+          names=subprocess.check_output(adb+base+['ls','-1',folder],text=True).splitlines()
+          count=5 if os.environ['MODE']=='full' else 2
+          expected={f"anchor-{i:02d}-{os.environ['MODE']}-{os.environ['CASE']}.png" for i in range(1,count+1)}
+          expected.add('instrumentation-foreground-playback-receipt.json')
+          assert set(names)==expected, 'Unexpected native evidence inventory'
+          out=Path(os.environ['EVIDENCE'])
+          total=0
+          for name in sorted(names):
+              data=subprocess.check_output(adb+base+['cat',folder+'/'+name])
+              limit=8*1024*1024 if name.endswith('.png') else 64*1024
+              assert 0<len(data)<=limit
+              total+=len(data); assert total<=40*1024*1024+64*1024
+              (out/name).write_bytes(data)
+          PY
+          node scripts/android_foreground_playback_receipt.mjs \
+            --native "$EVIDENCE/instrumentation-foreground-playback-receipt.json" \
+            --evidence-dir "$EVIDENCE" --output "$EVIDENCE/native-stage-summary.json" \
+            > "$RUNNER_TEMP/native-validator.txt"
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          evidence=Path(os.environ['EVIDENCE'])
+          result=json.loads((evidence/'native-stage-summary.json').read_text())
+          assert result['outcome']=='observer-abi-unintegrated'
+          assert result['hostedAdmission'] is False and result['fullQualification'] is False
+          assert result['observerIntegrationStatus']=='stage2-schema-and-sealed-window-required'
+          summary={
+            'schemaVersion':1,
+            'publicVersion':os.environ['PUBLIC_VERSION'],
+            'publicVersionCode':int(os.environ['PUBLIC_VERSION_CODE']),
+            'publicApkSha256':os.environ['PUBLIC_APK_SHA256'],
+            'publicCertificateSha256':os.environ['PUBLIC_CERT_SHA256'],
+            'publicSource':os.environ['PUBLIC_SOURCE_SHA'],
+            'fixtureSource':os.environ['FIXTURE_SOURCE_SHA'],
+            'driverSource':os.environ['GITHUB_SHA'],
+            'systemImage':os.environ['SYSTEM_IMAGE_PACKAGE'],
+            'freshOwnedEmulator':True,
+            'privateAdbPort':int(os.environ['ADB_SERVER_PORT']),
+            'deviceExternalEgressBlocked':False,
+            'fixtureListenersLoopbackOnly':True,
+            'credentialsUsed':False,
+            'runtimePublished':False,
+            'hostedAdmission':False,
+            'fullQualification':False,
+            'observerAbiIntegrated':False,
+          }
+          (evidence/'workflow-summary.json').write_text(json.dumps(summary,indent=2)+'\n')
+          total=sum(p.stat().st_size for p in evidence.iterdir() if p.is_file())
+          assert total<=42*1024*1024
+          PY
+
+      - name: Upload bounded non-release evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-phone105-foreground-${{ env.REQUESTED_MODE }}-${{ matrix.playback_case }}
+          path: android-foreground-evidence
+          if-no-files-found: error
+          retention-days: 7
