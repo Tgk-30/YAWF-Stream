@@ -2,6 +2,7 @@ package com.yawf.runtimeinstrumentation;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -88,6 +89,10 @@ public final class RuntimeForegroundPlaybackFlowTest {
     private File evidenceDir;
     private String mode;
     private String playbackCase;
+    private String presentation;
+    private FrameSample normalPreWindow;
+    private boolean normalDetailsClosed;
+    private boolean normalPlayingControl;
     private long windowMs;
     private long testStartedMs;
     private long windowStartedMs = -1;
@@ -108,6 +113,9 @@ public final class RuntimeForegroundPlaybackFlowTest {
         Bundle arguments = InstrumentationRegistry.getArguments();
         mode = arguments.getString("playbackMode", "admission").trim();
         playbackCase = arguments.getString("playbackCase", "direct").trim();
+        presentation = arguments.getString("presentation", "details").trim();
+        assertTrue("Unsupported presentation", presentation.equals("details") || presentation.equals("normal-diagnostic"));
+        assertTrue("Normal diagnostic requires full mode", !presentation.equals("normal-diagnostic") || mode.equals("full"));
         assertTrue("Unsupported playbackMode", mode.equals("admission") || mode.equals("full"));
         assertTrue("Unsupported playbackCase", playbackCase.equals("direct") || playbackCase.equals("hls"));
         windowMs = mode.equals("full") ? FULL_WINDOW_MS : ADMISSION_WINDOW_MS;
@@ -124,7 +132,7 @@ public final class RuntimeForegroundPlaybackFlowTest {
         String failureClass = null;
         try {
             runFlow();
-            outcome = "native-window-observed";
+            outcome = presentation.equals("normal-diagnostic") ? "normal-viewing-capture-collected" : "native-window-observed";
         } catch (Throwable caught) {
             failureClass = caught.getClass().getSimpleName();
             sendRefusalDiagnostic(caught);
@@ -183,6 +191,70 @@ public final class RuntimeForegroundPlaybackFlowTest {
         }
     }
 
+    private void runNormalDiagnostic(UiObject2 details, FrameSample readyStats) throws Exception {
+        normalPreWindow = readyStats;
+        UiObject2 close = findLabeledClickableWithin(details, "Close playback information", "close playback information");
+        assertNotNull("Exact details close control unavailable", close);
+        assertTrue("Details close control not visible", hasVisibleBounds(close));
+        guardedClick(close, "close playback information");
+        assertTrue("Accessibility cache refresh failed after closing details", instrumentation.getUiAutomation().clearCache());
+        assertNormalOwnership();
+        normalDetailsClosed = true;
+        UiObject2 player = requireUniqueExactProductDialog(PLAYER_DIALOG_LABEL, "player");
+        UiObject2 pause = findLabeledClickableWithin(player, "Pause", "pause control");
+        assertNotNull("Visible Pause control unavailable before normal window", pause);
+        assertTrue("Pause control was not visible", hasVisibleBounds(pause));
+        normalPlayingControl = true;
+        phase = "measured-no-input-window";
+        noInputWindowStarted = true;
+        windowStartedMs = SystemClock.uptimeMillis();
+        captureNormalAnchor(1, 0);
+        assertTrue("Accessibility cache refresh failed after normal baseline screenshot", instrumentation.getUiAutomation().clearCache());
+        assertNormalOwnership();
+        for (int index = 1; index < 5; index++) {
+            sleepUntil(windowStartedMs + (FULL_WINDOW_MS * index) / 4);
+            assertTrue("Accessibility cache refresh failed during normal observation", instrumentation.getUiAutomation().clearCache());
+            assertNormalOwnership();
+            long elapsedMs = SystemClock.uptimeMillis() - windowStartedMs;
+            captureNormalAnchor(index + 1, elapsedMs);
+            assertTrue("Accessibility cache refresh failed after normal screenshot", instrumentation.getUiAutomation().clearCache());
+            assertNormalOwnership();
+        }
+        windowEndedMs = SystemClock.uptimeMillis();
+        assertTrue("Normal diagnostic window too short", windowEndedMs - windowStartedMs >= FULL_WINDOW_MS);
+        phase = "native-observation-complete";
+    }
+
+    private void assertNormalOwnership() {
+        assertEquals("Product package lost foreground ownership", PRODUCT_PACKAGE, device.getCurrentPackageName());
+        assertNoOutOfScopeApproval();
+        assertNull("Details panel remained visible", findUniqueExactProductDialog(DETAILS_LABEL));
+        UiObject2 player = findUniqueExactProductDialog(PLAYER_DIALOG_LABEL);
+        assertNotNull("Owned player dialog missing", player);
+        assertTrue("Owned player dialog not visible", hasVisibleBounds(player));
+        for (UiObject2 play : player.findObjects(By.desc(exactLabel("Play")))) {
+            assertTrue("Visible Play control indicates paused playback", !hasVisibleBounds(play));
+        }
+        for (UiObject2 play : player.findObjects(By.text(exactLabel("Play")))) {
+            assertTrue("Visible Play control indicates paused playback", !hasVisibleBounds(play));
+        }
+    }
+
+    private void captureNormalAnchor(int ordinal, long elapsedMs) throws Exception {
+        assertTrue("Normal anchor count exceeded", anchors.size() < MAX_ANCHORS);
+        File file = new File(evidenceDir, String.format(Locale.ROOT, "normal-anchor-%02d-%s.png", ordinal, playbackCase));
+        assertTrue("Normal anchor screenshot failed", device.takeScreenshot(file));
+        assertTrue("Normal anchor screenshot invalid", file.length() > 0 && file.length() <= MAX_SCREENSHOT_BYTES);
+        JSONObject anchor = new JSONObject();
+        anchor.put("ordinal", ordinal);
+        anchor.put("elapsedMs", elapsedMs);
+        anchor.put("file", file.getName());
+        anchor.put("sha256", sha256(file));
+        anchor.put("playerOwned", true);
+        anchor.put("detailsAbsent", true);
+        anchors.add(anchor);
+    }
+
     private void runFlow() throws Exception {
         phase = "launching-product";
         device.wakeUp();
@@ -231,7 +303,11 @@ public final class RuntimeForegroundPlaybackFlowTest {
         UiObject2 details = waitForUniqueDetailsDialog(SHORT_WAIT_MS);
         String expectedEngine = playbackCase.equals("hls") ? HLS_ENGINE : DIRECT_ENGINE;
         waitForExactTextWithin(details, expectedEngine, MEDIA_WAIT_MS, "expected playback engine");
-        waitForReadableStats(details, MEDIA_WAIT_MS);
+        FrameSample readyStats = waitForReadableStats(details, MEDIA_WAIT_MS);
+        if (presentation.equals("normal-diagnostic")) {
+            runNormalDiagnostic(details, readyStats);
+            return;
+        }
 
         phase = "measured-no-input-window";
         detailsOpened = true;
@@ -444,6 +520,11 @@ public final class RuntimeForegroundPlaybackFlowTest {
     private UiObject2 waitForUniqueDetailsDialog(long timeoutMs) {
         long deadline = SystemClock.uptimeMillis() + timeoutMs;
         while (SystemClock.uptimeMillis() < deadline) {
+            assertTrue("Accessibility cache refresh failed while waiting for player details",
+                    instrumentation.getUiAutomation().clearCache());
+            assertNoOutOfScopeApproval();
+            assertEquals("Product package lost foreground ownership while waiting for player details",
+                    PRODUCT_PACKAGE, device.getCurrentPackageName());
             UiObject2 dialog = findUniqueExactProductDialog(DETAILS_LABEL);
             if (dialog != null && hasVisibleBounds(dialog)) return dialog;
             SystemClock.sleep(250);
@@ -751,6 +832,29 @@ public final class RuntimeForegroundPlaybackFlowTest {
     }
 
     private void writeReceipt(String outcome, String failureClass) throws Exception {
+        if ("normal-diagnostic".equals(presentation)) {
+            JSONObject normal = new JSONObject();
+            normal.put("schemaVersion", 1);
+            normal.put("scope", "android-normal-viewing-diagnostic-only");
+            normal.put("outcome", outcome);
+            normal.put("playbackCase", playbackCase);
+            normal.put("windowRequiredMs", FULL_WINDOW_MS);
+            normal.put("windowObservedMs", windowStartedMs >= 0 && windowEndedMs >= windowStartedMs ? windowEndedMs - windowStartedMs : 0);
+            normal.put("preWindowEngine", playbackCase.equals("hls") ? HLS_ENGINE : DIRECT_ENGINE);
+            normal.put("preWindowDecodedFrames", normalPreWindow == null ? JSONObject.NULL : normalPreWindow.decodedFrames);
+            normal.put("detailsClosedBeforeWindow", normalDetailsClosed);
+            normal.put("preWindowPlayingControlVerified", normalPlayingControl);
+            normal.put("windowStartUptimeMs", windowStartedMs);
+            normal.put("noInputDuringWindow", noInputWindowStarted);
+            normal.put("hostedAdmission", false);
+            normal.put("fullQualification", false);
+            normal.put("productionCauseEstablished", false);
+            normal.put("observerAbiIntegrated", false);
+            normal.put("manualBurnedClockReviewRequired", true);
+            normal.put("anchors", new JSONArray(anchors));
+            writeBounded(new File(evidenceDir, "instrumentation-normal-diagnostic-receipt.json"), normal.toString(2) + "\n", 64 * 1024);
+            return;
+        }
         JSONObject receipt = new JSONObject();
         receipt.put("schemaVersion", 1);
         receipt.put("scope", "ordinary-android-phone-foreground-playback");

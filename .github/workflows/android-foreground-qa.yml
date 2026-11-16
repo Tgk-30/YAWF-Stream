@@ -11,6 +11,8 @@ on:
       - scripts/android_foreground_playback_receipt.mjs
       - scripts/android_foreground_playback_receipt.test.mjs
       - scripts/android_foreground_workflow.test.mjs
+      - scripts/android_normal_foreground_diagnostic.mjs
+      - scripts/android_normal_foreground_diagnostic.test.mjs
       - scripts/android_foreground_refusal.py
       - scripts/android_foreground_refusal_test.py
       - scripts/android_foreground_observer_diagnostic.mjs
@@ -23,6 +25,12 @@ on:
         type: choice
         default: admission
         options: [admission, full]
+      presentation:
+        description: Player presentation (normal diagnostic requires full)
+        required: true
+        type: choice
+        default: details
+        options: [details, normal-diagnostic]
       playback_case:
         description: Ordinary player route
         required: true
@@ -56,6 +64,7 @@ jobs:
     env:
       REQUESTED_MODE: ${{ github.event_name == 'push' && github.ref_name == 'codex/android-foreground114-full-qa' && 'full' || github.event_name == 'workflow_dispatch' && inputs.run_mode == 'full' && 'full' || 'admission' }}
       REQUESTED_CASE: ${{ matrix.playback_case }}
+      REQUESTED_PRESENTATION: ${{ github.event_name == 'workflow_dispatch' && inputs.presentation == 'normal-diagnostic' && 'normal-diagnostic' || 'details' }}
       PUBLIC_VERSION: 2.3.105
       PUBLIC_VERSION_CODE: "2003105"
       PUBLIC_APK_BYTES: "88812417"
@@ -192,7 +201,8 @@ jobs:
           (cd fixture-source/server && npm ci)
           FIXTURE_VALIDATOR="$GITHUB_WORKSPACE/fixture-source/scripts/ipad-foreground/passive_observer.mjs" \
             node --test scripts/android_foreground_playback_receipt.test.mjs \
-            scripts/android_foreground_workflow.test.mjs scripts/android_foreground_observer_diagnostic.test.mjs
+            scripts/android_foreground_workflow.test.mjs scripts/android_foreground_observer_diagnostic.test.mjs \
+            scripts/android_normal_foreground_diagnostic.test.mjs
           python3 -I -B scripts/android_foreground_refusal_test.py
           gradle --project-dir scripts/android-runtime-instrumentation --no-daemon --max-workers=2 \
             :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
@@ -223,6 +233,8 @@ jobs:
           fi
           mode="$REQUESTED_MODE"
           playback_case="$REQUESTED_CASE"
+          presentation="$REQUESTED_PRESENTATION"
+          case "$presentation" in details) :;; normal-diagnostic) test "$mode" = full && test "${{ github.event_name }}" = workflow_dispatch;; *) exit 2;; esac
           case "$mode" in admission) instrument_timeout=300;; full) instrument_timeout=900;; *) exit 2;; esac
           case "$playback_case" in direct|hls) :;; *) exit 2;; esac
 
@@ -409,7 +421,7 @@ jobs:
           timeout "${instrument_timeout}s" "${adb_cmd[@]}" shell am instrument -w -r \
             -e class com.yawf.runtimeinstrumentation.RuntimeForegroundPlaybackFlowTest \
             -e evidenceSubdir foreground-playback-flow -e playbackMode "$mode" \
-            -e playbackCase "$playback_case" \
+            -e playbackCase "$playback_case" -e presentation "$presentation" \
             com.yawf.runtimeinstrumentation.test/androidx.test.runner.AndroidJUnitRunner \
             > "$RUNNER_TEMP/instrumentation.txt" 2>&1
           instrumentation_status=$?
@@ -425,7 +437,7 @@ jobs:
             native_test_ok=true
           fi
 
-          EVIDENCE="$EVIDENCE" MODE="$mode" CASE="$playback_case" NATIVE_TEST_OK="$native_test_ok" python3 - <<'PY'
+          EVIDENCE="$EVIDENCE" MODE="$mode" CASE="$playback_case" PRESENTATION="$presentation" NATIVE_TEST_OK="$native_test_ok" python3 - <<'PY'
           import os,re,subprocess,sys
           from pathlib import Path
           adb=['adb','-H','127.0.0.1','-P',os.environ['ADB_SERVER_PORT'],'-s',os.environ['EMULATOR_SERIAL']]
@@ -438,10 +450,18 @@ jobs:
           assert len(listing.stdout)<=4096, 'Native evidence inventory exceeded its bound'
           names=listing.stdout.decode('utf-8').splitlines()
           count=5 if os.environ['MODE']=='full' else 2
-          expected={f"anchor-{i:02d}-{os.environ['MODE']}-{os.environ['CASE']}.png" for i in range(1,count+1)}
-          expected.add('instrumentation-foreground-playback-receipt.json')
+          if os.environ['PRESENTATION']=='normal-diagnostic':
+              expected={f"normal-anchor-{i:02d}-{os.environ['CASE']}.png" for i in range(1,6)}
+              receipt='instrumentation-normal-diagnostic-receipt.json'
+              expected.add(receipt)
+          else:
+              expected={f"anchor-{i:02d}-{os.environ['MODE']}-{os.environ['CASE']}.png" for i in range(1,count+1)}
+              expected.add('instrumentation-foreground-playback-receipt.json')
+              receipt='instrumentation-foreground-playback-receipt.json'
           if os.environ['NATIVE_TEST_OK']=='true':
               assert set(names)==expected, 'Unexpected native evidence inventory'
+          elif os.environ['PRESENTATION']=='normal-diagnostic':
+              assert set(names)<=expected and receipt in names, 'Unexpected partial normal evidence inventory'
           else:
               assert set(names)<=expected and 'instrumentation-foreground-playback-receipt.json' in names, 'Unexpected partial native evidence inventory'
           assert len(names)==len(set(names)), 'Duplicate native evidence filename'
@@ -463,18 +483,29 @@ jobs:
           test -s "$fixture_output/ipad-observations.jsonl"
           test "$(wc -c < "$fixture_output/ipad-observations.jsonl" | tr -d ' ')" -le $((8 * 1024 * 1024))
           grep -Fq '"kind":"browser"' "$fixture_output/ipad-observations.jsonl"
-          node scripts/android_foreground_playback_receipt.mjs \
-            --native "$EVIDENCE/instrumentation-foreground-playback-receipt.json" \
-            --evidence-dir "$EVIDENCE" --output "$EVIDENCE/native-stage-summary.json" \
-            > "$RUNNER_TEMP/native-validator.txt"
+          if [ "$presentation" = normal-diagnostic ]; then
+            node scripts/android_normal_foreground_diagnostic.mjs \
+              --native "$EVIDENCE/instrumentation-normal-diagnostic-receipt.json" \
+              --evidence-dir "$EVIDENCE" --output "$EVIDENCE/normal-diagnostic-summary.json"
+          else
+            node scripts/android_foreground_playback_receipt.mjs \
+              --native "$EVIDENCE/instrumentation-foreground-playback-receipt.json" \
+              --evidence-dir "$EVIDENCE" --output "$EVIDENCE/native-stage-summary.json" \
+              > "$RUNNER_TEMP/native-validator.txt"
+          fi
           python3 - <<'PY'
-          import json,os
+          import hashlib,json,os
           from pathlib import Path
           evidence=Path(os.environ['EVIDENCE'])
-          result=json.loads((evidence/'native-stage-summary.json').read_text())
-          assert result['outcome']=='observer-abi-unintegrated'
+          if os.environ['REQUESTED_PRESENTATION']=='normal-diagnostic':
+              result=json.loads((evidence/'normal-diagnostic-summary.json').read_text())
+              assert result['scope']=='android-normal-viewing-diagnostic-only' and result['outcome']=='normal-viewing-capture-collected'
+              assert result['reviewStatus']=='manual-review-required'
+          else:
+              result=json.loads((evidence/'native-stage-summary.json').read_text())
+              assert result['outcome']=='observer-abi-unintegrated'
+              assert result['observerIntegrationStatus']=='stage2-schema-and-sealed-window-required'
           assert result['hostedAdmission'] is False and result['fullQualification'] is False
-          assert result['observerIntegrationStatus']=='stage2-schema-and-sealed-window-required'
           summary={
             'schemaVersion':1,
             'publicVersion':os.environ['PUBLIC_VERSION'],
@@ -495,6 +526,9 @@ jobs:
             'fullQualification':False,
             'observerAbiIntegrated':False,
           }
+          if os.environ['REQUESTED_PRESENTATION']=='normal-diagnostic':
+              summary['presentation']='normal-diagnostic'
+              summary['normalReceiptSha256']=hashlib.sha256((evidence/'instrumentation-normal-diagnostic-receipt.json').read_bytes()).hexdigest()
           (evidence/'workflow-summary.json').write_text(json.dumps(summary,indent=2)+'\n')
           total=sum(p.stat().st_size for p in evidence.iterdir() if p.is_file())
           assert total<=42*1024*1024

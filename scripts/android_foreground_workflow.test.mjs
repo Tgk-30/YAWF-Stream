@@ -58,6 +58,38 @@ function safeDetailsOpeningContract(source) {
   assert.match(body, /SystemClock\.uptimeMillis\(\) \+ MEDIA_WAIT_MS/);
 }
 
+function safeDetailsWaitContract(source) {
+  const start = source.indexOf("private UiObject2 waitForUniqueDetailsDialog(long timeoutMs)");
+  const end = source.indexOf("private UiObject2 requireUniqueDetailsDialog", start);
+  assert.ok(start >= 0 && end > start);
+  const body = source.slice(start, end);
+  const deadline = body.indexOf("SystemClock.uptimeMillis() + timeoutMs");
+  const refresh = body.indexOf(
+    'assertTrue("Accessibility cache refresh failed while waiting for player details",',
+    deadline,
+  );
+  const clearCache = body.indexOf("instrumentation.getUiAutomation().clearCache()", refresh);
+  const noApproval = body.indexOf("assertNoOutOfScopeApproval()", clearCache);
+  const foreground = body.indexOf(
+    'assertEquals("Product package lost foreground ownership while waiting for player details",',
+    noApproval,
+  );
+  const dialog = body.indexOf("findUniqueExactProductDialog(DETAILS_LABEL)", foreground);
+  const visible = body.indexOf("dialog != null && hasVisibleBounds(dialog)", dialog);
+  for (const [name, index] of Object.entries({
+    deadline,
+    refresh,
+    clearCache,
+    noApproval,
+    foreground,
+    dialog,
+    visible,
+  })) assert.ok(index >= 0, `Missing safe details-wait marker: ${name}`);
+  assert.ok(deadline < refresh && refresh < clearCache && clearCache < noApproval);
+  assert.ok(noApproval < foreground && foreground < dialog && dialog < visible);
+  assert.doesNotMatch(body, /guardedClick\(|\.click\(\)|::click|device\.click\(/);
+}
+
 function noPlayerSurfaceInputContract(source) {
   assert.doesNotMatch(source, /player::click|guardedClick\(player|player\.click\(/);
   const start = source.indexOf("private void openPlaybackSettingsTransaction()");
@@ -228,7 +260,7 @@ function contract(source) {
     '            --input "$RUNNER_TEMP/instrumentation.txt" --output "$EVIDENCE/refusal.json"',
   );
   const boundedCopy = source.indexOf(
-    'EVIDENCE="$EVIDENCE" MODE="$mode" CASE="$playback_case" NATIVE_TEST_OK="$native_test_ok" python3',
+    'EVIDENCE="$EVIDENCE" MODE="$mode" CASE="$playback_case" PRESENTATION="$presentation" NATIVE_TEST_OK="$native_test_ok" python3',
     refusalParser,
   );
   const authoritativeStatus = source.indexOf('test "$instrumentation_status" -eq 0', boundedCopy);
@@ -238,6 +270,8 @@ function contract(source) {
   assert.ok(boundedCopy < authoritativeStatus && authoritativeStatus < authoritativeOk);
   assert.ok(authoritativeOk < nativeValidator);
   assert.match(source, /if os\.environ\['NATIVE_TEST_OK'\]=='true':\s*assert set\(names\)==expected/);
+  assert.match(source, /if os\.environ\['PRESENTATION'\]=='normal-diagnostic':\s*expected=\{f"normal-anchor-/);
+  assert.match(source, /elif os\.environ\['PRESENTATION'\]=='normal-diagnostic':\s*assert set\(names\)<=expected and receipt in names/);
   assert.match(source, /else:\s*assert set\(names\)<=expected and 'instrumentation-foreground-playback-receipt\.json' in names/);
   assert.match(source, /assert len\(names\)==len\(set\(names\)\), 'Duplicate native evidence filename'/);
   assert.match(source, /FIXTURE_VALIDATOR="\$GITHUB_WORKSPACE\/fixture-source\/scripts\/ipad-foreground\/passive_observer\.mjs"/);
@@ -368,6 +402,21 @@ test("details-opening contract catches missing refresh and generic player input"
   assert.throws(() => safeDetailsOpeningContract(genericPlayerInput));
 });
 
+test("details wait refreshes observation before reacquiring the exact dialog", () => {
+  safeDetailsWaitContract(driver);
+});
+
+test("details-wait contract rejects cache-refresh omission", () => {
+  safeDetailsWaitContract(driver);
+  const changed = replaceUnique(
+    driver,
+    'assertTrue("Accessibility cache refresh failed while waiting for player details",\n' +
+      "                    instrumentation.getUiAutomation().clearCache());",
+    'assertTrue("Accessibility cache refresh failed while waiting for player details", true);',
+  );
+  assert.throws(() => safeDetailsWaitContract(changed));
+});
+
 test("flow never uses the product player surface as a setup input", () => {
   safeDetailsOpeningContract(driver);
   noPlayerSurfaceInputContract(driver);
@@ -476,10 +525,39 @@ test("workflow contract catches hosted admission and cleanup regressions", () =>
     ["shell getprop ro.boot.qemu.avd_name", "emu avd name"],
     ['reverse tcp:43121 tcp:43121', ""],
     ['stop_owned_group "$fixture_pid" "$fixture_identity" || status=1', 'kill -TERM "$fixture_pid"'],
+    ['CASE="$playback_case" PRESENTATION="$presentation" NATIVE_TEST_OK="$native_test_ok" python3', 'CASE="$playback_case" NATIVE_TEST_OK="$native_test_ok" python3'],
+    ["elif os.environ['PRESENTATION']=='normal-diagnostic':\n              assert set(names)<=expected and receipt in names", "elif os.environ['PRESENTATION']=='normal-diagnostic':\n              pass"],
   ];
   for (const [before, after] of mutations) {
     const changed = workflow.replace(before, after);
     assert.notEqual(changed, workflow, `Mutation did not apply: ${before}`);
     assert.throws(() => contract(changed), `Mutation escaped contract: ${before}`);
   }
+});
+
+test('normal viewing is explicit manual full only and preserves the no-input epoch', () => {
+  assert.match(workflow, /github\.event_name == 'workflow_dispatch' && inputs\.presentation == 'normal-diagnostic'/);
+  assert.match(workflow, /normal-diagnostic\) test "\$mode" = full && test "\$\{\{ github\.event_name \}\}" = workflow_dispatch/);
+  assert.match(workflow, /if \[ "\$presentation" = normal-diagnostic \]; then[\s\S]*android_normal_foreground_diagnostic\.mjs[\s\S]*else[\s\S]*android_foreground_playback_receipt\.mjs/);
+  const start = driver.indexOf('private void runNormalDiagnostic(');
+  const end = driver.indexOf('private void runFlow() throws Exception', start);
+  assert.ok(start >= 0 && end > start);
+  const body = driver.slice(start, end);
+  const close = body.indexOf('guardedClick(close, "close playback information")');
+  const ownership = body.indexOf('assertNormalOwnership()', close);
+  const noInput = body.indexOf('noInputWindowStarted = true', ownership);
+  const clock = body.indexOf('windowStartedMs = SystemClock.uptimeMillis()', noInput);
+  const capture = body.indexOf('captureNormalAnchor(1, 0)', clock);
+  const loop = body.indexOf('for (int index = 1; index < 5; index++)', capture);
+  assert.ok(close >= 0 && close < ownership && ownership < noInput && noInput < clock && clock < capture && capture < loop);
+  assert.match(body.slice(clock, capture), /^windowStartedMs = SystemClock\.uptimeMillis\(\);\s*$/);
+  assert.match(body.slice(capture, loop), /clearCache\(\)[\s\S]*assertNormalOwnership\(\)/);
+  assert.match(body, /assertNull\("Details panel remained visible", findUniqueExactProductDialog\(DETAILS_LABEL\)\)/);
+  assert.match(body, /findLabeledClickableWithin\(details, "Close playback information"/);
+  assert.doesNotMatch(body.slice(noInput), /guardedClick\(|\.click\(\)|device\.click\(/);
+  assert.match(body, /index < 5/);
+  assert.match(body, /findLabeledClickableWithin\(player, "Pause", "pause control"\)/);
+  assert.match(body, /player\.findObjects\(By\.desc\(exactLabel\("Play"\)\)\)/);
+  assert.match(body, /captureNormalAnchor\(index \+ 1, elapsedMs\);[\s\S]*clearCache\(\)[\s\S]*assertNormalOwnership\(\)/);
+  assert.match(driver, /!presentation\.equals\("normal-diagnostic"\) \|\| mode\.equals\("full"\)/);
 });
