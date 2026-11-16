@@ -207,14 +207,26 @@ public final class RuntimeForegroundPlaybackFlowTest {
         UiObject2 details = waitForUniqueDetailsDialog(SHORT_WAIT_MS);
         String expectedEngine = playbackCase.equals("hls") ? HLS_ENGINE : DIRECT_ENGINE;
         waitForExactTextWithin(details, expectedEngine, MEDIA_WAIT_MS, "expected playback engine");
-        FrameSample first = waitForReadableStats(details, MEDIA_WAIT_MS);
+        waitForReadableStats(details, MEDIA_WAIT_MS);
 
         phase = "measured-no-input-window";
         detailsOpened = true;
         noInputWindowStarted = true;
-        windowStartedMs = SystemClock.uptimeMillis();
         int anchorCount = mode.equals("full") ? 5 : 2;
-        for (int index = 0; index < anchorCount; index++) {
+
+        // Seal the passive owner/stat baseline before the timed interval, then
+        // capture its screenshot immediately after starting the clock.
+        assertTrue("Accessibility cache refresh failed during baseline observation",
+                instrumentation.getUiAutomation().clearCache());
+        assertForegroundOwnership();
+        details = requireUniqueDetailsDialog();
+        FrameSample first = readStats(details);
+        windowStartedMs = SystemClock.uptimeMillis();
+        appendSample(first, 0);
+        captureAnchor(1, 0);
+
+        FrameSample last = first;
+        for (int index = 1; index < anchorCount; index++) {
             long targetOffset = (windowMs * index) / (anchorCount - 1);
             sleepUntil(windowStartedMs + targetOffset);
             assertTrue("Accessibility cache refresh failed during passive observation",
@@ -222,11 +234,12 @@ public final class RuntimeForegroundPlaybackFlowTest {
             assertForegroundOwnership();
             details = requireUniqueDetailsDialog();
             FrameSample sample = readStats(details);
-            appendSample(sample, SystemClock.uptimeMillis() - windowStartedMs);
-            captureAnchor(index + 1, SystemClock.uptimeMillis() - windowStartedMs);
+            long observedAtMs = SystemClock.uptimeMillis() - windowStartedMs;
+            appendSample(sample, observedAtMs);
+            captureAnchor(index + 1, observedAtMs);
+            last = sample;
         }
         windowEndedMs = SystemClock.uptimeMillis();
-        FrameSample last = readStats(requireUniqueDetailsDialog());
         assertTrue("Decoded frame counter moved backwards", last.decodedFrames >= first.decodedFrames);
         long minimumFrameDelta = mode.equals("full") ? 60 : 5;
         assertTrue("Decoded frame counter did not establish playback progress",

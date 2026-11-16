@@ -167,12 +167,23 @@ function contract(source) {
   assert.match(source, /retention-days: 7/);
   assert.match(source, /if: always\(\)/);
   assert.match(source, /python3 -I -B scripts\/android_foreground_refusal_test\.py/);
-  assert.ok(source.includes(
-    '          python3 -I -B scripts/android_foreground_refusal.py \\\n' +
-    '            --input "$RUNNER_TEMP/instrumentation.txt" --output "$EVIDENCE/refusal.json"\n' +
-    '          test "$instrumentation_status" -eq 0\n' +
-    '          grep -Fq \'OK (1 test)\' "$RUNNER_TEMP/instrumentation.txt"'
-  ));
+  const refusalParser = source.indexOf(
+    'python3 -I -B scripts/android_foreground_refusal.py \\\n' +
+    '            --input "$RUNNER_TEMP/instrumentation.txt" --output "$EVIDENCE/refusal.json"',
+  );
+  const boundedCopy = source.indexOf(
+    'EVIDENCE="$EVIDENCE" MODE="$mode" CASE="$playback_case" NATIVE_TEST_OK="$native_test_ok" python3',
+    refusalParser,
+  );
+  const authoritativeStatus = source.indexOf('test "$instrumentation_status" -eq 0', boundedCopy);
+  const authoritativeOk = source.indexOf('grep -Fq \'OK (1 test)\' "$RUNNER_TEMP/instrumentation.txt"', authoritativeStatus);
+  const nativeValidator = source.indexOf('node scripts/android_foreground_playback_receipt.mjs', authoritativeOk);
+  assert.ok(refusalParser >= 0 && refusalParser < boundedCopy);
+  assert.ok(boundedCopy < authoritativeStatus && authoritativeStatus < authoritativeOk);
+  assert.ok(authoritativeOk < nativeValidator);
+  assert.match(source, /if os\.environ\['NATIVE_TEST_OK'\]=='true':\s*assert set\(names\)==expected/);
+  assert.match(source, /else:\s*assert set\(names\)<=expected and 'instrumentation-foreground-playback-receipt\.json' in names/);
+  assert.match(source, /assert len\(names\)==len\(set\(names\)\), 'Duplicate native evidence filename'/);
   assert.match(source, /path: android-foreground-evidence/);
   assert.doesNotMatch(source, /path:.*instrumentation\.txt/);
 }
@@ -229,6 +240,34 @@ test("native refusal metadata is one bounded public status diagnostic", () => {
   assert.doesNotMatch(diagnostic, /getMessage|printStackTrace|REPORT_KEY_STREAMRESULT|https?:|FIXTURE_URL|USERNAME|PASSWORD/);
 });
 
+test("native timing starts only after the passive zero-baseline is sealed", () => {
+  const start = driver.indexOf("private void runFlow() throws Exception");
+  const end = driver.indexOf("private void launchProduct()", start);
+  assert.ok(start >= 0 && end > start);
+  const flow = driver.slice(start, end);
+  const noInput = flow.indexOf("noInputWindowStarted = true");
+  const ownership = flow.indexOf("assertForegroundOwnership()", noInput);
+  const baselineStats = flow.indexOf("FrameSample first = readStats(details)", ownership);
+  const timedStart = flow.indexOf("windowStartedMs = SystemClock.uptimeMillis()", baselineStats);
+  const baselineSample = flow.indexOf("appendSample(first, 0)", timedStart);
+  const baselineCapture = flow.indexOf("captureAnchor(1, 0)", baselineSample);
+  const remainingAnchors = flow.indexOf("for (int index = 1; index < anchorCount; index++)", baselineCapture);
+  for (const [name, index] of Object.entries({
+    noInput,
+    ownership,
+    baselineStats,
+    timedStart,
+    baselineSample,
+    baselineCapture,
+    remainingAnchors,
+  })) assert.ok(index >= 0, `Missing baseline timing marker: ${name}`);
+  assert.ok(noInput < ownership && ownership < baselineStats && baselineStats < timedStart);
+  assert.ok(timedStart < baselineSample && baselineSample < baselineCapture);
+  assert.ok(baselineCapture < remainingAnchors);
+  assert.doesNotMatch(flow.slice(noInput), /guardedClick\(|\.click\(\)|device\.click\(/);
+  assert.match(validator, /receipt\.anchors\[0\]\.elapsedMs > 5_000/);
+});
+
 test("workflow contract rejects public artifact substitution", () => {
   const changed = workflow.replace(
     "c585e5f3344fd9c0cdef28e30ddb44f6ca355540088461e95fe0503695ff00b4",
@@ -261,6 +300,20 @@ test("workflow contract rejects a broader evidence inventory", () => {
     "expected.update(names)",
   );
   assert.throws(() => contract(changed));
+});
+
+test("workflow contract keeps exact success and bounded partial-failure inventories", () => {
+  const mutations = [
+    ["assert set(names)==expected", "assert set(names)<=expected"],
+    [
+      "assert set(names)<=expected and 'instrumentation-foreground-playback-receipt.json' in names",
+      "assert set(names)<=expected",
+    ],
+  ];
+  for (const [before, after] of mutations) {
+    const changed = replaceUnique(workflow, before, after);
+    assert.throws(() => contract(changed), `Inventory mutation escaped contract: ${before}`);
+  }
 });
 
 test("workflow contract rejects credential persistence", () => {

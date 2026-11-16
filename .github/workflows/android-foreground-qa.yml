@@ -413,24 +413,31 @@ jobs:
           set -e
           python3 -I -B scripts/android_foreground_refusal.py \
             --input "$RUNNER_TEMP/instrumentation.txt" --output "$EVIDENCE/refusal.json"
-          test "$instrumentation_status" -eq 0
-          grep -Fq 'OK (1 test)' "$RUNNER_TEMP/instrumentation.txt"
-          test ! -e "$fixture_output/ipad-observer-refused"
-          test -s "$fixture_output/ipad-observations.jsonl"
-          test "$(wc -c < "$fixture_output/ipad-observations.jsonl" | tr -d ' ')" -le $((8 * 1024 * 1024))
-          grep -Fq '"kind":"browser"' "$fixture_output/ipad-observations.jsonl"
+          native_test_ok=false
+          if [ "$instrumentation_status" -eq 0 ] && grep -Fq 'OK (1 test)' "$RUNNER_TEMP/instrumentation.txt"; then
+            native_test_ok=true
+          fi
 
-          EVIDENCE="$EVIDENCE" MODE="$mode" CASE="$playback_case" python3 - <<'PY'
-          import os,re,subprocess
+          EVIDENCE="$EVIDENCE" MODE="$mode" CASE="$playback_case" NATIVE_TEST_OK="$native_test_ok" python3 - <<'PY'
+          import os,re,subprocess,sys
           from pathlib import Path
           adb=['adb','-H','127.0.0.1','-P',os.environ['ADB_SERVER_PORT'],'-s',os.environ['EMULATOR_SERIAL']]
           base=['exec-out','run-as','com.yawf.runtimeinstrumentation']
           folder='files/foreground-playback-flow'
-          names=subprocess.check_output(adb+base+['ls','-1',folder],text=True).splitlines()
+          listing=subprocess.run(adb+base+['ls','-1',folder],capture_output=True,timeout=10)
+          if listing.returncode!=0:
+              assert os.environ['NATIVE_TEST_OK']=='false', 'Successful native test omitted its receipt'
+              sys.exit(0)
+          assert len(listing.stdout)<=4096, 'Native evidence inventory exceeded its bound'
+          names=listing.stdout.decode('utf-8').splitlines()
           count=5 if os.environ['MODE']=='full' else 2
           expected={f"anchor-{i:02d}-{os.environ['MODE']}-{os.environ['CASE']}.png" for i in range(1,count+1)}
           expected.add('instrumentation-foreground-playback-receipt.json')
-          assert set(names)==expected, 'Unexpected native evidence inventory'
+          if os.environ['NATIVE_TEST_OK']=='true':
+              assert set(names)==expected, 'Unexpected native evidence inventory'
+          else:
+              assert set(names)<=expected and 'instrumentation-foreground-playback-receipt.json' in names, 'Unexpected partial native evidence inventory'
+          assert len(names)==len(set(names)), 'Duplicate native evidence filename'
           out=Path(os.environ['EVIDENCE'])
           total=0
           for name in sorted(names):
@@ -440,6 +447,12 @@ jobs:
               total+=len(data); assert total<=40*1024*1024+64*1024
               (out/name).write_bytes(data)
           PY
+          test "$instrumentation_status" -eq 0
+          grep -Fq 'OK (1 test)' "$RUNNER_TEMP/instrumentation.txt"
+          test ! -e "$fixture_output/ipad-observer-refused"
+          test -s "$fixture_output/ipad-observations.jsonl"
+          test "$(wc -c < "$fixture_output/ipad-observations.jsonl" | tr -d ' ')" -le $((8 * 1024 * 1024))
+          grep -Fq '"kind":"browser"' "$fixture_output/ipad-observations.jsonl"
           node scripts/android_foreground_playback_receipt.mjs \
             --native "$EVIDENCE/instrumentation-foreground-playback-receipt.json" \
             --evidence-dir "$EVIDENCE" --output "$EVIDENCE/native-stage-summary.json" \
