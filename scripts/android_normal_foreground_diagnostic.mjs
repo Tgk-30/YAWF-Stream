@@ -9,15 +9,24 @@ const bounded = (v, min, max) => typeof v === 'number' && Number.isFinite(v) && 
 const sha = b => createHash('sha256').update(b).digest('hex');
 function requireThat(v) { if (!v) throw new Error('NORMAL_DIAGNOSTIC_REFUSED'); }
 export function validate(receipt, directory) {
+  const passive = receipt?.scope === 'android-passive-normal-viewing-diagnostic-only';
   const autoMkv = receipt?.playbackCase === 'auto-mkv';
-  requireThat(keys(receipt, [...(autoMkv ? ['preWindowFile','manualQualitySelected'] : []), 'schemaVersion','scope','outcome','playbackCase','windowRequiredMs','windowObservedMs','preWindowEngine','preWindowDecodedFrames','detailsClosedBeforeWindow','preWindowPlayingControlVerified','windowStartUptimeMs','noInputDuringWindow','hostedAdmission','fullQualification','productionCauseEstablished','observerAbiIntegrated','manualBurnedClockReviewRequired','anchors']));
-  requireThat(receipt.schemaVersion === 1 && receipt.scope === 'android-normal-viewing-diagnostic-only' && receipt.outcome === 'normal-viewing-capture-collected');
-  requireThat(['direct','hls','auto-mkv'].includes(receipt.playbackCase));
-  if (autoMkv) requireThat(receipt.preWindowFile === 'Synthetic.Fixture.Movie.2026.1080p.WEB-DL.x264.mkv' && receipt.manualQualitySelected === false);
-  requireThat(receipt.preWindowEngine === (receipt.playbackCase === 'direct' ? 'Webview direct' : 'Webview HLS transcode'));
-  requireThat(Number.isSafeInteger(receipt.preWindowDecodedFrames) && receipt.preWindowDecodedFrames > 0);
+  const common = ['schemaVersion','scope','outcome','playbackCase','windowRequiredMs','windowObservedMs','preWindowPlayingControlVerified','windowStartUptimeMs','noInputDuringWindow','hostedAdmission','fullQualification','productionCauseEstablished','observerAbiIntegrated','manualBurnedClockReviewRequired','anchors'];
+  if (passive) {
+    requireThat(keys(receipt, [...common, 'evidence','engineVerified','fileVerified','decodedFrameBaselineVerified']));
+    requireThat(receipt.playbackCase === 'auto-mkv' && receipt.evidence === 'owned-player-and-Pause-control-only');
+    requireThat(receipt.engineVerified === false && receipt.fileVerified === false && receipt.decodedFrameBaselineVerified === false);
+  } else {
+    requireThat(keys(receipt, [...common, ...(autoMkv ? ['preWindowFile','manualQualitySelected'] : []), 'preWindowEngine','preWindowDecodedFrames','detailsClosedBeforeWindow']));
+    requireThat(receipt.scope === 'android-normal-viewing-diagnostic-only' && ['direct','hls','auto-mkv'].includes(receipt.playbackCase));
+    if (autoMkv) requireThat(receipt.preWindowFile === 'Synthetic.Fixture.Movie.2026.1080p.WEB-DL.x264.mkv' && receipt.manualQualitySelected === false);
+    requireThat(receipt.preWindowEngine === (receipt.playbackCase === 'direct' ? 'Webview direct' : 'Webview HLS transcode'));
+    requireThat(Number.isSafeInteger(receipt.preWindowDecodedFrames) && receipt.preWindowDecodedFrames > 0);
+    requireThat(receipt.detailsClosedBeforeWindow === true);
+  }
+  requireThat(receipt.schemaVersion === 1 && receipt.outcome === 'normal-viewing-capture-collected');
   requireThat(receipt.windowRequiredMs === 480000 && bounded(receipt.windowObservedMs, 480000, 540000));
-  requireThat(receipt.detailsClosedBeforeWindow === true && receipt.preWindowPlayingControlVerified === true && Number.isSafeInteger(receipt.windowStartUptimeMs) && receipt.windowStartUptimeMs > 0 && receipt.noInputDuringWindow === true && receipt.manualBurnedClockReviewRequired === true);
+  requireThat(receipt.preWindowPlayingControlVerified === true && Number.isSafeInteger(receipt.windowStartUptimeMs) && receipt.windowStartUptimeMs > 0 && receipt.noInputDuringWindow === true && receipt.manualBurnedClockReviewRequired === true);
   for (const flag of ['hostedAdmission','fullQualification','productionCauseEstablished','observerAbiIntegrated']) requireThat(receipt[flag] === false);
   requireThat(Array.isArray(receipt.anchors) && receipt.anchors.length === 5);
   const stat = lstatSync(directory); requireThat(stat.isDirectory() && !stat.isSymbolicLink());
@@ -34,7 +43,7 @@ export function validate(receipt, directory) {
     requireThat(sha(readFileSync(path)) === a.sha256);
   });
   requireThat(receipt.anchors[0].elapsedMs <= 5000 && receipt.anchors[4].elapsedMs >= 480000);
-  return { scope: 'android-normal-viewing-diagnostic-only', outcome: 'normal-viewing-capture-collected', hostedAdmission: false, fullQualification: false, productionCauseEstablished: false, observerAbiIntegrated: false, manualBurnedClockReviewRequired: true, reviewStatus: 'manual-review-required' };
+  return { scope: passive ? 'android-passive-normal-viewing-diagnostic-only' : 'android-normal-viewing-diagnostic-only', outcome: 'normal-viewing-capture-collected', hostedAdmission: false, fullQualification: false, productionCauseEstablished: false, observerAbiIntegrated: false, manualBurnedClockReviewRequired: true, reviewStatus: 'manual-review-required' };
 }
 function main(args) {
   requireThat(args.length === 6 && args[0] === '--native' && args[2] === '--evidence-dir' && args[4] === '--output');

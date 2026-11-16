@@ -67,3 +67,29 @@ test('auto MKV is an HLS capture only, with exact file and no quality action', (
     ]) { const copy = structuredClone(value); mutate(copy); assert.throws(() => validate(copy, dir)); }
   } finally { rmSync(dir, {recursive: true, force: true}); }
 });
+
+test('passive normal capture has strict separate non-qualification scope', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'passive-normal-'));
+  try {
+    const value = fixture(dir);
+    value.scope = 'android-passive-normal-viewing-diagnostic-only';
+    value.playbackCase = 'auto-mkv';
+    delete value.preWindowEngine; delete value.preWindowDecodedFrames; delete value.detailsClosedBeforeWindow;
+    value.evidence = 'owned-player-and-Pause-control-only';
+    value.engineVerified = false; value.fileVerified = false; value.decodedFrameBaselineVerified = false;
+    for (const anchor of value.anchors) {
+      anchor.file = anchor.file.replace('-hls.png', '-auto-mkv.png');
+      writeFileSync(join(dir, anchor.file), Buffer.from(`image-${anchor.ordinal - 1}`));
+    }
+    assert.equal(validate(value, dir).scope, 'android-passive-normal-viewing-diagnostic-only');
+    assert.throws(() => validateNativeReceipt(value));
+    for (const mutate of [
+      x => x.scope = 'android-normal-viewing-diagnostic-only', x => x.playbackCase = 'hls',
+      x => x.engineVerified = true, x => x.fileVerified = true, x => x.decodedFrameBaselineVerified = true,
+      x => x.preWindowEngine = 'Webview HLS transcode', x => x.evidence = 'playback',
+      x => x.hostedAdmission = true, x => x.fullQualification = true, x => x.productionCauseEstablished = true,
+      x => x.observerAbiIntegrated = true, x => x.noInputDuringWindow = false,
+      x => x.anchors[0].elapsedMs = 5001, x => x.anchors[4].elapsedMs = 479999,
+    ]) { const copy = structuredClone(value); mutate(copy); assert.throws(() => validate(copy, dir)); }
+  } finally { rmSync(dir, {recursive: true, force: true}); }
+});

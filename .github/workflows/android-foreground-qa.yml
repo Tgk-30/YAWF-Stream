@@ -30,7 +30,7 @@ on:
         required: true
         type: choice
         default: details
-        options: [details, normal-diagnostic]
+        options: [details, normal-diagnostic, passive-normal-diagnostic]
       playback_case:
         description: Ordinary player route
         required: true
@@ -64,7 +64,7 @@ jobs:
     env:
       REQUESTED_MODE: ${{ github.event_name == 'push' && github.ref_name == 'codex/android-foreground114-full-qa' && 'full' || github.event_name == 'workflow_dispatch' && inputs.run_mode == 'full' && 'full' || 'admission' }}
       REQUESTED_CASE: ${{ matrix.playback_case }}
-      REQUESTED_PRESENTATION: ${{ github.event_name == 'workflow_dispatch' && inputs.presentation == 'normal-diagnostic' && 'normal-diagnostic' || 'details' }}
+      REQUESTED_PRESENTATION: ${{ github.event_name == 'workflow_dispatch' && inputs.presentation == 'normal-diagnostic' && 'normal-diagnostic' || github.event_name == 'workflow_dispatch' && inputs.presentation == 'passive-normal-diagnostic' && 'passive-normal-diagnostic' || 'details' }}
       PUBLIC_VERSION: 2.3.105
       PUBLIC_VERSION_CODE: "2003105"
       PUBLIC_APK_BYTES: "88812417"
@@ -112,7 +112,12 @@ jobs:
           if [ "$REQUESTED_CASE" = auto-mkv ]; then
             test "${{ github.event_name }}" = workflow_dispatch
             test "$REQUESTED_MODE" = full
-            test "$REQUESTED_PRESENTATION" = normal-diagnostic
+            if [ "$REQUESTED_PRESENTATION" != passive-normal-diagnostic ]; then test "$REQUESTED_PRESENTATION" = normal-diagnostic; fi
+          fi
+          if [ "$REQUESTED_PRESENTATION" = passive-normal-diagnostic ]; then
+            test "${{ github.event_name }}" = workflow_dispatch
+            test "$REQUESTED_MODE" = full
+            test "$REQUESTED_CASE" = auto-mkv
           fi
           free_bytes="$(df -PB1 "$RUNNER_TEMP" | awk 'NR==2 {print $4}')"
           test "$free_bytes" -ge $((12 * 1024 * 1024 * 1024))
@@ -240,11 +245,11 @@ jobs:
           mode="$REQUESTED_MODE"
           playback_case="$REQUESTED_CASE"
           presentation="$REQUESTED_PRESENTATION"
-          case "$presentation" in details) :;; normal-diagnostic) test "$mode" = full && test "${{ github.event_name }}" = workflow_dispatch;; *) exit 2;; esac
+          case "$presentation" in details) :;; normal-diagnostic) test "$mode" = full && test "${{ github.event_name }}" = workflow_dispatch;; passive-normal-diagnostic) test "$mode" = full && test "$playback_case" = auto-mkv && test "${{ github.event_name }}" = workflow_dispatch;; *) exit 2;; esac
           case "$mode" in admission) instrument_timeout=300;; full) instrument_timeout=900;; *) exit 2;; esac
           case "$playback_case" in
             direct|hls) :;;
-            auto-mkv) test "$mode" = full && test "$presentation" = normal-diagnostic && test "${{ github.event_name }}" = workflow_dispatch;;
+            auto-mkv) test "$mode" = full && { test "$presentation" = normal-diagnostic || test "$presentation" = passive-normal-diagnostic; } && test "${{ github.event_name }}" = workflow_dispatch;;
             *) exit 2;;
           esac
 
@@ -466,6 +471,10 @@ jobs:
               expected={f"normal-anchor-{i:02d}-{os.environ['CASE']}.png" for i in range(1,6)}
               receipt='instrumentation-normal-diagnostic-receipt.json'
               expected.add(receipt)
+          elif os.environ['PRESENTATION']=='passive-normal-diagnostic':
+              expected={f"normal-anchor-{i:02d}-{os.environ['CASE']}.png" for i in range(1,6)}
+              receipt='instrumentation-normal-diagnostic-receipt.json'
+              expected.add(receipt)
           else:
               expected={f"anchor-{i:02d}-{os.environ['MODE']}-{os.environ['CASE']}.png" for i in range(1,count+1)}
               expected.add('instrumentation-foreground-playback-receipt.json')
@@ -474,6 +483,8 @@ jobs:
               assert set(names)==expected, 'Unexpected native evidence inventory'
           elif os.environ['PRESENTATION']=='normal-diagnostic':
               assert set(names)<=expected and receipt in names, 'Unexpected partial normal evidence inventory'
+          elif os.environ['PRESENTATION']=='passive-normal-diagnostic':
+              assert set(names)<=expected and receipt in names, 'Unexpected partial passive evidence inventory'
           else:
               assert set(names)<=expected and 'instrumentation-foreground-playback-receipt.json' in names, 'Unexpected partial native evidence inventory'
           assert len(names)==len(set(names)), 'Duplicate native evidence filename'
@@ -495,7 +506,7 @@ jobs:
           test -s "$fixture_output/ipad-observations.jsonl"
           test "$(wc -c < "$fixture_output/ipad-observations.jsonl" | tr -d ' ')" -le $((8 * 1024 * 1024))
           grep -Fq '"kind":"browser"' "$fixture_output/ipad-observations.jsonl"
-          if [ "$presentation" = normal-diagnostic ]; then
+          if [ "$presentation" = normal-diagnostic ] || [ "$presentation" = passive-normal-diagnostic ]; then
             node scripts/android_normal_foreground_diagnostic.mjs \
               --native "$EVIDENCE/instrumentation-normal-diagnostic-receipt.json" \
               --evidence-dir "$EVIDENCE" --output "$EVIDENCE/normal-diagnostic-summary.json"
@@ -512,6 +523,10 @@ jobs:
           if os.environ['REQUESTED_PRESENTATION']=='normal-diagnostic':
               result=json.loads((evidence/'normal-diagnostic-summary.json').read_text())
               assert result['scope']=='android-normal-viewing-diagnostic-only' and result['outcome']=='normal-viewing-capture-collected'
+              assert result['reviewStatus']=='manual-review-required'
+          elif os.environ['REQUESTED_PRESENTATION']=='passive-normal-diagnostic':
+              result=json.loads((evidence/'normal-diagnostic-summary.json').read_text())
+              assert result['scope']=='android-passive-normal-viewing-diagnostic-only' and result['outcome']=='normal-viewing-capture-collected'
               assert result['reviewStatus']=='manual-review-required'
           else:
               result=json.loads((evidence/'native-stage-summary.json').read_text())
@@ -538,8 +553,8 @@ jobs:
             'fullQualification':False,
             'observerAbiIntegrated':False,
           }
-          if os.environ['REQUESTED_PRESENTATION']=='normal-diagnostic':
-              summary['presentation']='normal-diagnostic'
+          if os.environ['REQUESTED_PRESENTATION'] in ('normal-diagnostic','passive-normal-diagnostic'):
+              summary['presentation']=os.environ['REQUESTED_PRESENTATION']
               summary['normalReceiptSha256']=hashlib.sha256((evidence/'instrumentation-normal-diagnostic-receipt.json').read_bytes()).hexdigest()
           (evidence/'workflow-summary.json').write_text(json.dumps(summary,indent=2)+'\n')
           total=sum(p.stat().st_size for p in evidence.iterdir() if p.is_file())

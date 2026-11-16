@@ -545,7 +545,7 @@ test("workflow contract catches hosted admission and cleanup regressions", () =>
 test('normal viewing is explicit manual full only and preserves the no-input epoch', () => {
   assert.match(workflow, /github\.event_name == 'workflow_dispatch' && inputs\.presentation == 'normal-diagnostic'/);
   assert.match(workflow, /normal-diagnostic\) test "\$mode" = full && test "\$\{\{ github\.event_name \}\}" = workflow_dispatch/);
-  assert.match(workflow, /if \[ "\$presentation" = normal-diagnostic \]; then[\s\S]*android_normal_foreground_diagnostic\.mjs[\s\S]*else[\s\S]*android_foreground_playback_receipt\.mjs/);
+  assert.match(workflow, /if \[ "\$presentation" = normal-diagnostic \] \|\| \[ "\$presentation" = passive-normal-diagnostic \]; then[\s\S]*android_normal_foreground_diagnostic\.mjs[\s\S]*else[\s\S]*android_foreground_playback_receipt\.mjs/);
   const start = driver.indexOf('private void runNormalDiagnostic(');
   const end = driver.indexOf('private void runFlow() throws Exception', start);
   assert.ok(start >= 0 && end > start);
@@ -572,10 +572,10 @@ test('normal viewing is explicit manual full only and preserves the no-input epo
 function autoMkvContract(source, java) {
   assert.match(source, /FIXTURE_SOURCE_SHA: d477d2a3eb2977c429c0a3b1a9128374536075cd/);
   assert.match(source, /sha256sum fixture-source\/scripts\/ipad-foreground\/passive_observer\.mjs[^\n]*73d12d475d280ce430993bcbd709a38e4b8f970cbd9e58d39fabe9a2259b0369/);
-  assert.match(source, /if \[ "\$REQUESTED_CASE" = auto-mkv \]; then\s*test "\$\{\{ github\.event_name \}\}" = workflow_dispatch\s*test "\$REQUESTED_MODE" = full\s*test "\$REQUESTED_PRESENTATION" = normal-diagnostic/);
+  assert.match(source, /if \[ "\$REQUESTED_CASE" = auto-mkv \]; then\s*test "\$\{\{ github\.event_name \}\}" = workflow_dispatch\s*test "\$REQUESTED_MODE" = full\s*if \[ "\$REQUESTED_PRESENTATION" != passive-normal-diagnostic \]; then test "\$REQUESTED_PRESENTATION" = normal-diagnostic; fi/);
   assert.match(source, /fixture_extra=\(\)\s*if \[ "\$playback_case" = auto-mkv \]; then fixture_extra=\(--source-mkv\); fi/);
   assert.match(source, /--foreground-long --ipad-foreground "\$\{fixture_extra\[@\]\}"/);
-  assert.match(java, /!playbackCase\.equals\("auto-mkv"\) \|\| \(mode\.equals\("full"\) && presentation\.equals\("normal-diagnostic"\)\)/);
+  assert.match(java, /!playbackCase\.equals\("auto-mkv"\) \|\| \(mode\.equals\("full"\) && \(presentation\.equals\("normal-diagnostic"\) \|\| presentation\.equals\("passive-normal-diagnostic"\)\)\)/);
   assert.match(java, /if \(playbackCase\.equals\("hls"\)\) \{\s*phase = "selecting-480p"/);
   assert.match(java, /waitForExactMkvFile\(MEDIA_WAIT_MS\)/);
   assert.match(java, /readDefinitionValue\(details, "File", exactLabel\(MKV_FILE\)\)/);
@@ -585,7 +585,7 @@ function autoMkvContract(source, java) {
 test('auto MKV is manual full only with exact source and no quality action', () => {
   autoMkvContract(workflow, driver);
   for (const [from, to] of [
-    ['test "$REQUESTED_MODE" = full', 'test "$REQUESTED_MODE" = admission'],
+    ['if [ "$REQUESTED_CASE" = auto-mkv ]; then\n            test "${{ github.event_name }}" = workflow_dispatch\n            test "$REQUESTED_MODE" = full', 'if [ "$REQUESTED_CASE" = auto-mkv ]; then\n            test "${{ github.event_name }}" = workflow_dispatch\n            test "$REQUESTED_MODE" = admission'],
     ['test "$REQUESTED_PRESENTATION" = normal-diagnostic', 'test "$REQUESTED_PRESENTATION" = details'],
     ['fixture_extra=(--source-mkv)', 'fixture_extra=()'],
   ]) {
@@ -640,4 +640,29 @@ test('details stale retry is limited to pre-input reads', () => {
     assert.equal(driver.split(from).length, 2);
     assert.throws(() => safeDetailsOpeningContract(driver.replace(from, to)));
   }
+});
+
+function passiveNormalContract(source, java) {
+  assert.match(source, /if \[ "\$REQUESTED_PRESENTATION" = passive-normal-diagnostic \]; then\s*test "\$\{\{ github\.event_name \}\}" = workflow_dispatch\s*test "\$REQUESTED_MODE" = full\s*test "\$REQUESTED_CASE" = auto-mkv/);
+  assert.match(source, /inputs\.presentation == 'passive-normal-diagnostic' && 'passive-normal-diagnostic'/);
+  const flow = java.slice(java.indexOf('private void runFlow() throws Exception'), java.indexOf('private void launchProduct()'));
+  assert.match(flow, /waitForUniquePlayerDialog\(MEDIA_WAIT_MS\);\s*if \(presentation\.equals\("passive-normal-diagnostic"\)\) \{\s*runPassiveNormalDiagnostic\(\);\s*return;\s*\}[\s\S]*openDetailsOnce\(\)/);
+  const body = java.slice(java.indexOf('private void runPassiveNormalDiagnostic()'), java.indexOf('private void runNormalDiagnostic('));
+  assert.match(body, /SystemClock\.uptimeMillis\(\) \+ MEDIA_WAIT_MS/);
+  assert.match(body, /clearCache\(\)[\s\S]*assertNormalOwnership\(\)[\s\S]*findLabeledClickableWithin\(player, "Pause", "pause control"\)/);
+  assert.match(body, /noInputWindowStarted = true;\s*windowStartedMs = SystemClock\.uptimeMillis\(\);\s*captureNormalAnchor\(1, 0\)/);
+  assert.match(body, /index = 1; index < 5; index\+\+/);
+  assert.doesNotMatch(body, /openDetailsOnce|guardedClick\(|\.click\(|openPlaybackSettings|\.play\(/);
+  assert.match(java, /!presentation\.equals\("passive-normal-diagnostic"\) \|\| \(mode\.equals\("full"\) && playbackCase\.equals\("auto-mkv"\)\)/);
+}
+test('passive auto MKV bypasses Info and captures without input', () => {
+  passiveNormalContract(workflow, driver);
+  for (const [from, to] of [
+    ['test "$REQUESTED_CASE" = auto-mkv', 'test "$REQUESTED_CASE" = direct'],
+    ["inputs.presentation == 'passive-normal-diagnostic' && 'passive-normal-diagnostic'", "inputs.presentation == 'details' && 'passive-normal-diagnostic'"],
+  ]) { assert.equal(workflow.split(from).length, 2); assert.throws(() => passiveNormalContract(workflow.replace(from, to), driver)); }
+  for (const [from, to] of [
+    ['runPassiveNormalDiagnostic();\n            return;', 'openDetailsOnce();\n            runPassiveNormalDiagnostic();\n            return;'],
+    ['noInputWindowStarted = true;\n        windowStartedMs = SystemClock.uptimeMillis();\n        captureNormalAnchor(1, 0);\n        assertTrue("Accessibility cache refresh failed after passive baseline screenshot"', 'noInputWindowStarted = true;\n        details.click();\n        windowStartedMs = SystemClock.uptimeMillis();\n        captureNormalAnchor(1, 0);\n        assertTrue("Accessibility cache refresh failed after passive baseline screenshot"'],
+  ]) { assert.equal(driver.split(from).length, 2); assert.throws(() => passiveNormalContract(workflow, driver.replace(from, to))); }
 });

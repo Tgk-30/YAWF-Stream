@@ -116,11 +116,12 @@ public final class RuntimeForegroundPlaybackFlowTest {
         mode = arguments.getString("playbackMode", "admission").trim();
         playbackCase = arguments.getString("playbackCase", "direct").trim();
         presentation = arguments.getString("presentation", "details").trim();
-        assertTrue("Unsupported presentation", presentation.equals("details") || presentation.equals("normal-diagnostic"));
+        assertTrue("Unsupported presentation", presentation.equals("details") || presentation.equals("normal-diagnostic") || presentation.equals("passive-normal-diagnostic"));
         assertTrue("Normal diagnostic requires full mode", !presentation.equals("normal-diagnostic") || mode.equals("full"));
         assertTrue("Unsupported playbackMode", mode.equals("admission") || mode.equals("full"));
         assertTrue("Unsupported playbackCase", playbackCase.equals("direct") || playbackCase.equals("hls") || playbackCase.equals("auto-mkv"));
-        assertTrue("Auto MKV requires full normal diagnostic", !playbackCase.equals("auto-mkv") || (mode.equals("full") && presentation.equals("normal-diagnostic")));
+        assertTrue("Auto MKV requires full normal diagnostic", !playbackCase.equals("auto-mkv") || (mode.equals("full") && (presentation.equals("normal-diagnostic") || presentation.equals("passive-normal-diagnostic"))));
+        assertTrue("Passive diagnostic requires full auto MKV", !presentation.equals("passive-normal-diagnostic") || (mode.equals("full") && playbackCase.equals("auto-mkv")));
         windowMs = mode.equals("full") ? FULL_WINDOW_MS : ADMISSION_WINDOW_MS;
 
         String evidenceSubdir = arguments.getString("evidenceSubdir", EVIDENCE_SUBDIR);
@@ -135,7 +136,7 @@ public final class RuntimeForegroundPlaybackFlowTest {
         String failureClass = null;
         try {
             runFlow();
-            outcome = presentation.equals("normal-diagnostic") ? "normal-viewing-capture-collected" : "native-window-observed";
+            outcome = (presentation.equals("normal-diagnostic") || presentation.equals("passive-normal-diagnostic")) ? "normal-viewing-capture-collected" : "native-window-observed";
         } catch (Throwable caught) {
             failureClass = caught.getClass().getSimpleName();
             sendRefusalDiagnostic(caught);
@@ -192,6 +193,43 @@ public final class RuntimeForegroundPlaybackFlowTest {
             default:
                 return "unrecognized";
         }
+    }
+
+    private void runPassiveNormalDiagnostic() throws Exception {
+        long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT_MS;
+        boolean pauseVisible = false;
+        while (SystemClock.uptimeMillis() < deadline) {
+            try {
+                assertTrue("Accessibility cache refresh failed before passive window", instrumentation.getUiAutomation().clearCache());
+                assertNormalOwnership();
+                UiObject2 player = requireUniqueExactProductDialog(PLAYER_DIALOG_LABEL, "player");
+                UiObject2 pause = findLabeledClickableWithin(player, "Pause", "pause control");
+                if (pause != null && hasVisibleBounds(pause)) { pauseVisible = true; break; }
+            } catch (StaleObjectException stale) {
+                // Read-only reacquisition; no input is issued.
+            }
+            SystemClock.sleep(250);
+        }
+        assertTrue("Visible Pause control unavailable before passive window", pauseVisible);
+        normalPlayingControl = true;
+        phase = "measured-no-input-window";
+        noInputWindowStarted = true;
+        windowStartedMs = SystemClock.uptimeMillis();
+        captureNormalAnchor(1, 0);
+        assertTrue("Accessibility cache refresh failed after passive baseline screenshot", instrumentation.getUiAutomation().clearCache());
+        assertNormalOwnership();
+        for (int index = 1; index < 5; index++) {
+            sleepUntil(windowStartedMs + (FULL_WINDOW_MS * index) / 4);
+            assertTrue("Accessibility cache refresh failed during passive observation", instrumentation.getUiAutomation().clearCache());
+            assertNormalOwnership();
+            long elapsedMs = SystemClock.uptimeMillis() - windowStartedMs;
+            captureNormalAnchor(index + 1, elapsedMs);
+            assertTrue("Accessibility cache refresh failed after passive screenshot", instrumentation.getUiAutomation().clearCache());
+            assertNormalOwnership();
+        }
+        windowEndedMs = SystemClock.uptimeMillis();
+        assertTrue("Passive diagnostic window too short", windowEndedMs - windowStartedMs >= FULL_WINDOW_MS);
+        phase = "native-observation-complete";
     }
 
     private void runNormalDiagnostic(UiObject2 details, FrameSample readyStats) throws Exception {
@@ -291,6 +329,10 @@ public final class RuntimeForegroundPlaybackFlowTest {
         guardedClick(source, "synthetic source");
         sourceSelected = true;
         waitForUniquePlayerDialog(MEDIA_WAIT_MS);
+        if (presentation.equals("passive-normal-diagnostic")) {
+            runPassiveNormalDiagnostic();
+            return;
+        }
 
         if (playbackCase.equals("hls")) {
             phase = "selecting-480p";
@@ -874,6 +916,30 @@ public final class RuntimeForegroundPlaybackFlowTest {
     }
 
     private void writeReceipt(String outcome, String failureClass) throws Exception {
+        if ("passive-normal-diagnostic".equals(presentation)) {
+            JSONObject passive = new JSONObject();
+            passive.put("schemaVersion", 1);
+            passive.put("scope", "android-passive-normal-viewing-diagnostic-only");
+            passive.put("outcome", outcome);
+            passive.put("playbackCase", playbackCase);
+            passive.put("evidence", "owned-player-and-Pause-control-only");
+            passive.put("engineVerified", false);
+            passive.put("fileVerified", false);
+            passive.put("decodedFrameBaselineVerified", false);
+            passive.put("windowRequiredMs", FULL_WINDOW_MS);
+            passive.put("windowObservedMs", windowStartedMs >= 0 && windowEndedMs >= windowStartedMs ? windowEndedMs - windowStartedMs : 0);
+            passive.put("preWindowPlayingControlVerified", normalPlayingControl);
+            passive.put("windowStartUptimeMs", windowStartedMs);
+            passive.put("noInputDuringWindow", noInputWindowStarted);
+            passive.put("hostedAdmission", false);
+            passive.put("fullQualification", false);
+            passive.put("productionCauseEstablished", false);
+            passive.put("observerAbiIntegrated", false);
+            passive.put("manualBurnedClockReviewRequired", true);
+            passive.put("anchors", new JSONArray(anchors));
+            writeBounded(new File(evidenceDir, "instrumentation-normal-diagnostic-receipt.json"), passive.toString(2) + "\n", 64 * 1024);
+            return;
+        }
         if ("normal-diagnostic".equals(presentation)) {
             JSONObject normal = new JSONObject();
             normal.put("schemaVersion", 1);
