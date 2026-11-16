@@ -212,6 +212,64 @@ class NativePolicyTests(unittest.TestCase):
                 self.assertEqual(run.result['lastCommand'], 'inventory')
                 self.assertIs(run.result['commandSuccess']['inventory'], False)
 
+    def test_bootstatus_census_timing_and_log_growth_without_log_content(self):
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout), tempfile.TemporaryDirectory() as tmp:
+                run = self.diagnostic_run(Path(tmp))
+                clock = SimpleNamespace(now=0.0)
+                run.deadline = 100.0
+                holder = {}
+                class FakeProcess:
+                    returncode = None
+                    def poll(self):
+                        if not timeout and clock.now >= 1.39:
+                            self.returncode = 0
+                        return self.returncode
+                def fake_popen(_args, **kwargs):
+                    holder['output'] = kwargs['stdout']
+                    return FakeProcess()
+                def monitor():
+                    clock.now += 0.2
+                    holder['output'].write(b'privateSentinel\n')
+                    holder['output'].flush()
+                run.monitor = monitor
+                def sleep(seconds): clock.now += seconds
+                with patch.object(runner.time, 'monotonic', side_effect=lambda: clock.now), \
+                     patch.object(runner.time, 'sleep', side_effect=sleep), \
+                     patch.object(runner.subprocess, 'Popen', side_effect=fake_popen):
+                    if timeout:
+                        with self.assertRaisesRegex(runner.Refusal, 'COMMAND_TIMEOUT_BOOTSTATUS'):
+                            run.command('bootstatus', ['unused'], 1)
+                    else:
+                        run.command('bootstatus', ['unused'], 3)
+                diag = run.result['bootstatusDiagnostic']
+                self.assertEqual(diag['pollCount'], 4)
+                self.assertEqual(diag['monitorCalls'], 2)
+                self.assertEqual(diag['monitorTotalMs'], 400.0)
+                self.assertEqual(diag['monitorMaxMs'], 200.0)
+                self.assertEqual(diag['elapsedMs'], 1400.0)
+                self.assertEqual(diag['ownedLogBytes'], len(b'privateSentinel\n') * 2)
+                self.assertEqual(diag['growthEvents'], 2)
+                self.assertEqual((diag['firstGrowthMs'], diag['lastGrowthMs']), (200.0, 900.0))
+                self.assertEqual(diag['exitClass'], 'running-at-deadline' if timeout else 'zero')
+                self.assertNotIn('privateSentinel', json.dumps(run.result))
+
+    def test_bootstatus_exit_classes_and_interrupted_monitor_do_not_guess(self):
+        diag = runner.BootStatusDiagnostic(0)
+        for code, expected in ((0, 'zero'), (1, 'nonzero'), (-9, 'signal')):
+            self.assertEqual(diag.finish(1, 2, code)['exitClass'], expected)
+        self.assertIsNone(diag.finish(1, 2, None)['exitClass'])
+        self.assertEqual(diag.finish(2, 2, None)['exitClass'], 'running-at-deadline')
+        with tempfile.TemporaryDirectory() as tmp:
+            run = self.diagnostic_run(Path(tmp))
+            process = SimpleNamespace(poll=lambda: None, returncode=None)
+            run.monitor = lambda: (_ for _ in ()).throw(runner.Refusal('ORIGINAL_MONITOR_FAILURE'))
+            with patch.object(runner.subprocess, 'Popen', return_value=process):
+                with self.assertRaisesRegex(runner.Refusal, 'ORIGINAL_MONITOR_FAILURE'):
+                    run.command('bootstatus', ['unused'], 20)
+            self.assertIsNone(run.result['bootstatusDiagnostic']['exitClass'])
+            self.assertEqual(run.result['bootstatusDiagnostic']['monitorCalls'], 1)
+
     def test_no_create_does_not_report_a_failed_device_deletion(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = self.diagnostic_run(Path(tmp))
@@ -246,6 +304,61 @@ class NativePolicyTests(unittest.TestCase):
             self.assertEqual(receipt['cleanupErrors'], ['OWNED_DEVICE_CLEANUP'])
             self.assertTrue(receipt['cleanupObservationUnavailable'])
             self.assertNotIn('private-marker', json.dumps(receipt))
+
+    def test_cleanup_failure_stage_and_state_never_mask_primary(self):
+        for failure in ('inventory', 'shutdown', 'delete', 'verify'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                run = self.diagnostic_run(Path(tmp))
+                run.before = {}
+                run.create_attempted = True
+                run.device = str(uuid.uuid4()).upper()
+                run.result.update({'code': 'COMMAND_TIMEOUT_BOOTSTATUS', 'primaryCode': 'COMMAND_TIMEOUT_BOOTSTATUS'})
+                calls = {'inventory': 0}
+                def fake_run(args, **_kwargs):
+                    operation = args[2]
+                    if operation == 'list':
+                        stage = 'inventory' if calls['inventory'] == 0 else 'verify'
+                        calls['inventory'] += 1
+                    else:
+                        stage = operation
+                    if stage == failure: raise OSError('privateSentinel')
+                    rows = [{'udid': run.device, 'name': run.device_name, 'state': 'Booted'}] if stage == 'inventory' else []
+                    return SimpleNamespace(stdout=json.dumps({'devices': {runner.RUNTIME: rows}}).encode())
+                with patch.object(runner.subprocess, 'run', side_effect=fake_run), \
+                     patch.object(runner, 'unavailable', return_value=True):
+                    self.assertFalse(run.cleanup())
+                receipt = json.loads(run.receipt.read_text())
+                self.assertEqual(receipt['code'], 'COMMAND_TIMEOUT_BOOTSTATUS')
+                self.assertEqual(receipt['primaryCode'], 'COMMAND_TIMEOUT_BOOTSTATUS')
+                self.assertEqual(receipt['cleanupCode'], 'CLEANUP_FAILED')
+                self.assertEqual(receipt['cleanupFailureStage'], failure)
+                self.assertEqual(receipt['cleanupDeviceState'], None if failure == 'inventory' else 'Booted')
+                self.assertNotIn('privateSentinel', json.dumps(receipt))
+
+    def test_cleanup_device_state_is_fixed_allowlist_only(self):
+        for state, expected in (('Shutdown', 'Shutdown'), ('Creating', 'Creating'),
+                                ('Booting', 'Booting'), ('ShuttingDown', 'ShuttingDown'),
+                                ('privateSentinel', 'other')):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                run = self.diagnostic_run(Path(tmp))
+                run.before = {}
+                run.create_attempted = True
+                run.device = str(uuid.uuid4()).upper()
+                lists = 0
+                def fake_run(args, **_kwargs):
+                    nonlocal lists
+                    rows = []
+                    if args[2] == 'list':
+                        lists += 1
+                        if lists == 1: rows = [{'udid': run.device, 'name': run.device_name, 'state': state}]
+                    return SimpleNamespace(stdout=json.dumps({'devices': {runner.RUNTIME: rows}}).encode())
+                with patch.object(runner.subprocess, 'run', side_effect=fake_run), \
+                     patch.object(runner, 'unavailable', return_value=True):
+                    self.assertTrue(run.cleanup())
+                receipt = json.loads(run.receipt.read_text())
+                self.assertEqual(receipt['cleanupDeviceState'], expected)
+                self.assertIsNone(receipt['cleanupFailureStage'])
+                self.assertNotIn('privateSentinel', json.dumps(receipt))
 
     def test_network_canary_only_publishes_bounded_numeric_and_classification(self):
         self.assertEqual(runner.canary_diagnostic(1, b'60\n', b''),

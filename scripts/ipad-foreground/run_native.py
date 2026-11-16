@@ -185,6 +185,57 @@ def native_refusal_code(text):
     return match.group(1) if match else None
 
 
+class BootStatusDiagnostic:
+    """Only monotonic timings, counts and owned-log size, never log contents."""
+    def __init__(self, started):
+        self.started = started
+        self.poll_count = 0
+        self.monitor_calls = 0
+        self.monitor_total = 0.0
+        self.monitor_max = 0.0
+        self.log_bytes = 0
+        self.last_size = 0
+        self.growth_events = 0
+        self.first_growth = None
+        self.last_growth = None
+
+    def monitor_finished(self, started, finished):
+        duration = max(0.0, finished - started)
+        self.monitor_calls += 1
+        self.monitor_total += duration
+        self.monitor_max = max(self.monitor_max, duration)
+
+    def observe_log(self, fd, now):
+        try:
+            size = os.fstat(fd).st_size
+            if size < 0: raise ValueError('NEGATIVE_SIZE')
+        except (OSError, ValueError):
+            self.log_bytes = None
+            return
+        self.log_bytes = size
+        if size > self.last_size:
+            elapsed = round(max(0.0, now - self.started) * 1000, 3)
+            self.growth_events += 1
+            if self.first_growth is None: self.first_growth = elapsed
+            self.last_growth = elapsed
+        self.last_size = size
+
+    def finish(self, now, deadline, exit_code):
+        if exit_code is None:
+            exit_class = 'running-at-deadline' if now >= deadline else None
+        elif exit_code == 0:
+            exit_class = 'zero'
+        elif exit_code < 0:
+            exit_class = 'signal'
+        else:
+            exit_class = 'nonzero'
+        return {'elapsedMs': round(max(0.0, now - self.started) * 1000, 3),
+                'pollCount': self.poll_count, 'monitorCalls': self.monitor_calls,
+                'monitorTotalMs': round(self.monitor_total * 1000, 3), 'monitorMaxMs': round(self.monitor_max * 1000, 3),
+                'ownedLogBytes': self.log_bytes, 'growthEvents': self.growth_events,
+                'firstGrowthMs': self.first_growth, 'lastGrowthMs': self.last_growth, 'exitClass': exit_class}
+
+
 def measure_owned_device(device, runtime_root, expected_identity):
     """Admit and recheck the exact device directory without following links."""
     device = Path(device)
@@ -312,13 +363,30 @@ class Run:
                 process = subprocess.Popen(args, stdout=output, stderr=stderr_file if canary else subprocess.STDOUT,
                                            env=env or self.env, start_new_session=True)
                 end = min(self.deadline - CLEANUP_SECONDS, time.monotonic() + seconds)
+                boot_diagnostic = BootStatusDiagnostic(time.monotonic()) if label == 'bootstatus' else None
+                def poll():
+                    if boot_diagnostic is not None: boot_diagnostic.poll_count += 1
+                    return process.poll()
                 try:
-                    while process.poll() is None and time.monotonic() < end:
-                        if monitor: self.monitor()
+                    while poll() is None and time.monotonic() < end:
+                        if monitor:
+                            if boot_diagnostic is None:
+                                self.monitor()
+                            else:
+                                monitor_start = time.monotonic()
+                                try: self.monitor()
+                                finally:
+                                    monitor_end = time.monotonic()
+                                    boot_diagnostic.monitor_finished(monitor_start, monitor_end)
+                                    boot_diagnostic.observe_log(output.fileno(), monitor_end)
                         time.sleep(.5)
-                    require(process.poll() is not None, 'COMMAND_TIMEOUT_' + label.upper())
+                    require(poll() is not None, 'COMMAND_TIMEOUT_' + label.upper())
                     require(process.returncode == 0, 'COMMAND_FAILED_' + label.upper())
                 finally:
+                    if boot_diagnostic is not None:
+                        boot_end = time.monotonic()
+                        boot_diagnostic.observe_log(output.fileno(), boot_end)
+                        self.result['bootstatusDiagnostic'] = boot_diagnostic.finish(boot_end, end, process.returncode)
                     try: self.stop(process)
                     finally:
                         if canary:
@@ -561,6 +629,8 @@ class Run:
 
     def cleanup(self):
         errors = []
+        self.result['cleanupFailureStage'] = None
+        self.result['cleanupDeviceState'] = None
         try: self.stop(self.fixture)
         except Exception: errors.append('FIXTURE_TERMINATION')
         try:
@@ -578,6 +648,7 @@ class Run:
                 self.result['primaryCode'] = 'DEVICE_CREATION_NOT_ATTEMPTED'
                 self.result['code'] = 'DEVICE_CREATION_NOT_ATTEMPTED'
         else:
+            cleanup_stage = 'inventory'
             try:
                 require(self.before is not None, 'CLEANUP_BASELINE_MISSING')
                 result = subprocess.run(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], env=self.env,
@@ -589,9 +660,14 @@ class Run:
                     self.device = candidates[0]['udid']; self.result['deviceCreated'] = True
                 if self.device:
                     require(len(candidates) == 1 and candidates[0]['udid'].lower() == self.device.lower(), 'CLEANUP_IDENTITY')
-                    if candidates[0].get('state') == 'Booted':
+                    state = candidates[0].get('state')
+                    self.result['cleanupDeviceState'] = state if state in ('Booted', 'Shutdown', 'Creating', 'Booting', 'ShuttingDown') else 'other'
+                    if state == 'Booted':
+                        cleanup_stage = 'shutdown'
                         subprocess.run(['/usr/bin/xcrun', 'simctl', 'shutdown', self.device], env=self.env, capture_output=True, timeout=15, check=True)
+                    cleanup_stage = 'delete'
                     subprocess.run(['/usr/bin/xcrun', 'simctl', 'delete', self.device], env=self.env, capture_output=True, timeout=15, check=True)
+                    cleanup_stage = 'verify'
                     after_raw = subprocess.run(['/usr/bin/xcrun', 'simctl', 'list', 'devices', '--json'], env=self.env,
                                                capture_output=True, timeout=10, check=True)
                     after = {x['udid'] for rows in json.loads(after_raw.stdout)['devices'].values() for x in rows}
@@ -599,9 +675,11 @@ class Run:
                     self.result['deviceDeleted'] = True
                 self.result['cleanupObservation'] = 'observed'
             except Refusal:
+                self.result['cleanupFailureStage'] = cleanup_stage
                 self.result['cleanupObservation'] = 'unsafe'
                 errors.append('OWNED_DEVICE_CLEANUP')
             except Exception:
+                self.result['cleanupFailureStage'] = cleanup_stage
                 self.result['cleanupObservation'] = 'unavailable'
                 self.result['cleanupObservationUnavailable'] = True
                 errors.append('OWNED_DEVICE_CLEANUP')
