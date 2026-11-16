@@ -4,6 +4,7 @@ import os
 import json
 from pathlib import Path
 import plistlib
+import re
 import tempfile
 import time
 from types import SimpleNamespace
@@ -338,6 +339,85 @@ class NativePolicyTests(unittest.TestCase):
                     run.admit_network()
             self.assertFalse(run.network_admitted)
             self.assertFalse(run.result['networkAdmitted'])
+
+    def test_fixture_diagnostic_enums_follow_fixture_source(self):
+        source = (runner.REPO / 'scripts/android_external_player_server_fixture.mts').read_text()
+        for name, expected in (('ForegroundFixtureStage', runner.FIXTURE_STAGES),
+                               ('ForegroundFixtureFailure', runner.FIXTURE_FAILURES)):
+            match = re.search(r'type ' + name + r'\s*=\s*(.*?);', source, re.DOTALL)
+            self.assertIsNotNone(match)
+            self.assertEqual(frozenset(re.findall(r'"([a-z0-9-]+)"', match.group(1))), expected)
+
+    def test_fixture_diagnostic_rejects_duplicates_invalid_data_and_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); status = root / 'status.json'
+            ready = {'schemaVersion': 1, 'stage': 'ready', 'status': 'ready', 'failureCode': None, 'childExitCode': None}
+            refused = {'schemaVersion': 1, 'stage': 'mp4-generation', 'status': 'refused',
+                       'failureCode': 'ffmpeg-exit', 'childExitCode': 137}
+            self.assertEqual(runner.fixture_diagnostic(status), 'unavailable')
+            for value in (ready, refused):
+                status.write_text(json.dumps(value))
+                self.assertEqual(runner.fixture_diagnostic(status), value)
+            invalid = [
+                {**ready, 'extra': 'secret'}, {k: v for k, v in ready.items() if k != 'stage'},
+                {**ready, 'schemaVersion': True}, {**ready, 'schemaVersion': 2},
+                {**ready, 'stage': 'private-path'}, {**ready, 'status': 'unexpected'},
+                {**ready, 'failureCode': 'private-error'}, {**ready, 'childExitCode': True},
+                {**refused, 'childExitCode': -1}, {**refused, 'childExitCode': 256},
+                {**refused, 'failureCode': None}, {**ready, 'stage': 'input-check'},
+            ]
+            for value in invalid:
+                status.write_text(json.dumps(value))
+                self.assertEqual(runner.fixture_diagnostic(status), 'unavailable')
+            for raw in ('{"schemaVersion":1,"schemaVersion":1,"stage":"ready","status":"ready","failureCode":null,"childExitCode":null}',
+                        '{not-json', ' ' * (16 * 1024 + 1)):
+                status.write_text(raw)
+                self.assertEqual(runner.fixture_diagnostic(status), 'unavailable')
+            status.unlink()
+            target = root / 'target'; target.write_text(json.dumps(ready))
+            status.symlink_to(target)
+            self.assertEqual(runner.fixture_diagnostic(status), 'unavailable')
+
+    def test_direct_tsx_loader_and_fixture_failure_precedence(self):
+        ready = {'schemaVersion': 1, 'stage': 'ready', 'status': 'ready', 'failureCode': None, 'childExitCode': None}
+        refused = {'schemaVersion': 1, 'stage': 'mp4-generation', 'status': 'refused',
+                   'failureCode': 'ffmpeg-exit', 'childExitCode': 42}
+        cases = ((None, ready, None, None), (None, refused, 'FIXTURE_REFUSED', None),
+                 (65, refused, 'FIXTURE_EXITED', 65), (0, {'unexpected': 'secret'}, 'FIXTURE_EXITED', 0),
+                 (400, ready, 'FIXTURE_EXITED', None))
+        for exit_code, value, failure, recorded in cases:
+            with self.subTest(exit_code=exit_code, failure=failure), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); (root / 'configs').mkdir(); (root / 'fixture').mkdir()
+                sandbox = root / 'configs/fixture.sb'; sandbox.write_text('owned-profile')
+                status = root / 'fixture/foreground-fixture-status.json'; status.write_text(json.dumps(value))
+                run = self.diagnostic_run(root)
+                run.network_admitted = True; run.network_profile_sha = runner.sha(sandbox)
+                run.node = Path('/test/node'); run.token = 'a' * 64
+                run.env = {'TMPDIR': str(root / 'tmp'), 'PATH': '/test/bin'}
+                process = SimpleNamespace(poll=lambda: exit_code)
+                try:
+                    with patch.object(runner.subprocess, 'Popen', return_value=process) as spawn:
+                        if failure:
+                            with self.assertRaisesRegex(runner.Refusal, failure): run.start_fixture()
+                        else:
+                            run.start_fixture()
+                        args = spawn.call_args.args[0]
+                        self.assertEqual(args[:4], ['/usr/bin/sandbox-exec', '-f', str(sandbox), '/test/node'])
+                        self.assertEqual(args[4:7], ['--import', str(runner.REPO / 'server/node_modules/tsx/dist/loader.mjs'),
+                                                      str(runner.REPO / 'scripts/android_external_player_server_fixture.mts')])
+                        self.assertNotIn(str(runner.REPO / 'server/node_modules/tsx/dist/cli.mjs'), args)
+                        self.assertEqual(args[7:], ['--repo', str(runner.REPO), '--output', str(root / 'fixture'),
+                                                    '--foreground-long', '--ipad-foreground'])
+                        env = spawn.call_args.kwargs['env']
+                        self.assertEqual(env['TMPDIR'], run.env['TMPDIR'])
+                        self.assertEqual(env['PATH'], run.env['PATH'])
+                        self.assertEqual(env['HOME'], str(root))
+                        self.assertEqual(env['IPAD_QA_CONTROL_TOKEN'], run.token)
+                    self.assertEqual(run.result.get('fixtureExitCode'), recorded)
+                    self.assertEqual(run.result['fixtureDiagnostic'], value if value in (ready, refused) else 'unavailable')
+                    self.assertNotIn('secret', json.dumps(run.result))
+                finally:
+                    if run.fixture_log: run.fixture_log.close()
 
 
 if __name__ == '__main__':

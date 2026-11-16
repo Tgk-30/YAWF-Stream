@@ -10,6 +10,7 @@ import re
 import secrets
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -39,6 +40,16 @@ PHASES = frozenset(('initialization', 'host-admission', 'toolchain-admission', '
 PROFILE_OPERATORS = frozenset(('version', 'allow', 'default', 'deny', 'network*', 'network-inbound',
                                'network-outbound', 'local', 'remote', 'ip', 'file-write*', 'require-all',
                                'require-not', 'subpath', 'literal'))
+FIXTURE_STAGES = frozenset(('input-check', 'media-preflight', 'mp4-generation', 'static-hls-generation',
+    'media-probe', 'media-output-check', 'long-mp4-generation', 'long-media-probe', 'runtime-init', 'media-listen',
+    'server-build', 'seed-owner', 'seed-credentials', 'seed-settings', 'seed-watchlist', 'smoke-media', 'smoke-addon',
+    'smoke-outbound', 'smoke-login', 'smoke-bootstrap', 'smoke-watchlist', 'smoke-discover', 'smoke-detail',
+    'smoke-streams', 'smoke-resolve', 'smoke-proxy-full', 'smoke-proxy-range', 'smoke-external-full',
+    'smoke-external-range', 'smoke-web', 'smoke-receipt', 'server-listen', 'ready'))
+FIXTURE_FAILURES = frozenset(('input-missing', 'input-invalid', 'ffmpeg-execution', 'ffmpeg-exit',
+    'ffmpeg-filter-missing', 'font-missing', 'probe-execution', 'probe-exit', 'probe-json', 'probe-streams',
+    'probe-codecs', 'media-layout', 'media-file', 'http-status', 'csrf-missing', 'smoke-assertion',
+    'json-response', 'unclassified-error'))
 
 
 class Refusal(Exception):
@@ -58,10 +69,52 @@ def sha(path):
     return h.hexdigest()
 
 
-def read_json(path, limit=16 * 1024):
+def read_json(path, limit=16 * 1024, *, reject_duplicates=False):
     path = Path(path)
     require(path.is_file() and not path.is_symlink() and path.stat().st_size <= limit, 'BOUNDED_FILE_REQUIRED')
-    return json.loads(path.read_text())
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result: raise ValueError('DUPLICATE_JSON_KEY')
+            result[key] = value
+        return result
+    if not reject_duplicates:
+        return json.loads(path.read_text())
+    require(hasattr(os, 'O_NOFOLLOW'), 'NOFOLLOW_REQUIRED')
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        require(stat.S_ISREG(info.st_mode) and info.st_size <= limit, 'BOUNDED_FILE_REQUIRED')
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            data = stream.read(limit + 1)
+        require(len(data) <= limit, 'BOUNDED_FILE_REQUIRED')
+        return json.loads(data, object_pairs_hook=unique_pairs)
+    finally:
+        os.close(fd)
+
+
+def fixture_diagnostic(path):
+    """Only fixed fixture status fields may enter the sanitized receipt."""
+    try:
+        value = read_json(path, reject_duplicates=True)
+        if not isinstance(value, dict) or set(value) != {'schemaVersion', 'stage', 'status', 'failureCode', 'childExitCode'}:
+            return 'unavailable'
+        stage, status, failure, child = value['stage'], value['status'], value['failureCode'], value['childExitCode']
+        if type(value['schemaVersion']) is not int or value['schemaVersion'] != 1 or \
+           not isinstance(stage, str) or stage not in FIXTURE_STAGES or \
+           not isinstance(status, str) or status not in ('running', 'refused', 'ready'):
+            return 'unavailable'
+        if failure is not None and (not isinstance(failure, str) or failure not in FIXTURE_FAILURES):
+            return 'unavailable'
+        if child is not None and (type(child) is not int or not 0 <= child <= 255):
+            return 'unavailable'
+        if (status == 'refused') != (failure is not None) or \
+           (status != 'refused' and child is not None) or \
+           (status == 'ready' and stage != 'ready') or (status == 'running' and stage == 'ready'):
+            return 'unavailable'
+        return {key: value[key] for key in ('schemaVersion', 'stage', 'status', 'failureCode', 'childExitCode')}
+    except (OSError, UnicodeError, ValueError, TypeError, Refusal):
+        return 'unavailable'
 
 
 def unavailable(port):
@@ -368,16 +421,20 @@ class Run:
         self.fixture_log = (self.root / 'fixture.log').open('xb')
         self.start_command('fixture')
         self.fixture = subprocess.Popen(['/usr/bin/sandbox-exec', '-f', str(sandbox), str(self.node),
-            str(REPO / 'server/node_modules/tsx/dist/cli.mjs'), str(REPO / 'scripts/android_external_player_server_fixture.mts'),
+            '--import', str(REPO / 'server/node_modules/tsx/dist/loader.mjs'), str(REPO / 'scripts/android_external_player_server_fixture.mts'),
             '--repo', str(REPO), '--output', str(self.root / 'fixture'), '--foreground-long', '--ipad-foreground'],
             env=env, stdout=self.fixture_log, stderr=subprocess.STDOUT, start_new_session=True)
         end = min(self.deadline - CLEANUP_SECONDS, time.monotonic() + 360)
         status = self.root / 'fixture/foreground-fixture-status.json'
         while time.monotonic() < end:
             self.monitor()
-            require(self.fixture.poll() is None, 'FIXTURE_EXITED')
-            if status.exists():
-                value = read_json(status)
+            value = fixture_diagnostic(status)
+            self.result['fixtureDiagnostic'] = value
+            exit_code = self.fixture.poll()
+            if type(exit_code) is int and -255 <= exit_code <= 255:
+                self.result['fixtureExitCode'] = exit_code
+            require(exit_code is None, 'FIXTURE_EXITED')
+            if isinstance(value, dict):
                 if value.get('status') == 'refused': raise Refusal('FIXTURE_REFUSED')
                 if value.get('status') == 'ready':
                     self.finish_command('fixture')
