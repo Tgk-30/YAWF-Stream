@@ -1,0 +1,62 @@
+name: Fresh server HLS startup unit QA
+on:
+  push:
+    branches:
+      - codex/server-event-start115
+    paths:
+      - .github/workflows/fresh-hls-start-qa.yml
+      - scripts/check_fresh_server_hls_start_regressions.mjs
+      - web/src/components/VideoPlayer.tsx
+      - web/src/components/VideoPlayer.test.tsx
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  fresh-hls-start:
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref_type == 'branch' && github.ref == 'refs/heads/codex/server-event-start115' && github.repository == 'Tgk-30/YAWF-Stream' && github.repository_owner == 'Tgk-30' && github.actor == github.repository_owner }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          lfs: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.3
+      - name: Install locked web test dependencies
+        working-directory: web
+        run: npm ci
+      - name: Run complete VideoPlayer unit file and web typecheck
+        working-directory: web
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { spawnSync } from 'node:child_process';
+          const checks = [
+            ['VideoPlayer unit file', ['node_modules/vitest/vitest.mjs', 'run', 'src/components/VideoPlayer.test.tsx', '--maxWorkers=1', '--no-file-parallelism']],
+            ['Web typecheck', ['node_modules/typescript/bin/tsc', '--noEmit']],
+          ];
+          for (const [label, args] of checks) {
+            const child = spawnSync(process.execPath, args, {
+              env: { ...process.env, TMPDIR: process.env.RUNNER_TEMP, NO_COLOR: '1', FORCE_COLOR: '0' },
+              encoding: 'utf8', timeout: 300_000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024,
+            });
+            if (child.error !== undefined || child.signal !== null || child.status !== 0) {
+              console.error(`${label} failed or exceeded its bounds; private output withheld.`);
+              process.exit(1);
+            }
+            console.log(`${label} passed.`);
+          }
+          NODE
+      - name: Revert-check all fresh server HLS startup cases
+        run: node scripts/check_fresh_server_hls_start_regressions.mjs
+      - name: Retain bounded sanitized unit revert receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-server-hls-start-unit-revert-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fresh-server-hls-start-regressions.json
+          if-no-files-found: warn
+          retention-days: 3

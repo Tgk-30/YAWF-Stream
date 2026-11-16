@@ -449,7 +449,7 @@ function nativeHlsSourceForPlayback(
 
   // A fresh server rendition can be a growing EVENT playlist. Pin WebKit to
   // the beginning so its initial live-edge choice cannot skip buffered media.
-  // Provider HLS, direct media, and hls.js retain their existing startup path.
+  // Provider HLS and direct media retain their existing startup path.
   const freshStart = startPositionSeconds ?? 0;
   if (
     deviceKind() === "ios" &&
@@ -6809,12 +6809,20 @@ function WebviewPlayer({
       const manifestTimeoutMs = webviewStartupTimeout(engine, url);
       const configuredStartPosition = startPositionRef.current;
       // hls.js uses -1 as live-edge startup for EVENT playlists. An exact
-      // handoff instead owns its local target, including a target of zero.
+      // handoff or fresh trusted server rendition owns its local target.
+      const freshHlsStartPosition = configuredStartPosition ?? 0;
       const exactHlsStartPosition = requiresExactHandoffRef.current
         ? Number.isFinite(configuredStartPosition)
           ? Math.max(0, configuredStartPosition as number)
           : 0
-        : null;
+        : engine === "webview-hls-transcode" &&
+            hasServerOptimization &&
+            isTrustedServerHlsManifestURL(url) &&
+            Number.isFinite(freshHlsStartPosition) &&
+            freshHlsStartPosition >= 0 &&
+            freshHlsStartPosition <= 5
+          ? freshHlsStartPosition
+          : null;
       const compatibilityHlsRequested =
         deviceKind() === "ios" && iosHlsPlaybackMode === "compatibility";
       // Capability can change between the initial route decision and the lazy

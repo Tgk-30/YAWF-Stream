@@ -12371,6 +12371,63 @@ describe("captions toggle", () => {
 // ---- HLS source branch -----------------------------------------------------
 
 describe("HLS source attach", () => {
+  const freshServerManifest = "https://server.example/api/stream/fresh-event/index.m3u8?quality=480p";
+  const serverHlsCapability = {
+    qualities: ["480p"] as ServerTranscodeQuality[],
+    request: vi.fn(),
+  };
+
+  it.each([
+    ["implicit zero", undefined, 0, 0],
+    ["explicit zero", 0, 0, 0],
+    ["zero local target with absolute offset", 0, 3600, 0],
+    ["small positive local target", 2.75, 0, 2.75],
+    ["five-second boundary", 5, 0, 5],
+  ] as const)("pins a fresh trusted hls.js EVENT start: %s", async (_label, start, offset, expected) => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    render(
+      <VideoPlayer
+        url={freshServerManifest}
+        engine="webview-hls-transcode"
+        title="Fresh EVENT startup"
+        startPositionSeconds={start}
+        timelineOffsetSeconds={offset}
+        serverOptimized={serverHlsCapability}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    expect(hlsInstances[0].config.startPosition).toBe(expected);
+    expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(freshServerManifest);
+  });
+
+  it.each([
+    ["provider live HLS", "https://provider.example/live.m3u8", true, "webview-hls-transcode", 0],
+    ["lookalike server origin", "https://server.example.evil/api/stream/session/index.m3u8", true, "webview-hls-transcode", 0],
+    ["lookalike manifest path", "https://server.example/api/stream/session/other.m3u8", true, "webview-hls-transcode", 0],
+    ["missing server capability", freshServerManifest, false, "webview-hls-transcode", 0],
+    ["different engine", freshServerManifest, true, "webview-direct", 0],
+    ["resume beyond fresh window", freshServerManifest, true, "webview-hls-transcode", 6],
+    ["negative target", freshServerManifest, true, "webview-hls-transcode", -1],
+    ["NaN target", freshServerManifest, true, "webview-hls-transcode", Number.NaN],
+    ["infinite target", freshServerManifest, true, "webview-hls-transcode", Number.POSITIVE_INFINITY],
+  ] as const)("leaves nonexact hls.js defaults unchanged: %s", async (_label, url, capability, engine, start) => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    render(
+      <VideoPlayer
+        url={url}
+        engine={engine}
+        title="Ordinary HLS startup"
+        startPositionSeconds={start}
+        serverOptimized={capability ? serverHlsCapability : undefined}
+        onClose={() => {}}
+      />,
+    );
+    await waitFor(() => expect(hlsInstances).toHaveLength(1));
+    expect(hlsInstances[0].config).not.toHaveProperty("startPosition");
+    expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(url);
+  });
+
   it("gives lazy hls.js the bundled same-version worker URL", async () => {
     render(<VideoPlayer url="https://x/stream.m3u8" title="T" onClose={() => {}} />);
     await waitFor(() => expect(hlsInstances).toHaveLength(1));
