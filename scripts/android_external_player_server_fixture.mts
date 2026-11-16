@@ -19,6 +19,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { tmpdir } from "node:os";
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { buildFixtureMediaPlan } from "./foreground_fixture_media_plan.mjs";
+import { validMkvFixtureOptions, validateMkvProbe, parseStreamHashes } from "./foreground_fixture_media_plan.mjs";
 
 interface FixtureCLI {
   repo: string;
@@ -26,6 +27,7 @@ interface FixtureCLI {
   smokeOnly: boolean;
   foregroundLong: boolean;
   ipadForeground: boolean;
+  sourceMkv: boolean;
 }
 
 function parseFixtureCLI(argv: string[]): FixtureCLI {
@@ -34,8 +36,14 @@ function parseFixtureCLI(argv: string[]): FixtureCLI {
   let smokeOnly = false;
   let foregroundLong = false;
   let ipadForeground = false;
+  let sourceMkv = false;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
+    if (argument === "--source-mkv") {
+      if (sourceMkv) throw new Error("Duplicate --source-mkv argument.");
+      sourceMkv = true;
+      continue;
+    }
     if (argument === "--ipad-foreground") {
       if (ipadForeground) throw new Error("Duplicate --ipad-foreground argument.");
       ipadForeground = true;
@@ -71,7 +79,8 @@ function parseFixtureCLI(argv: string[]): FixtureCLI {
     throw new Error("Usage: server-ui-fixture.mts --repo <absolute-checkout> --output <absolute-empty-directory> [--smoke-only]");
   }
   if (ipadForeground && !foregroundLong) throw new Error("--ipad-foreground requires --foreground-long.");
-  return { repo, output, smokeOnly, foregroundLong, ipadForeground };
+  if (!validMkvFixtureOptions({ sourceMkv, foregroundLong, ipadForeground })) throw new Error("--source-mkv requires --foreground-long and --ipad-foreground.");
+  return { repo, output, smokeOnly, foregroundLong, ipadForeground, sourceMkv };
 }
 
 function canonicalAbsoluteDirectory(raw: string, label: string, create: boolean): string {
@@ -180,7 +189,12 @@ const PASSWORD = "fixture-owner-password";
 const TITLE = "Synthetic Fixture Movie";
 const HASH = "a".repeat(40);
 const MOVIE_PATH = join(MEDIA_DIR, "synthetic.mp4");
-const MOVIE_URL = `${MEDIA_ORIGIN}/media/synthetic.mp4`;
+const MKV_PATH = join(MEDIA_DIR, "synthetic.mkv");
+const SELECTED_PATH = fixtureCLI.sourceMkv ? MKV_PATH : MOVIE_PATH;
+const SELECTED_NAME = fixtureCLI.sourceMkv ? "synthetic.mkv" : "synthetic.mp4";
+const SELECTED_MIME = fixtureCLI.sourceMkv ? "video/x-matroska" : "video/mp4";
+const PROVIDER_FILE = fixtureCLI.sourceMkv ? "/Synthetic.Fixture.Movie.2026.1080p.WEB-DL.x264.mkv" : "/Synthetic.Fixture.Movie.2026.1080p.WEB-DL.x264.mp4";
+const MOVIE_URL = `${MEDIA_ORIGIN}/media/${SELECTED_NAME}`;
 
 const EXTERNAL_CAPABILITY_PATH = /^\/api\/external-stream\/[A-Za-z0-9_-]{1,120}\/[A-Za-z0-9_-]{32,128}(?:\/[a-f0-9]{64}\.[a-z0-9]{1,8})?$/;
 const EXTERNAL_RECEIPT_LIMIT = 128;
@@ -222,6 +236,7 @@ const externalReceiptRequests = new WeakMap<object, ExternalReceiptEvent>();
 
 const allowedMedia = new Set([
   "synthetic.mp4",
+  ...(fixtureCLI.sourceMkv ? ["synthetic.mkv"] : []),
   "index.m3u8",
   ...Array.from({ length: 12 }, (_, index) => `segment${String(index).padStart(3, "0")}.ts`),
 ]);
@@ -312,16 +327,52 @@ function generateFixtureMedia(): void {
     "y=h-text_h-80",
   ].join(":");
   const plan = buildFixtureMediaPlan({ foregroundLong: fixtureCLI.foregroundLong, videoFilter,
-    moviePath: MOVIE_PATH, segmentPattern: join(MEDIA_DIR, "segment%03d.ts"), playlistPath: join(MEDIA_DIR, "index.m3u8") });
+    moviePath: MOVIE_PATH, segmentPattern: join(MEDIA_DIR, "segment%03d.ts"), playlistPath: join(MEDIA_DIR, "index.m3u8"),
+    sourceMkv: fixtureCLI.sourceMkv, mkvPath: MKV_PATH });
   for (const step of plan) {
     markForegroundStage(step.stage);
     switch (step.kind) {
       case "ffmpeg": runFfmpeg(step.label, step.args); break;
       case "probe": writeMediaProbe(); break;
       case "layout": assertStaticMediaLayout(); break;
+      case "mkv-verify": verifyMkvRemux(); break;
       default: throw fixtureRefusal("input-invalid", "Unknown fixture media plan step.");
     }
   }
+}
+
+function verifyMkvRemux(): void {
+  const limit = 512 * 1024 * 1024;
+  for (const path of [MOVIE_PATH, MKV_PATH]) {
+    const info = lstatSync(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.size <= 0 || info.size > limit) {
+      throw fixtureRefusal("media-file", "Synthetic remux input or output is not a bounded regular file.");
+    }
+  }
+  const result = spawnSync("ffprobe", ["-v", "error", "-show_entries",
+    "format=format_name,duration,size:stream=codec_type,codec_name,pix_fmt,width,height,r_frame_rate,sample_rate",
+    "-of", "json", MKV_PATH], { encoding: "utf8", maxBuffer: 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+  if (result.error != null) throw fixtureRefusal("probe-execution", "Could not inspect synthetic Matroska.");
+  if (result.status !== 0) throw fixtureRefusal("probe-exit", "Synthetic Matroska probe failed.", result.status);
+  let probe: unknown;
+  try { probe = JSON.parse(result.stdout); } catch { throw fixtureRefusal("probe-json", "Synthetic Matroska probe was invalid."); }
+  if (!validateMkvProbe(probe, lstatSync(MKV_PATH).size)) throw fixtureRefusal("probe-codecs", "Synthetic Matroska failed its format, duration, stream or codec contract.");
+  const mp4Probe = JSON.parse(readFileSync(MEDIA_PROBE_PATH, "utf8"));
+  const duration = Number(mp4Probe?.format?.duration);
+  if (!Number.isFinite(duration) || duration < 599 || duration > 601) throw fixtureRefusal("probe-codecs", "Synthetic MP4 duration was not 600 seconds.");
+  const streamHashes = (path: string): string[] => {
+    const hash = spawnSync("ffmpeg", ["-nostdin", "-hide_banner", "-loglevel", "error", "-i", path,
+      "-map", "0:v:0", "-map", "0:a:0", "-c", "copy", "-f", "streamhash", "-hash", "sha256", "-"],
+      { encoding: "utf8", maxBuffer: 4096, stdio: ["ignore", "pipe", "pipe"] });
+    if (hash.error != null) throw fixtureRefusal("ffmpeg-execution", "Synthetic stream hash could not execute.");
+    if (hash.status !== 0) throw fixtureRefusal("ffmpeg-exit", "Synthetic stream hash failed.", hash.status);
+    const parsed = parseStreamHashes(hash.stdout);
+    if (parsed == null) throw fixtureRefusal("probe-json", "Synthetic stream hash had an unexpected format.");
+    return parsed;
+  };
+  const mp4 = streamHashes(MOVIE_PATH), mkv = streamHashes(MKV_PATH);
+  if (mp4[0] !== mkv[0] || mp4[1] !== mkv[1]) throw fixtureRefusal("probe-codecs", "Synthetic remux changed encoded video or audio packets.");
+  writeFileSync(join(ARTIFACT_DIR, "mkv-probe.json"), `${JSON.stringify({ format: "matroska", video: "h264", audio: "aac", duration, bytes: lstatSync(MKV_PATH).size, streamHashes: mkv })}\n`, { mode: 0o600, flag: "wx" });
 }
 
 function assertStaticMediaLayout(): void {
@@ -508,6 +559,7 @@ function assertFixtureInputs(): void {
   for (const required of [
     `${WEB_DIST}/index.html`,
     MOVIE_PATH,
+    ...(fixtureCLI.sourceMkv ? [MKV_PATH] : []),
     join(MEDIA_DIR, "index.m3u8"),
     ...[...allowedMedia]
       .filter((name) => name.endsWith(".ts"))
@@ -520,6 +572,7 @@ function assertFixtureInputs(): void {
 function contentType(path: string): string {
   switch (extname(path)) {
     case ".mp4": return "video/mp4";
+    case ".mkv": return "video/x-matroska";
     case ".m3u8": return "application/vnd.apple.mpegurl";
     case ".ts": return "video/mp2t";
     default: return "application/octet-stream";
@@ -705,8 +758,8 @@ function installFailClosedFetch(originalFetch: typeof fetch): void {
           links: ["https://real-debrid.example/restricted-link"],
           files: [{
             id: 1,
-            path: "/Synthetic.Fixture.Movie.2026.1080p.WEB-DL.x264.mp4",
-            bytes: statSync(MOVIE_PATH).size,
+            path: PROVIDER_FILE,
+            bytes: statSync(SELECTED_PATH).size,
             selected: 1,
           }],
         });
@@ -933,10 +986,11 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
   });
   expectStatus(resolve, 200, "stream resolve");
   const resolved = parseJSON<{
-    stream: { streamURL: string; debridService: string; playbackAuthorization: string };
+    stream: { streamURL: string; debridService: string; playbackAuthorization: string; fileName: string };
     session: { id: string; playbackUrl: string; playbackAuthorization: string };
   }>(resolve);
-  if (resolved.stream.debridService !== "RD" || resolved.stream.streamURL !== resolved.session.playbackUrl) {
+  if (resolved.stream.debridService !== "RD" || resolved.stream.streamURL !== resolved.session.playbackUrl ||
+      resolved.stream.fileName !== basename(PROVIDER_FILE)) {
     throw fixtureRefusal("smoke-assertion", "Resolved stream did not use the Server Mode proxy session.");
   }
   if (resolved.stream.playbackAuthorization !== resolved.session.playbackAuthorization) {
@@ -951,9 +1005,9 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
   markForegroundStage("smoke-proxy-full");
   const full = await inject(app, client, { method: "GET", url: resolved.stream.streamURL });
   expectStatus(full, 200, "full proxy response");
-  const expected = readFileSync(MOVIE_PATH);
+  const expected = readFileSync(SELECTED_PATH);
   const actual = full.rawPayload as Buffer;
-  if (actual.length !== expected.length || createHash("sha256").update(actual).digest("hex") !== createHash("sha256").update(expected).digest("hex")) {
+  if (full.headers["content-type"] !== SELECTED_MIME || actual.length !== expected.length || createHash("sha256").update(actual).digest("hex") !== createHash("sha256").update(expected).digest("hex")) {
     throw fixtureRefusal("smoke-assertion", "Full proxy response differs from synthetic.mp4.");
   }
 
@@ -964,7 +1018,8 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
     headers: { range: "bytes=0-1023" },
   });
   expectStatus(range, 206, "range proxy response");
-  if (range.rawPayload.length !== 1024 || range.headers["content-range"] !== `bytes 0-1023/${expected.length}`) {
+  if (range.rawPayload.length !== 1024 || range.headers["content-range"] !== `bytes 0-1023/${expected.length}` ||
+      !Buffer.from(range.rawPayload as Buffer).equals(expected.subarray(0, 1024)) || range.headers["content-type"] !== SELECTED_MIME) {
     throw fixtureRefusal("smoke-assertion", "Range proxy response did not preserve byte boundaries.");
   }
 
@@ -975,7 +1030,7 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
   const externalFull = await inject(app, externalClient, { method: "GET", url: externalPath });
   expectStatus(externalFull, 200, "external capability full response");
   if (
-    externalFull.headers["content-type"] !== "video/mp4" ||
+    externalFull.headers["content-type"] !== SELECTED_MIME ||
     externalFull.headers["accept-ranges"] !== "bytes" ||
     externalFull.headers["content-length"] !== String(expected.length) ||
     externalFull.headers["content-disposition"] != null
@@ -997,6 +1052,7 @@ async function smoke(app: any): Promise<Record<string, unknown>> {
   });
   expectStatus(externalRange, 206, "external capability range response");
   if (
+    externalRange.headers["content-type"] !== SELECTED_MIME ||
     externalRange.rawPayload.length !== 1024 ||
     externalRange.headers["content-range"] !== `bytes 1024-2047/${expected.length}` ||
     !Buffer.from(externalRange.rawPayload as Buffer).equals(expected.subarray(1024, 2048))
@@ -1080,7 +1136,7 @@ async function main(): Promise<void> {
     let servedWebDist = WEB_DIST;
     if (fixtureCLI.ipadForeground) {
       ipadObserver = await import("./ipad-foreground/passive_observer.mjs");
-      ipadRecorder = ipadObserver.createRecorder(ARTIFACT_DIR, APP_ORIGIN, MEDIA_ORIGIN, ipadControlToken);
+      ipadRecorder = ipadObserver.createRecorder(ARTIFACT_DIR, APP_ORIGIN, MEDIA_ORIGIN, ipadControlToken, SELECTED_NAME);
       // Copy assets unchanged; inject only a same-origin observer script tag into
       // the copied HTML. Never modify the checkout or compiled asset bytes.
       servedWebDist = join(runtimeDir, "ipad-web-dist");

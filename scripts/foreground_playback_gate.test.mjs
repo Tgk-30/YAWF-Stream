@@ -60,6 +60,8 @@ test('seek, pause, visibility loss and source replacement do not pass', () => {
 test('old short fixture remains default while long and transcode require explicit opt in', () => {
   const s = readFileSync(new URL('./android_external_player_server_fixture.mts', import.meta.url), 'utf8');
   assert.match(s, /let foregroundLong = false/);
+  assert.match(s, /let sourceMkv = false/);
+  assert.match(s, /validMkvFixtureOptions\(\{ sourceMkv, foregroundLong, ipadForeground \}\)/);
   assert.match(s, /buildFixtureMediaPlan\(\{ foregroundLong: fixtureCLI\.foregroundLong, videoFilter,/);
   assert.match(s, /enableTranscode: fixtureCLI\.foregroundLong/);
   assert.match(s, /length: 12/);
@@ -122,7 +124,7 @@ test('actual media-plan semantic mutants fail without executing ffmpeg or creati
   const mutations = [
     ['mp4(36, false)', 'mp4(600, false)'],
     ['plan.push(mp4(600, true));', 'plan.unshift(mp4(600, true));'],
-    ["'-i', moviePath, '-map', '0:v:0'", "'-i', moviePath, '-t', '36', '-map', '0:v:0'"],
+    ["'-i', moviePath, '-map', '0:v:0', '-map', '0:a:0', '-c', 'copy', '-f', 'hls'", "'-i', moviePath, '-t', '36', '-map', '0:v:0', '-map', '0:a:0', '-c', 'copy', '-f', 'hls'"],
     ["...(replace ? ['-y'] : [])", '...[]'],
     ["plan.push({ kind: 'probe', stage: 'long-media-probe' });", ''],
     ["['-b:v', '700k', '-maxrate', '900k', '-bufsize', '1400k']", '[]'],

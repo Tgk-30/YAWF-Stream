@@ -237,6 +237,29 @@ test('producer and HLS request attribution are sanitized and correlate the actua
   assert.deepEqual(readdirSync(path), ['ipad-observations.jsonl']);
 });
 
+test('producer input is bound to exactly the selected fixture media name', t => {
+  const defaultPath = temp(t), mkvPath = temp(t);
+  const defaultRecorder = createRecorder(defaultPath, origin, mediaOrigin, token);
+  const mkvRecorder = createRecorder(mkvPath, origin, mediaOrigin, token, 'synthetic.mkv');
+  const emit = (recorder, url) => recorder.producerStart(['-i', url, '/owned/transcode-abc/%v.m3u8']);
+  emit(defaultRecorder, `${mediaOrigin}/media/synthetic.mp4`);
+  emit(defaultRecorder, `${mediaOrigin}/media/synthetic.mkv`);
+  emit(defaultRecorder, `${mediaOrigin}/media/unrelated.mp4`);
+  emit(mkvRecorder, `${mediaOrigin}/media/synthetic.mkv`);
+  emit(mkvRecorder, `${mediaOrigin}/media/synthetic.mp4`);
+  emit(mkvRecorder, `${mediaOrigin}/media/unrelated.mkv`);
+  emit(mkvRecorder, `${mediaOrigin}/media/synthetic.mkv?extra=1`);
+  emit(mkvRecorder, 'http://127.0.0.1:9999/media/synthetic.mkv');
+  const statuses = path => readFileSync(join(path, 'ipad-observations.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line).inputLocal);
+  assert.deepEqual(statuses(defaultPath), [true, false, false]);
+  assert.deepEqual(statuses(mkvPath), [true, false, false, false, false]);
+  for (const invalid of ['synthetic.avi', '../synthetic.mkv', '/media/synthetic.mkv', '', null]) {
+    assert.throws(() => createRecorder(defaultPath, origin, mediaOrigin, token, invalid), /IPAD_MEDIA_NAME_REFUSED/);
+  }
+  const fixture = readFileSync(new URL('../android_external_player_server_fixture.mts', import.meta.url), 'utf8');
+  assert.match(fixture, /createRecorder\(ARTIFACT_DIR, APP_ORIGIN, MEDIA_ORIGIN, ipadControlToken, SELECTED_NAME\)/);
+});
+
 test('recorder refuses overflow rather than silently truncating evidence', t => {
   const path = temp(t);
   const recorder = createRecorder(path, origin, mediaOrigin, token);

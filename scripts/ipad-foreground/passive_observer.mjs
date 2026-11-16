@@ -198,7 +198,8 @@ export function fingerprintAssets(root) {
   return { count: files.length, bytes, sha256: createHash('sha256').update(JSON.stringify(files)).digest('hex') };
 }
 
-export function createRecorder(output, origin, mediaOrigin, controlToken) {
+export function createRecorder(output, origin, mediaOrigin, controlToken, mediaName = 'synthetic.mp4') {
+  if (mediaName !== 'synthetic.mp4' && mediaName !== 'synthetic.mkv') throw new Error('IPAD_MEDIA_NAME_REFUSED');
   if (typeof controlToken !== 'string' || !/^[a-f0-9]{64}$/.test(controlToken)) throw new Error('IPAD_CONTROL_TOKEN_REQUIRED');
   const started = process.hrtime.bigint();
   let records = 0, bytes = 0, failed = false, producer = 0;
@@ -221,7 +222,7 @@ export function createRecorder(output, origin, mediaOrigin, controlToken) {
     const ordinal = ++producer;
     const input = args[args.indexOf('-i') + 1] ?? '';
     let inputLocal = false;
-    try { const url = new URL(input); inputLocal = url.origin === mediaOrigin && url.pathname === '/media/synthetic.mp4' && !url.search && !url.hash; } catch {}
+    try { const url = new URL(input); inputLocal = url.origin === mediaOrigin && url.pathname === `/media/${mediaName}` && !url.search && !url.hash; } catch {}
     const dir = basename(dirname(args.at(-1) ?? ''));
     const codecIndex = args.findIndex(a => /^-c:v(?::\d+)?$/.test(a));
     const codec = codecIndex >= 0 && ['libx264', 'h264_videotoolbox', 'h264_nvenc', 'h264_qsv'].includes(args[codecIndex + 1]) ? args[codecIndex + 1] : 'other';
