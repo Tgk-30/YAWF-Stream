@@ -58,6 +58,18 @@ function safeDetailsOpeningContract(source) {
   assert.match(body, /SystemClock\.uptimeMillis\(\) \+ MEDIA_WAIT_MS/);
 }
 
+function noPlayerSurfaceInputContract(source) {
+  assert.doesNotMatch(source, /player::click|guardedClick\(player|player\.click\(/);
+  const start = source.indexOf("private void openPlaybackSettingsTransaction()");
+  const end = source.indexOf("private UiObject2 scrollPlaybackSettingsUntilLabeledClickable", start);
+  assert.ok(start >= 0 && end > start);
+  const body = source.slice(start, end);
+  assert.match(body, /Observation\.settings\(settings::click\)/);
+  assert.equal((body.match(/Observation\.waiting\(\)/g) ?? []).length, 2);
+  assert.doesNotMatch(body, /Observation\.reveal\(/);
+  assert.match(body, /MEDIA_WAIT_MS/);
+}
+
 function contract(source) {
   assert.match(source, /^name: Android foreground playback QA$/m);
   assert.match(source, /push:[\s\S]*branches:[\s\S]*codex\/android-foreground114-qa[\s\S]*codex\/android-foreground114-full-qa/);
@@ -341,6 +353,24 @@ test("details-opening contract catches missing refresh and generic player input"
       '        fail("Timed out opening read-only player details");',
   );
   assert.throws(() => safeDetailsOpeningContract(genericPlayerInput));
+});
+
+test("flow never uses the product player surface as a setup input", () => {
+  safeDetailsOpeningContract(driver);
+  noPlayerSurfaceInputContract(driver);
+});
+
+test("flow contract rejects reintroduced settings surface reveal", () => {
+  safeDetailsOpeningContract(driver);
+  noPlayerSurfaceInputContract(driver);
+  const changed = replaceUnique(
+    driver,
+    "                        return RuntimeExternalSettingsTransaction.Observation.waiting();\n" +
+      "                    }\n                    @Override public void recordTiming",
+    "                        return RuntimeExternalSettingsTransaction.Observation.reveal(player::click);\n" +
+      "                    }\n                    @Override public void recordTiming",
+  );
+  assert.throws(() => noPlayerSurfaceInputContract(changed));
 });
 
 test("workflow contract rejects public artifact substitution", () => {

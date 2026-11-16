@@ -355,7 +355,7 @@ public final class RuntimeForegroundPlaybackFlowTest {
                         if (settings != null && hasVisibleBounds(settings)) {
                             return RuntimeExternalSettingsTransaction.Observation.settings(settings::click);
                         }
-                        return RuntimeExternalSettingsTransaction.Observation.reveal(player::click);
+                        return RuntimeExternalSettingsTransaction.Observation.waiting();
                     }
                     @Override public void recordTiming(String stage, long startedAtMs,
                             long finishedAtMs, long idleBeforeMs, long idleAfterMs, boolean returned) { }
