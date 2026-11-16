@@ -74,12 +74,16 @@ function contract(source) {
   ));
   assert.ok(source.includes("| sed -nE 's/.*pid=([0-9]+),.*/\\1/p' | sort -u)"));
   assert.match(source, /test "\$\{#adb_pids\[@\]\}" -eq 1/);
-  assert.ok(source.includes('adb_pid="${adb_pids[0]}"'));
+  assert.ok(source.includes('setsid adb -L "tcp:${ADB_SERVER_PORT}" --one-device "$EMULATOR_SERIAL" server nodaemon'));
+  assert.match(source, /adb_pid=\$!\n          adb_identity="\$\(process_identity "\$adb_pid"\)"/);
+  assert.ok(source.includes('test "$adb_identity" = "$(id -u):${adb_pid}:${adb_identity##*:}"'));
+  assert.match(source, /deadline=\$\(\(SECONDS \+ 15\)\)\n          while :; do\n            current="\$\(process_identity "\$adb_pid"\)"\n            test "\$current" = "\$adb_identity"/);
+  assert.ok(source.includes('          done\n          test "${#adb_pids[@]}" -eq 1\n          test "${adb_pids[0]}" = "$adb_pid"'));
   assert.match(source, /adb_identity="\$\(process_identity "\$adb_pid"\)"/);
   assert.match(source, /test "\$\{adb_identity%%:\*\}" = "\$\(id -u\)"/);
-  assert.ok(source.includes(
+  assert.equal(source.split(
     'ss -ltnp | grep -Eq "127\\\\.0\\\\.0\\\\.1:${ADB_SERVER_PORT}.*pid=${adb_pid},"',
-  ));
+  ).length - 1, 2);
   assert.match(source, /setsid emulator -avd "\$AVD_NAME" -port 5568/);
   assert.match(source, /-no-window -no-audio -no-snapshot/);
   assert.match(source, /adb -H 127\.0\.0\.1 -P "\$ADB_SERVER_PORT" -s "\$EMULATOR_SERIAL"/);
@@ -233,7 +237,19 @@ test("workflow contract catches hosted admission and cleanup regressions", () =>
     ["section in {'installed','available'}", "section=='available'"],
     ['--max-filesize "$PUBLIC_APK_BYTES"', ""],
     ["(5037|5142|5568|5569)", "(5037)"],
-    ['adb_pid="${adb_pids[0]}"', 'adb_pid="1"'],
+    ['adb_pid=$!', 'adb_pid=1'],
+    [
+      'setsid adb -L "tcp:${ADB_SERVER_PORT}" --one-device "$EMULATOR_SERIAL" server nodaemon',
+      'adb -H 127.0.0.1 -P "$ADB_SERVER_PORT" start-server',
+    ],
+    [
+      '          done\n          test "${#adb_pids[@]}" -eq 1\n          test "${adb_pids[0]}" = "$adb_pid"',
+      '          done\n          test "${#adb_pids[@]}" -eq 1',
+    ],
+    [
+      '            current="$(process_identity "$adb_pid")"\n            test "$current" = "$adb_identity"',
+      '            : # server birth identity check removed',
+    ],
     [
       'ss -ltnp | grep -Eq "127\\\\.0\\\\.0\\\\.1:${ADB_SERVER_PORT}.*pid=${adb_pid},"',
       ': # listener ownership guard removed',
