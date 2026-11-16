@@ -21,7 +21,7 @@ function section(source, start, end) {
 
 function contract(source, reference = publicWorkflow, java = driver) {
   assert.equal(sha256(reference), '1cb644cff702bd51b8bbb2ec533e10b22adadbe5fa7dff6f608b79bd156f89fd');
-  assert.equal(sha256(java), '7990cfd8a79564dbea28960c0c33607665b1d6ed7b1dd0ee7d2d8708054f7821');
+  assert.equal(sha256(java), '5f1ef260fb1295c234e5448065cbdf8baf478a9abbab06475cffe0d69acd0c3b');
   const trigger = section(source, '\non:\n', '\npermissions:');
   assert.match(trigger, /^\non:\n  push:\n    branches: \[codex\/android114-unfaulted-qa\]\n    paths: \[\.github\/workflows\/android114-unfaulted-qa\.yml\]\n  workflow_dispatch:\n/);
   assert.deepEqual([...trigger.matchAll(/^  ([a-z_]+):/gm)].map((m) => m[1]), ['push', 'workflow_dispatch']);

@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { after, test } from 'node:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
 const driver = readFileSync(new URL('./android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeForegroundPlaybackFlowTest.java', import.meta.url), 'utf8');
 const baselineSha = '36122e1fa1fc54ab29bb1556f8b91a0940db6cbe4fb3aa28437d2a41e007c4bc';
-const driverSha = '7990cfd8a79564dbea28960c0c33607665b1d6ed7b1dd0ee7d2d8708054f7821';
-const begin = '    // BEGIN SYNTHETIC LOGIN SUBMIT SHORT TAP\n';
-const end = '    // END SYNTHETIC LOGIN SUBMIT SHORT TAP\n\n';
+const driverSha = '5f1ef260fb1295c234e5448065cbdf8baf478a9abbab06475cffe0d69acd0c3b';
+const begin = '    // BEGIN SYNTHETIC LOGIN SUBMIT PUBLIC CLICK\n';
+const end = '    // END SYNTHETIC LOGIN SUBMIT PUBLIC CLICK\n\n';
 const invocation = '        clickSyntheticLoginSubmitOnce();';
 const originalInvocation = '        clickLabeled("Sign in", "Sign in", SHORT_WAIT_MS);';
 const hash = (text) => createHash('sha256').update(text).digest('hex');
@@ -37,6 +37,9 @@ function between(source, first, last) {
 const helper = between(driver, begin, end).slice(begin.length);
 const approval = between(driver, '    private void assertNoOutOfScopeApproval()', '    private static Pattern exactLabel(');
 const exactLabel = between(driver, '    private static Pattern exactLabel(', '    private static Pattern exactCaseInsensitiveLabel(');
+const boundedWriter = between(driver, '    private static void writeBounded(', '    private static final class FrameSample');
+const diagnosticName = 'login-submit-dispatch-diagnostic.json';
+const diagnosticScope = 'android-synthetic-login-submit-dispatch-diagnostic';
 const work = mkdtempSync(join(process.env.TMPDIR || tmpdir(), 'android-submit-host-'));
 after(() => rmSync(work, { recursive: true, force: true }));
 const java = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, 'bin/java') : 'java';
@@ -47,6 +50,8 @@ const harness = String.raw`
 import java.util.*;
 import java.util.regex.Pattern;
 import java.util.concurrent.TimeoutException;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
 
 class android {
   static class os { static class Build { static class VERSION { static int SDK_INT=36; } } }
@@ -88,12 +93,25 @@ class UiObject2 {
   boolean isEnabled(){fresh();return enabled;}boolean isClickable(){fresh();return clickable;}
   int getDisplayId(){fresh();return display;}Rect getVisibleBounds(){fresh();return bounds;}
 }
+class JSONObject {
+  final Map<String,Object> values=new LinkedHashMap<>();
+  JSONObject put(String key,Object value){values.put(key,value);return this;}
+  public String toString(){
+    StringJoiner out=new StringJoiner(",","{","}");
+    for(Map.Entry<String,Object> entry:values.entrySet()){
+      Object value=entry.getValue();
+      String encoded=value instanceof String?"\""+value+"\"":String.valueOf(value);
+      out.add("\""+entry.getKey()+"\":"+encoded);
+    }
+    return out.toString();
+  }
+}
 public class SubmitTapHarness {
   static final String PRODUCT_PACKAGE="owned.app";
   static final Pattern BINDING_TERMS=Pattern.compile("binding");
   String phase="server-login";boolean noInputWindowStarted;
   final UiDevice device=new UiDevice(this);final Instrumentation instrumentation=new Instrumentation(this);
-  String scenario;
+  String scenario;File evidenceDir;
   static void assertTrue(String why,boolean value){if(!value)throw new AssertionError(why);}
   static void assertNotNull(String why,Object value){assertTrue(why,value!=null);}
   static void assertEquals(String why,Object a,Object b){if(!Objects.equals(a,b))throw new AssertionError(why+": "+a+" != "+b);}
@@ -102,6 +120,7 @@ public class SubmitTapHarness {
 HELPER
 APPROVAL
 EXACT_LABEL
+BOUNDED_WRITER
   static class Instrumentation {
     final UiAutomation automation;Instrumentation(SubmitTapHarness h){automation=new UiAutomation(h);}
     UiAutomation getUiAutomation(){return automation;}
@@ -144,9 +163,9 @@ EXACT_LABEL
     }
     boolean click(int px,int py){
       clicks++;x=px;y=py;
-      SystemClock.now+=h.scenario.equals("overrun")?251:h.scenario.equals("cap-boundary")?250:100;
-      if(h.scenario.equals("dispatch-throws"))throw new IllegalStateException("uncertain host dispatch");
-      return !h.scenario.equals("dispatch-false");
+      SystemClock.now+=h.scenario.equals("slow-success-1500")?1500:h.scenario.equals("overrun")?251:h.scenario.equals("cap-boundary")?250:100;
+      if(h.scenario.startsWith("dispatch-throws"))throw new IllegalStateException("uncertain host dispatch");
+      return !h.scenario.startsWith("dispatch-false");
     }
   }
   void configure(String name){
@@ -175,12 +194,14 @@ EXACT_LABEL
     }
   }
   public static void main(String[]args)throws Exception{
-    SubmitTapHarness h=new SubmitTapHarness();h.configure(args[0]);
-    Set<String> allowed=Set.of("success","heading-plus-button","cap-boundary","second-call");
-    Set<String> attempted=Set.of("dispatch-false","dispatch-throws","overrun");
+    SubmitTapHarness h=new SubmitTapHarness();h.configure(args[0]);h.evidenceDir=new File(args[1]);
+    Set<String> allowed=Set.of("success","heading-plus-button","cap-boundary","overrun","slow-success-1500","second-call","diagnostic-io-failure-success");
+    Set<String> attempted=Set.of("dispatch-false","dispatch-throws","dispatch-false-diagnostic-io-failure","dispatch-throws-diagnostic-io-failure");
     Throwable failure=null;try{h.clickSyntheticLoginSubmitOnce();}catch(Throwable error){failure=error;}
     boolean success=allowed.contains(args[0]);oracle(success?failure==null:failure!=null,"expected "+(success?"success":"refusal")+" for "+args[0]);
     oracle(h.device.clicks==(success||attempted.contains(args[0])?1:0),"exactly one authorized attempted tap, zero before refused admission");
+    if(args[0].startsWith("dispatch-false"))oracle(failure instanceof AssertionError&&"Synthetic login submit dispatch failed".equals(failure.getMessage()),"diagnostic failure must preserve the original false-dispatch outcome");
+    if(args[0].startsWith("dispatch-throws"))oracle(failure instanceof IllegalStateException&&"uncertain host dispatch".equals(failure.getMessage()),"diagnostics must preserve the original dispatch exception");
     if(success){oracle(h.device.x==300&&h.device.y==550,"tap uses stable button center, not heading/screenshot coordinates");oracle(h.device.queries==2&&h.instrumentation.automation.clears==2&&h.instrumentation.automation.idles==1,"two fresh targets around one fatal idle barrier");}
     if(success||attempted.contains(args[0])){
       Throwable duplicate=null;try{h.clickSyntheticLoginSubmitOnce();}catch(Throwable error){duplicate=error;}
@@ -207,7 +228,7 @@ const mutants = new Map([
   ['stable-description', ['beforeDescription, after.getContentDescription()', 'beforeDescription, beforeDescription', 'description-drift']],
   ['default-display', ['android.view.Display.DEFAULT_DISPLAY, target.getDisplayId()', 'android.view.Display.DEFAULT_DISPLAY, android.view.Display.DEFAULT_DISPLAY', 'other-display']],
   ['dispatch-result', ['assertTrue("Synthetic login submit dispatch failed", dispatched);', 'assertTrue("Synthetic login submit dispatch failed", true);', 'dispatch-false']],
-  ['dispatch-cap', ['dispatchMs >= 0 && dispatchMs <= 250L', 'true', 'overrun']],
+  ['invalid-fatal-return-latency-cap', ['long dispatchMs = SystemClock.uptimeMillis() - startedMs;', 'long dispatchMs = SystemClock.uptimeMillis() - startedMs;\n        assertTrue("Invalid restored return-latency cap", dispatchMs >= 0 && dispatchMs <= 250L);', 'slow-success-1500']],
   ['once-only', ['syntheticLoginSubmitAttempted = true;', 'syntheticLoginSubmitAttempted = false;', 'second-call']],
   ['retry-on-false', ['boolean dispatched = device.click(afterBounds.centerX(), afterBounds.centerY());', 'boolean dispatched = device.click(afterBounds.centerX(), afterBounds.centerY());\n        if (!dispatched) device.click(afterBounds.centerX(), afterBounds.centerY());', 'dispatch-false']],
   ['fresh-after-idle', ['UiObject2 after = freshSyntheticLoginSubmitTarget();', 'UiObject2 after = before;', 'window-drift']],
@@ -218,7 +239,7 @@ function compile(mutation = 'none') {
   const directory = join(work, mutation);
   mkdirSync(directory);
   const source = join(directory, 'SubmitTapHarness.java');
-  writeFileSync(source, harness.replace('HELPER', body).replace('APPROVAL', approval).replace('EXACT_LABEL', exactLabel));
+  writeFileSync(source, harness.replace('HELPER', body).replace('APPROVAL', approval).replace('EXACT_LABEL', exactLabel).replace('BOUNDED_WRITER', boundedWriter));
   if (process.env.JAVA_HOME) assert.ok(existsSync(javac), 'Required JDK compiler must exist; no skips or installation fallback');
   const result = spawnSync(javac, ['-J-XX:-UsePerfData', '-J-Xmx128m', `-J-Djava.io.tmpdir=${work}`, '-encoding', 'UTF-8', '-d', directory, source], { encoding: 'utf8', timeout: 30_000 });
   assert.equal(result.status, 0, result.stderr || result.error?.message);
@@ -226,7 +247,35 @@ function compile(mutation = 'none') {
   return directory;
 }
 function execute(scenario, mutation = 'none') {
-  return spawnSync(java, ['-XX:-UsePerfData', '-Xmx128m', `-Djava.io.tmpdir=${work}`, '-cp', compile(mutation), 'SubmitTapHarness', scenario], { encoding: 'utf8', timeout: 5_000 });
+  const diagnosticDir = join(work, 'evidence', mutation, scenario, 'files');
+  const evidenceDir = join(diagnosticDir, 'foreground-playback-flow');
+  mkdirSync(evidenceDir, { recursive: true });
+  if (scenario.includes('diagnostic-io-failure')) mkdirSync(join(diagnosticDir, diagnosticName));
+  const result = spawnSync(java, ['-XX:-UsePerfData', '-Xmx128m', `-Djava.io.tmpdir=${work}`, '-cp', compile(mutation), 'SubmitTapHarness', scenario, evidenceDir], { encoding: 'utf8', timeout: 5_000 });
+  return { ...result, evidenceDir, diagnosticDir };
+}
+function assertReturnedCallDiagnostic(result, scenario) {
+  const file = join(result.diagnosticDir, diagnosticName);
+  assert.equal(existsSync(join(result.evidenceDir, diagnosticName)), false, 'Native receipt/PNG inventory remains untouched');
+  if (scenario.includes('diagnostic-io-failure')) {
+    assert.ok(statSync(file).isDirectory(), 'Real FileOutputStream failure fixture remains unchanged');
+    return;
+  }
+  const returned = ['success', 'heading-plus-button', 'cap-boundary', 'overrun', 'slow-success-1500', 'second-call', 'dispatch-false'].includes(scenario);
+  if (!returned) {
+    assert.equal(existsSync(file), false, 'No invented returned-call diagnostic for pre-input refusal or throwing dispatch');
+    return;
+  }
+  const bytes = readFileSync(file);
+  assert.ok(bytes.length > 0 && bytes.length <= 1024, 'Static diagnostic output is bounded');
+  assert.deepEqual(JSON.parse(bytes), {
+    schemaVersion: 1,
+    scope: diagnosticScope,
+    returnedCallElapsedMs: scenario === 'slow-success-1500' ? 1500 : scenario === 'overrun' ? 251 : scenario === 'cap-boundary' ? 250 : 100,
+    dispatchResult: scenario !== 'dispatch-false',
+    physicalHoldMeasured: false,
+    qualification: false,
+  }, 'Exact safe scalar diagnostic only; no timing or physical-hold qualification');
 }
 
 test('submit-only derivative normalizes to the exact original driver bytes', () => {
@@ -245,10 +294,11 @@ test('normalization refuses duplicate/missing boundaries, invocation drift and a
   assert.throws(() => normalization(driver + invocation));
   assert.notEqual(hash(normalization(driver.replace('UI_WAIT_MS = 90_000', 'UI_WAIT_MS = 190_000'))), baselineSha);
 });
-for (const scenario of ['success', 'heading-plus-button', 'cap-boundary', 'second-call', 'ambiguous', 'wrong-role', 'wrong-package', 'disabled', 'not-clickable', 'wrong-label', 'other-display', 'empty-bounds', 'offscreen', 'foreground', 'forbidden', 'settings', 'ime', 'measured-window', 'wrong-phase', 'api33', 'cache-first', 'cache-second', 'idle-timeout', 'stale-first', 'stale-second', 'geometry-drift', 'description-drift', 'foreground-drift', 'ime-drift', 'window-drift', 'phase-drift', 'forbidden-drift', 'dispatch-false', 'dispatch-throws', 'overrun']) {
+for (const scenario of ['success', 'heading-plus-button', 'cap-boundary', 'second-call', 'ambiguous', 'wrong-role', 'wrong-package', 'disabled', 'not-clickable', 'wrong-label', 'other-display', 'empty-bounds', 'offscreen', 'foreground', 'forbidden', 'settings', 'ime', 'measured-window', 'wrong-phase', 'api33', 'cache-first', 'cache-second', 'idle-timeout', 'stale-first', 'stale-second', 'geometry-drift', 'description-drift', 'foreground-drift', 'ime-drift', 'window-drift', 'phase-drift', 'forbidden-drift', 'dispatch-false', 'dispatch-throws', 'overrun', 'slow-success-1500', 'diagnostic-io-failure-success', 'dispatch-false-diagnostic-io-failure', 'dispatch-throws-diagnostic-io-failure']) {
   test(`host-only actual submit helper with fake native API boundary: ${scenario}`, () => {
     const result = execute(scenario);
     assert.equal(result.status, 0, result.stdout + result.stderr || result.error?.message);
+    assertReturnedCallDiagnostic(result, scenario);
   });
 }
 for (const [name, [, , scenario]] of mutants) {

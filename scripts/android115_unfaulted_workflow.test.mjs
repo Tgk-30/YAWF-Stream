@@ -1,3 +1,4 @@
+import './android115_submit_diagnostic_collection.test.mjs';
 import { assertSubmitTapDerivative } from './android_foreground_submit_tap.test.mjs';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -22,7 +23,7 @@ function section(source, start, end) {
 
 function contract(source, reference = publicWorkflow, java = driver) {
   assert.equal(sha256(reference), '1cb644cff702bd51b8bbb2ec533e10b22adadbe5fa7dff6f608b79bd156f89fd');
-  assert.equal(sha256(java), '7990cfd8a79564dbea28960c0c33607665b1d6ed7b1dd0ee7d2d8708054f7821');
+  assert.equal(sha256(java), '5f1ef260fb1295c234e5448065cbdf8baf478a9abbab06475cffe0d69acd0c3b');
   assertSubmitTapDerivative(java);
   const trigger = section(source, '\non:\n', '\npermissions:');
   assert.match(trigger, /^\non:\n  push:\n    branches: \[codex\/android115-unfaulted-qa\]\n    paths: \[\.github\/workflows\/android115-unfaulted-qa\.yml\]\n  workflow_dispatch:\n/);
@@ -47,9 +48,12 @@ function contract(source, reference = publicWorkflow, java = driver) {
   const failure = section(source, failureStart, failureEnd) + failureEnd;
   assert.equal((failure.match(/python3 - <<'PY_FAILURE' \|\| true/g) ?? []).length, 1);
   assert.equal(sha256(failure), '07e482648dd48dc3645f4965272698963e5a69b38888038dbc2b2c3b34c27c7d');
+  const submitDiagnostic = section(source, '          # BEGIN OPTIONAL SUBMIT CALL DIAGNOSTIC\n', '          # END OPTIONAL SUBMIT CALL DIAGNOSTIC\n') + '          # END OPTIONAL SUBMIT CALL DIAGNOSTIC\n';
+  assert.equal(sha256(submitDiagnostic), '84bc488331e0c3e31ebdecf7427c9a0dc9ec774772e150d794cb4d10f68c7e75');
   const observation = section(source, buildStart, summaryStart);
   assert.ok(observation.includes(failure + '\n          test "$instrumentation_status" -eq 0\n'));
   const candidateObservation = observation.replace(failure + '\n', '')
+    .replace(submitDiagnostic, '')
     .replace('"$CANDIDATE_APK_SHA256"', '"$PUBLIC_APK_SHA256"');
   assert.equal(candidateObservation, section(reference, buildStart, summaryStart));
   assert.match(candidateObservation, /-e class com\.yawf\.runtimeinstrumentation\.RuntimeForegroundPlaybackFlowTest/);

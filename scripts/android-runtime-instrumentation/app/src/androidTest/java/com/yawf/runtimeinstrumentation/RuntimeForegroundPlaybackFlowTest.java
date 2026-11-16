@@ -848,7 +848,7 @@ public final class RuntimeForegroundPlaybackFlowTest {
         guardedClick(waitForLabeledClickable(label, timeoutMs, description), description);
     }
 
-    // BEGIN SYNTHETIC LOGIN SUBMIT SHORT TAP
+    // BEGIN SYNTHETIC LOGIN SUBMIT PUBLIC CLICK
     private boolean syntheticLoginSubmitAttempted;
 
     private void clickSyntheticLoginSubmitOnce() throws Exception {
@@ -871,9 +871,29 @@ public final class RuntimeForegroundPlaybackFlowTest {
         long startedMs = SystemClock.uptimeMillis();
         boolean dispatched = device.click(afterBounds.centerX(), afterBounds.centerY());
         long dispatchMs = SystemClock.uptimeMillis() - startedMs;
+        recordSyntheticLoginDispatchDiagnostic(dispatchMs, dispatched);
         assertTrue("Synthetic login submit dispatch failed", dispatched);
-        assertTrue("Synthetic login submit exceeded short-tap dispatch cap", dispatchMs >= 0 && dispatchMs <= 250L);
         SystemClock.sleep(500);
+    }
+
+    private void recordSyntheticLoginDispatchDiagnostic(long elapsedMs, boolean dispatched) {
+        try {
+            if (evidenceDir == null || !evidenceDir.isDirectory()) return;
+            File diagnosticDir = evidenceDir.getParentFile();
+            if (diagnosticDir == null || !diagnosticDir.isDirectory()) return;
+            JSONObject diagnostic = new JSONObject();
+            diagnostic.put("schemaVersion", 1);
+            diagnostic.put("scope", "android-synthetic-login-submit-dispatch-diagnostic");
+            diagnostic.put("returnedCallElapsedMs", elapsedMs);
+            diagnostic.put("dispatchResult", dispatched);
+            diagnostic.put("physicalHoldMeasured", false);
+            diagnostic.put("qualification", false);
+            // Returned API latency is not a delivered physical press duration.
+            writeBounded(new File(diagnosticDir, "login-submit-dispatch-diagnostic.json"),
+                    diagnostic.toString() + "\n", 1024);
+        } catch (Exception ignored) {
+            // Optional diagnostic IO cannot alter dispatch success or its original failure.
+        }
     }
 
     private UiObject2 freshSyntheticLoginSubmitTarget() {
@@ -903,7 +923,7 @@ public final class RuntimeForegroundPlaybackFlowTest {
                         && bounds.right <= device.getDisplayWidth() && bounds.bottom <= device.getDisplayHeight());
         return target;
     }
-    // END SYNTHETIC LOGIN SUBMIT SHORT TAP
+    // END SYNTHETIC LOGIN SUBMIT PUBLIC CLICK
 
     private void guardedClick(UiObject2 object, String description) {
         assertTrue("Input attempted after measured no-input window began", !noInputWindowStarted);

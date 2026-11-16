@@ -524,6 +524,41 @@ jobs:
               evidence_bytes+=len(data); assert evidence_bytes<=42*1024*1024
               (out/name).write_bytes(data)
           PY
+          # BEGIN OPTIONAL SUBMIT CALL DIAGNOSTIC
+          EVIDENCE="$EVIDENCE" python3 - <<'PY_SUBMIT_DIAGNOSTIC' || true
+          import json,os,subprocess
+          from pathlib import Path
+          try:
+              adb=['adb','-H','127.0.0.1','-P',os.environ['ADB_SERVER_PORT'],'-s',os.environ['EMULATOR_SERIAL']]
+              result=subprocess.run(adb+['exec-out','run-as','com.yawf.runtimeinstrumentation','cat','files/login-submit-dispatch-diagnostic.json'],
+                                    stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=10,check=False)
+              assert result.returncode==0 and 0<len(result.stdout)<=1024
+              def unique_pairs(pairs):
+                  value={}
+                  for key,item in pairs:
+                      if key in value: raise ValueError('duplicate diagnostic key')
+                      value[key]=item
+                  return value
+              def reject_constant(_): raise ValueError('invalid diagnostic number')
+              value=json.loads(result.stdout.decode('utf-8'),object_pairs_hook=unique_pairs,parse_constant=reject_constant)
+              assert type(value) is dict and set(value)=={'schemaVersion','scope','returnedCallElapsedMs','dispatchResult','physicalHoldMeasured','qualification'}
+              assert type(value['schemaVersion']) is int and value['schemaVersion']==1
+              assert value['scope']=='android-synthetic-login-submit-dispatch-diagnostic'
+              assert type(value['returnedCallElapsedMs']) is int and 0<=value['returnedCallElapsedMs']<=900000
+              assert type(value['dispatchResult']) is bool
+              assert value['physicalHoldMeasured'] is False and value['qualification'] is False
+              payload=(json.dumps(value,sort_keys=True)+'\n').encode('utf-8')
+              assert len(payload)<=1024
+              out=Path(os.environ['EVIDENCE'])
+              assert out.is_dir() and not out.is_symlink()
+              entries=list(out.iterdir())
+              assert all(p.is_file() and not p.is_symlink() for p in entries)
+              assert sum(p.stat().st_size for p in entries)+len(payload)<=42*1024*1024
+              with (out/'login-submit-dispatch-diagnostic.json').open('xb') as target: target.write(payload)
+          except Exception:
+              pass
+          PY_SUBMIT_DIAGNOSTIC
+          # END OPTIONAL SUBMIT CALL DIAGNOSTIC
           # BEGIN OWNED FAILURE SCREENSHOT
           if [ "$native_test_ok" = false ]; then
             failure_capture="$RUNNER_TEMP/candidate115-failure.png"
