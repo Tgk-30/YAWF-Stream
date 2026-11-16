@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import tempfile
 import unittest
 from pathlib import Path
 
-import android_foreground_refusal as refusal
+spec = importlib.util.spec_from_file_location(
+    'android_foreground_refusal', Path(__file__).with_name('android_foreground_refusal.py'))
+refusal = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(refusal)
 
 
 def block(phase: str = "selecting-480p", failure_class: str = "AssertionError", code: int = 2) -> str:
