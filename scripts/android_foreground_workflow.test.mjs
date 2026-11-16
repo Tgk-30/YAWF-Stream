@@ -649,12 +649,17 @@ function passiveNormalContract(source, java) {
   assert.match(flow, /waitForUniquePlayerDialog\(MEDIA_WAIT_MS\);\s*if \(presentation\.equals\("passive-normal-diagnostic"\)\) \{\s*runPassiveNormalDiagnostic\(\);\s*return;\s*\}[\s\S]*openDetailsOnce\(\)/);
   const body = java.slice(java.indexOf('private void runPassiveNormalDiagnostic()'), java.indexOf('private void runNormalDiagnostic('));
   assert.match(body, /SystemClock\.uptimeMillis\(\) \+ MEDIA_WAIT_MS/);
-  assert.match(body, /clearCache\(\)[\s\S]*PRODUCT_PACKAGE, device\.getCurrentPackageName\(\)[\s\S]*assertNoOutOfScopeApproval\(\)[\s\S]*assertNull\("Details panel remained visible"[\s\S]*requireUniqueExactProductDialog\(PLAYER_DIALOG_LABEL, "player"\)[\s\S]*ownedReady = true;\s*break;/);
+  assert.match(body, /clearCache\(\)[\s\S]*assertPassiveOwnership\(\);\s*ownedReady = true;\s*break;/);
+  const passiveOwner = body.slice(body.indexOf('private void assertPassiveOwnership()'));
+  assert.match(passiveOwner, /PRODUCT_PACKAGE, device\.getCurrentPackageName\(\)[\s\S]*assertNoOutOfScopeApproval\(\)[\s\S]*assertNull\("Details panel remained visible"[\s\S]*requireUniqueExactProductDialog\(PLAYER_DIALOG_LABEL, "player"\)/);
+  assert.doesNotMatch(passiveOwner, /"Pause"|"Play"|isEnabled\(\)|assertNormalOwnership\(\)/);
   const prewindow = body.slice(0, body.indexOf('noInputWindowStarted = true'));
   assert.doesNotMatch(prewindow, /"Pause"|"Play"|findLabeledClickableWithin|normalPlayingControl = true/);
   assert.match(prewindow, /catch \(StaleObjectException stale\)/);
   assert.doesNotMatch(body.slice(0, body.indexOf('noInputWindowStarted = true')), /assertNormalOwnership\(\)|catch \(AssertionError/);
-  assert.match(body.slice(body.indexOf('noInputWindowStarted = true')), /assertNormalOwnership\(\)/);
+  assert.doesNotMatch(body, /assertNormalOwnership\(\)/);
+  assert.match(body, /captureNormalAnchor\(1, 0\);[\s\S]*clearCache\(\)[\s\S]*assertPassiveOwnership\(\)/);
+  assert.match(body, /clearCache\(\)[\s\S]*assertPassiveOwnership\(\);\s*long elapsedMs[\s\S]*captureNormalAnchor\(index \+ 1, elapsedMs\);[\s\S]*clearCache\(\)[\s\S]*assertPassiveOwnership\(\)/);
   const active = java.slice(java.indexOf('private void assertNormalOwnership()'), java.indexOf('private void captureNormalAnchor(', java.indexOf('private void assertNormalOwnership()')));
   assert.match(active, /By\.desc\(exactLabel\("Play"\)\)\)\) \{\s*assertTrue\("Visible Play control indicates paused playback", !hasVisibleBounds\(play\)\)/);
   assert.match(active, /By\.text\(exactLabel\("Play"\)\)\)\) \{\s*assertTrue\("Visible Play control indicates paused playback", !hasVisibleBounds\(play\)\)/);
@@ -671,7 +676,8 @@ test('passive auto MKV bypasses Info and captures without input', () => {
   ]) { assert.equal(workflow.split(from).length, 2); assert.throws(() => passiveNormalContract(workflow.replace(from, to), driver)); }
   for (const [from, to] of [
     ['runPassiveNormalDiagnostic();\n            return;', 'openDetailsOnce();\n            runPassiveNormalDiagnostic();\n            return;'],
-    ['requireUniqueExactProductDialog(PLAYER_DIALOG_LABEL, "player");\n                ownedReady = true;', 'ownedReady = true;'],
+    ['assertPassiveOwnership();\n                ownedReady = true;', 'ownedReady = true;'],
+    ['requireUniqueExactProductDialog(PLAYER_DIALOG_LABEL, "player");\n    }\n\n    private void runNormalDiagnostic(', '/* missing ownership */\n    }\n\n    private void runNormalDiagnostic('],
     ['for (UiObject2 play : player.findObjects(By.desc(exactLabel("Play")))) {\n            assertTrue("Visible Play control indicates paused playback", !hasVisibleBounds(play));', 'for (UiObject2 play : player.findObjects(By.desc(exactLabel("Play")))) {\n            assertTrue("Visible Play control indicates paused playback", true);'],
     ['noInputWindowStarted = true;\n        windowStartedMs = SystemClock.uptimeMillis();\n        captureNormalAnchor(1, 0);\n        assertTrue("Accessibility cache refresh failed after passive baseline screenshot"', 'noInputWindowStarted = true;\n        details.click();\n        windowStartedMs = SystemClock.uptimeMillis();\n        captureNormalAnchor(1, 0);\n        assertTrue("Accessibility cache refresh failed after passive baseline screenshot"'],
   ]) { assert.equal(driver.split(from).length, 2); assert.throws(() => passiveNormalContract(workflow, driver.replace(from, to))); }

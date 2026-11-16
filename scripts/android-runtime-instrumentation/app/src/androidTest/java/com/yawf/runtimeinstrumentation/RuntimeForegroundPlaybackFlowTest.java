@@ -201,10 +201,7 @@ public final class RuntimeForegroundPlaybackFlowTest {
         while (SystemClock.uptimeMillis() < deadline) {
             try {
                 assertTrue("Accessibility cache refresh failed before passive window", instrumentation.getUiAutomation().clearCache());
-                assertEquals("Product package lost foreground ownership", PRODUCT_PACKAGE, device.getCurrentPackageName());
-                assertNoOutOfScopeApproval();
-                assertNull("Details panel remained visible", findUniqueExactProductDialog(DETAILS_LABEL));
-                requireUniqueExactProductDialog(PLAYER_DIALOG_LABEL, "player");
+                assertPassiveOwnership();
                 ownedReady = true;
                 break;
             } catch (StaleObjectException stale) {
@@ -218,19 +215,26 @@ public final class RuntimeForegroundPlaybackFlowTest {
         windowStartedMs = SystemClock.uptimeMillis();
         captureNormalAnchor(1, 0);
         assertTrue("Accessibility cache refresh failed after passive baseline screenshot", instrumentation.getUiAutomation().clearCache());
-        assertNormalOwnership();
+        assertPassiveOwnership();
         for (int index = 1; index < 5; index++) {
             sleepUntil(windowStartedMs + (FULL_WINDOW_MS * index) / 4);
             assertTrue("Accessibility cache refresh failed during passive observation", instrumentation.getUiAutomation().clearCache());
-            assertNormalOwnership();
+            assertPassiveOwnership();
             long elapsedMs = SystemClock.uptimeMillis() - windowStartedMs;
             captureNormalAnchor(index + 1, elapsedMs);
             assertTrue("Accessibility cache refresh failed after passive screenshot", instrumentation.getUiAutomation().clearCache());
-            assertNormalOwnership();
+            assertPassiveOwnership();
         }
         windowEndedMs = SystemClock.uptimeMillis();
         assertTrue("Passive diagnostic window too short", windowEndedMs - windowStartedMs >= FULL_WINDOW_MS);
         phase = "native-observation-complete";
+    }
+
+    private void assertPassiveOwnership() {
+        assertEquals("Product package lost foreground ownership", PRODUCT_PACKAGE, device.getCurrentPackageName());
+        assertNoOutOfScopeApproval();
+        assertNull("Details panel remained visible", findUniqueExactProductDialog(DETAILS_LABEL));
+        requireUniqueExactProductDialog(PLAYER_DIALOG_LABEL, "player");
     }
 
     private void runNormalDiagnostic(UiObject2 details, FrameSample readyStats) throws Exception {
