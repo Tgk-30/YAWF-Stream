@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -38,7 +40,14 @@ function contract(source, reference = publicWorkflow, java = driver) {
   // private ADB ownership, fresh AVD, cleanup, timeouts, and validator invocation.
   const buildStart = '      - name: Build current long fixture and isolated native UI driver\n';
   const summaryStart = "          python3 - <<'PY'\n          import hashlib,json,os\n";
-  const candidateObservation = section(source, buildStart, summaryStart)
+  const failureStart = '          # BEGIN OWNED FAILURE SCREENSHOT\n';
+  const failureEnd = '          # END OWNED FAILURE SCREENSHOT\n';
+  const failure = section(source, failureStart, failureEnd) + failureEnd;
+  assert.equal((failure.match(/python3 - <<'PY_FAILURE' \|\| true/g) ?? []).length, 1);
+  assert.equal(sha256(failure), '653c59086f7baf8a5ac636925279aa0518492ae17bd506f8b6c0541d11c8a98e');
+  const observation = section(source, buildStart, summaryStart);
+  assert.ok(observation.includes(failure + '\n          test "$instrumentation_status" -eq 0\n'));
+  const candidateObservation = observation.replace(failure + '\n', '')
     .replace('"$CANDIDATE_APK_SHA256"', '"$PUBLIC_APK_SHA256"');
   assert.equal(candidateObservation, section(reference, buildStart, summaryStart));
   assert.match(candidateObservation, /-e class com\.yawf\.runtimeinstrumentation\.RuntimeForegroundPlaybackFlowTest/);
@@ -90,6 +99,15 @@ test('semantic gates reject weakening mutations', async (t) => {
     ['ordinary observer', '-e class com.yawf.runtimeinstrumentation.RuntimeForegroundPlaybackFlowTest', '-e class com.yawf.runtimeinstrumentation.FaultOncePlugin'],
     ['app injection', '          trap cleanup EXIT', '          FaultOncePlugin\n          trap cleanup EXIT'],
     ['validator reused', 'node scripts/android_foreground_playback_receipt.mjs \\', 'node scripts/other_validator.mjs \\'],
+    ['failure capture success guard', 'if [ "$native_test_ok" = false ]; then', 'if [ "$native_test_ok" = true ]; then'],
+    ['failure capture deadline', 'timeout 10s "${adb_cmd[@]}" exec-out screencap -p', 'timeout 100s "${adb_cmd[@]}" exec-out screencap -p'],
+    ['failure capture cap', 'head -c 8388609 > "$failure_capture"', 'head -c 99999999 > "$failure_capture"'],
+    ['failure capture crc', 'assert zlib.crc32(payload)&0xffffffff==struct.unpack', 'assert True or zlib.crc32(payload)&0xffffffff==struct.unpack'],
+    ['failure capture dimensions', 'width*height<=16777216', 'width*height<=999999999'],
+    ['failure capture best effort', "python3 - <<'PY_FAILURE' || true", "python3 - <<'PY_FAILURE'"],
+    ['failure capture budget', 'assert len(data)+4096<=remaining', 'assert True'],
+    ['failure must not make native success', "'nativeFailureUnchanged':True", "'nativeFailureUnchanged':False"],
+    ['native status gate', '          test "$instrumentation_status" -eq 0\n', '          true\n'],
     ['unqualified validator', "result['outcome']=='observer-abi-unintegrated'", "result['outcome']=='qualified'"],
     ...['candidatePublished', 'startupFaultInjected', 'appProcessInstrumented', 'runtimePublished', 'hostedAdmission', 'fullQualification', 'observerAbiIntegrated'].map((key) => [key, `'${key}':False`, `'${key}':True`]),
     ['candidate label', "'artifactChannel':'unpublished-candidate114'", "'artifactChannel':'published'"],
@@ -99,4 +117,76 @@ test('semantic gates reject weakening mutations', async (t) => {
   }
   await t.test('immutable public workflow', () => assert.throws(() => contract(workflow, publicWorkflow + '\n')));
   await t.test('immutable Java driver', () => assert.throws(() => contract(workflow, publicWorkflow, driver + '\n')));
+});
+
+
+test('failure screenshot validator accepts bounded PNG and rejects damaged or over-budget captures', () => {
+  const block = section(workflow, "            FAILURE_CAPTURE=", "          PY_FAILURE\n");
+  const body = block.slice(block.indexOf("\n") + 1).split('\n').map((line) => line.startsWith('          ') ? line.slice(10) : line).join('\n');
+  const fixture = `
+import json, os, pathlib, struct, subprocess, sys, tempfile, zlib
+body = sys.stdin.read()
+def chunk(kind, value):
+    payload = kind + value
+    return struct.pack('>I', len(value)) + payload + struct.pack('>I', zlib.crc32(payload) & 0xffffffff)
+png = b'\\x89PNG\\r\\n\\x1a\\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 6, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(b'\\0\\0\\0\\0\\0')) + chunk(b'IEND', b'')
+with tempfile.TemporaryDirectory(prefix='failure-contract-') as temp:
+    root = pathlib.Path(temp)
+    for name, data, retained, status, expected in [
+        ('valid', png, 0, '0', True),
+        ('crc', png[:-1] + bytes([png[-1] ^ 1]), 0, '0', False),
+        ('truncated', png[:-1], 0, '0', False),
+        ('oversize', png + bytes(8388609), 0, '0', False),
+        ('budget', png, 42*1024*1024-4096, '0', False),
+        ('capture-status', png, 0, '1', False),
+    ]:
+        case = root/name
+        case.mkdir()
+        evidence = case/'evidence'
+        evidence.mkdir()
+        if retained:
+            with (evidence/'retained').open('wb') as f: f.truncate(retained)
+        capture = case/'capture.png'
+        capture.write_bytes(data)
+        env = dict(os.environ, EVIDENCE=str(evidence), FAILURE_CAPTURE=str(capture), CAPTURE_STATUS=status)
+        result = subprocess.run([sys.executable, '-I', '-B', '-c', body], env=env, capture_output=True)
+        assert result.returncode == 0, (name, result.stderr)
+        receipt = json.loads((evidence/'failure-capture.json').read_text())
+        assert receipt['screenshotCaptured'] is expected, name
+        assert receipt['nativeFailureUnchanged'] is True and receipt['fullQualification'] is False
+        assert (evidence/'failure-owned-emulator.png').exists() is expected, name
+`;
+  const result = spawnSync('python3', ['-I', '-B', '-c', fixture], { input: body, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr || result.error?.message);
+});
+
+
+test('failure capture filesystem exception reaches the still-failing native gate', () => {
+  const start = '          # BEGIN OWNED FAILURE SCREENSHOT\n';
+  const end = '          # END OWNED FAILURE SCREENSHOT\n';
+  const block = (section(workflow, start, end) + end)
+    .split('\n').map((line) => line.startsWith('          ') ? line.slice(10) : line).join('\n');
+  const script = `set -euo pipefail
+native_test_ok=false
+instrumentation_status=1
+adb_cmd=(adb)
+timeout() { return 0; }
+${block}
+printf 'NATIVE_GATE_REACHED\n'
+test "$instrumentation_status" -eq 0
+printf 'INCORRECT_SUCCESS\n'
+`;
+  const temp = mkdtempSync(join(process.env.TMPDIR, 'failure-shell-contract-'));
+  try {
+    const result = spawnSync('bash', ['-c', script], {
+      encoding: 'utf8',
+      env: { ...process.env, RUNNER_TEMP: temp, EVIDENCE: join(temp, 'nonexistent-evidence') },
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /FileNotFoundError/);
+    assert.match(result.stdout, /NATIVE_GATE_REACHED/);
+    assert.doesNotMatch(result.stdout, /INCORRECT_SUCCESS/);
+  } finally {
+    rmSync(temp, { recursive: true });
+  }
 });

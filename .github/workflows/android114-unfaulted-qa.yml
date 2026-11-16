@@ -524,6 +524,54 @@ jobs:
               evidence_bytes+=len(data); assert evidence_bytes<=42*1024*1024
               (out/name).write_bytes(data)
           PY
+          # BEGIN OWNED FAILURE SCREENSHOT
+          if [ "$native_test_ok" = false ]; then
+            failure_capture="$RUNNER_TEMP/candidate114-failure.png"
+            set +e
+            timeout 10s "${adb_cmd[@]}" exec-out screencap -p | head -c 8388609 > "$failure_capture"
+            capture_status=$?
+            set -e
+            FAILURE_CAPTURE="$failure_capture" CAPTURE_STATUS="$capture_status" python3 - <<'PY_FAILURE' || true
+          import json,os,struct,zlib
+          from pathlib import Path
+          captured=False
+          evidence=Path(os.environ['EVIDENCE'])
+          retained=sum(p.stat().st_size for p in evidence.iterdir() if p.is_file())
+          remaining=42*1024*1024-retained
+          try:
+              data=Path(os.environ['FAILURE_CAPTURE']).read_bytes()
+              assert os.environ['CAPTURE_STATUS']=='0' and 24<=len(data)<=8388608
+              assert data[:8]==b'\x89PNG\r\n\x1a\n' and data[12:16]==b'IHDR'
+              width,height=struct.unpack('>II',data[16:24])
+              assert 0<width<=4096 and 0<height<=4096 and width*height<=16777216
+              offset=8
+              chunks=0
+              while offset<len(data):
+                  size=struct.unpack('>I',data[offset:offset+4])[0]
+                  end=offset+12+size
+                  assert end<=len(data) and chunks<4096
+                  payload=data[offset+4:end-4]
+                  assert zlib.crc32(payload)&0xffffffff==struct.unpack('>I',data[end-4:end])[0]
+                  chunks+=1
+                  offset=end
+                  if payload[:4]==b'IEND':
+                      assert size==0 and offset==len(data)
+                      break
+              else:
+                  raise ValueError('missing-terminal-chunk')
+              assert len(data)+4096<=remaining
+              (evidence/'failure-owned-emulator.png').write_bytes(data)
+              captured=True
+          except Exception:
+              pass
+          receipt={'scope':'fresh-owned-emulator-native-failure-diagnostic-only','screenshotCaptured':captured,
+                   'nativeFailureUnchanged':True,'runtimePublished':False,'fullQualification':False}
+          if remaining>=4096:
+              (evidence/'failure-capture.json').write_text(json.dumps(receipt)+'\n')
+          PY_FAILURE
+          fi
+          # END OWNED FAILURE SCREENSHOT
+
           test "$instrumentation_status" -eq 0
           grep -Fq 'OK (1 test)' "$RUNNER_TEMP/instrumentation.txt"
           test ! -e "$fixture_output/ipad-observer-refused"
