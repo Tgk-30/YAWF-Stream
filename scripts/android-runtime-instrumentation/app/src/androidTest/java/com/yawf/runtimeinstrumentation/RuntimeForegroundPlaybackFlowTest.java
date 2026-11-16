@@ -19,6 +19,7 @@ import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.uiautomator.By;
 import androidx.test.uiautomator.BySelector;
 import androidx.test.uiautomator.Direction;
+import androidx.test.uiautomator.StaleObjectException;
 import androidx.test.uiautomator.UiDevice;
 import androidx.test.uiautomator.UiObject2;
 
@@ -306,12 +307,12 @@ public final class RuntimeForegroundPlaybackFlowTest {
         String expectedEngine = playbackCase.equals("direct") ? DIRECT_ENGINE : HLS_ENGINE;
         waitForExactTextWithin(details, expectedEngine, MEDIA_WAIT_MS, "expected playback engine");
         if (playbackCase.equals("auto-mkv")) {
-            assertEquals("Expected selected MKV file in player details", MKV_FILE,
-                    readDefinitionValue(details, "File", exactLabel(MKV_FILE)));
+            waitForExactMkvFile(MEDIA_WAIT_MS);
             assertTrue("Auto MKV must not select quality manually", !qualitySelected);
         }
         FrameSample readyStats = waitForReadableStats(details, MEDIA_WAIT_MS);
         if (presentation.equals("normal-diagnostic")) {
+            details = waitForUniqueDetailsDialog(SHORT_WAIT_MS);
             runNormalDiagnostic(details, readyStats);
             return;
         }
@@ -492,22 +493,36 @@ public final class RuntimeForegroundPlaybackFlowTest {
     private void openDetailsOnce() {
         long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT_MS;
         while (SystemClock.uptimeMillis() < deadline) {
-            assertTrue("Accessibility cache refresh failed while opening player details",
+            UiObject2 details;
+            try {
+                assertTrue("Accessibility cache refresh failed while opening player details",
                     instrumentation.getUiAutomation().clearCache());
-            assertNoOutOfScopeApproval();
-            assertEquals("Product package lost foreground ownership while opening player details",
+                assertNoOutOfScopeApproval();
+                assertEquals("Product package lost foreground ownership while opening player details",
                     PRODUCT_PACKAGE, device.getCurrentPackageName());
-            UiObject2 player = findUniqueExactProductDialog(PLAYER_DIALOG_LABEL);
-            if (player == null || !hasVisibleBounds(player)) {
+                UiObject2 player = findUniqueExactProductDialog(PLAYER_DIALOG_LABEL);
+                if (player == null || !hasVisibleBounds(player)) {
+                    SystemClock.sleep(250);
+                    continue;
+                }
+                details = findLabeledClickableWithin(player, DETAILS_LABEL, DETAILS_LABEL);
+                if (!(details != null && hasVisibleBounds(details) && details.isEnabled())) {
+                    SystemClock.sleep(250);
+                    continue;
+                }
+                assertTrue("Input attempted after measured no-input window began", !noInputWindowStarted);
+                assertNoOutOfScopeApproval();
+                assertNotNull("read-only player details disappeared", details);
+                assertTrue("read-only player details was disabled", details.isEnabled());
+            } catch (StaleObjectException stale) {
+                // No input has been attempted. Refresh and reacquire on the next iteration.
                 SystemClock.sleep(250);
                 continue;
             }
-            UiObject2 details = findLabeledClickableWithin(player, DETAILS_LABEL, DETAILS_LABEL);
-            if (details != null && hasVisibleBounds(details)) {
-                guardedClick(details, "read-only player details");
-                return;
-            }
-            SystemClock.sleep(250);
+            // A click can have uncertain delivery. Never retry after attempting it.
+            details.click();
+            SystemClock.sleep(500);
+            return;
         }
         fail("Timed out opening read-only player details");
     }
@@ -558,6 +573,25 @@ public final class RuntimeForegroundPlaybackFlowTest {
         fail("Timed out waiting for " + description);
     }
 
+    private void waitForExactMkvFile(long timeoutMs) {
+        long deadline = SystemClock.uptimeMillis() + timeoutMs;
+        while (SystemClock.uptimeMillis() < deadline) {
+            try {
+                assertTrue("Accessibility cache refresh failed while reading MKV file", instrumentation.getUiAutomation().clearCache());
+                assertNoOutOfScopeApproval();
+                assertEquals("Product package lost foreground ownership while reading MKV file", PRODUCT_PACKAGE, device.getCurrentPackageName());
+                UiObject2 details = requireUniqueDetailsDialog();
+                assertEquals("Expected selected MKV file in player details", MKV_FILE,
+                        readDefinitionValue(details, "File", exactLabel(MKV_FILE)));
+                return;
+            } catch (StaleObjectException stale) {
+                // Retry only a retired accessibility node, never a semantic refusal.
+            }
+            SystemClock.sleep(250);
+        }
+        fail("Timed out reading exact MKV file from player details");
+    }
+
     private FrameSample waitForReadableStats(UiObject2 details, long timeoutMs) {
         long deadline = SystemClock.uptimeMillis() + timeoutMs;
         AssertionError last = null;
@@ -570,9 +604,10 @@ public final class RuntimeForegroundPlaybackFlowTest {
                 if (sample.decodedFrames > 0) return sample;
             } catch (AssertionError caught) {
                 last = caught;
+            } catch (StaleObjectException stale) {
+                // The next iteration refreshes the cache and reacquires the dialog.
             }
             SystemClock.sleep(500);
-            details = requireUniqueDetailsDialog();
         }
         if (last != null) throw last;
         fail("Timed out waiting for visible decoded-frame and buffer-health statistics");

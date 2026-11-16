@@ -37,7 +37,7 @@ function safeDetailsOpeningContract(source) {
     playerVisible,
   );
   const visible = body.indexOf("details != null && hasVisibleBounds(details)", details);
-  const exactClick = body.indexOf('guardedClick(details, "read-only player details")', visible);
+  const exactClick = body.indexOf("details.click();", visible);
   for (const [name, index] of Object.entries({
     refresh,
     clearCache,
@@ -53,7 +53,15 @@ function safeDetailsOpeningContract(source) {
   assert.ok(noApproval < foreground && foreground < player);
   assert.ok(player < playerVisible && playerVisible < details);
   assert.ok(details < visible && visible < exactClick);
-  assert.equal((body.match(/guardedClick\(/g) ?? []).length, 1);
+  const staleCatch = body.indexOf('catch (StaleObjectException stale)', visible);
+  const retryContinue = body.indexOf('continue;', staleCatch);
+  assert.ok(staleCatch > visible && staleCatch < retryContinue && retryContinue < exactClick);
+  assert.match(body, /details != null && hasVisibleBounds\(details\) && details\.isEnabled\(\)/);
+  assert.doesNotMatch(body.slice(refresh, staleCatch), /guardedClick\(|\.click\(\)/);
+  assert.doesNotMatch(body, /catch \(AssertionError|catch \(Exception/);
+  assert.match(body.slice(visible, staleCatch), /!noInputWindowStarted[\s\S]*assertNoOutOfScopeApproval\(\)[\s\S]*assertNotNull\([^\n]*details\)[\s\S]*details\.isEnabled\(\)/);
+  assert.doesNotMatch(body.slice(staleCatch, exactClick), /isEnabled\(\)|hasVisibleBounds\(/);
+  assert.equal((body.match(/details\.click\(\)/g) ?? []).length, 1);
   assert.doesNotMatch(body, /guardedClick\(player|player::click|player\.click\(/);
   assert.match(body, /SystemClock\.uptimeMillis\(\) \+ MEDIA_WAIT_MS/);
 }
@@ -394,10 +402,9 @@ test("details-opening contract catches missing refresh and generic player input"
 
   const genericPlayerInput = replaceUnique(
     driver,
-    '            SystemClock.sleep(250);\n        }\n        fail("Timed out opening read-only player details");',
+    '            // A click can have uncertain delivery. Never retry after attempting it.',
     '            guardedClick(player, "player surface reveal");\n' +
-      '            SystemClock.sleep(250);\n        }\n' +
-      '        fail("Timed out opening read-only player details");',
+      '            // A click can have uncertain delivery. Never retry after attempting it.',
   );
   assert.throws(() => safeDetailsOpeningContract(genericPlayerInput));
 });
@@ -570,6 +577,7 @@ function autoMkvContract(source, java) {
   assert.match(source, /--foreground-long --ipad-foreground "\$\{fixture_extra\[@\]\}"/);
   assert.match(java, /!playbackCase\.equals\("auto-mkv"\) \|\| \(mode\.equals\("full"\) && presentation\.equals\("normal-diagnostic"\)\)/);
   assert.match(java, /if \(playbackCase\.equals\("hls"\)\) \{\s*phase = "selecting-480p"/);
+  assert.match(java, /waitForExactMkvFile\(MEDIA_WAIT_MS\)/);
   assert.match(java, /readDefinitionValue\(details, "File", exactLabel\(MKV_FILE\)\)/);
   assert.match(java, /assertTrue\("Auto MKV must not select quality manually", !qualitySelected\)/);
   assert.match(java, /playbackCase\.equals\("direct"\) \? DIRECT_ENGINE : HLS_ENGINE/);
@@ -591,5 +599,45 @@ test('auto MKV is manual full only with exact source and no quality action', () 
   ]) {
     assert.equal(driver.split(from).length, 2);
     assert.throws(() => autoMkvContract(workflow, driver.replace(from, to)));
+  }
+});
+
+function mkvFileObservationContract(source) {
+  const start = source.indexOf('private void waitForExactMkvFile(long timeoutMs)');
+  const end = source.indexOf('private FrameSample waitForReadableStats', start);
+  assert.ok(start >= 0 && end > start);
+  const body = source.slice(start, end);
+  assert.match(body, /long deadline = SystemClock\.uptimeMillis\(\) \+ timeoutMs/);
+  assert.match(body, /while \(SystemClock\.uptimeMillis\(\) < deadline\)/);
+  assert.match(body, /clearCache\(\)[\s\S]*assertNoOutOfScopeApproval\(\)[\s\S]*PRODUCT_PACKAGE, device\.getCurrentPackageName\(\)[\s\S]*requireUniqueDetailsDialog\(\)[\s\S]*readDefinitionValue\(details, "File", exactLabel\(MKV_FILE\)\)/);
+  assert.match(body, /catch \(StaleObjectException stale\)/);
+  assert.doesNotMatch(body, /catch \(AssertionError|catch \(Exception|guardedClick\(|\.click\(\)/);
+  assert.match(source, /FrameSample readyStats = waitForReadableStats\(details, MEDIA_WAIT_MS\);\s*if \(presentation\.equals\("normal-diagnostic"\)\) \{\s*details = waitForUniqueDetailsDialog\(SHORT_WAIT_MS\);\s*runNormalDiagnostic\(details, readyStats\)/);
+}
+test('MKV file observation refreshes and reacquires only for stale AX nodes', () => {
+  mkvFileObservationContract(driver);
+  for (const [from, to] of [
+    ['instrumentation.getUiAutomation().clearCache());\n                assertNoOutOfScopeApproval();\n                assertEquals("Product package lost foreground ownership while reading MKV file"', 'true);\n                assertNoOutOfScopeApproval();\n                assertEquals("Product package lost foreground ownership while reading MKV file"'],
+    ['assertNoOutOfScopeApproval();\n                assertEquals("Product package lost foreground ownership while reading MKV file"', 'assertEquals("Product package lost foreground ownership while reading MKV file"'],
+    ['PRODUCT_PACKAGE, device.getCurrentPackageName());\n                UiObject2 details = requireUniqueDetailsDialog();', '"other", device.getCurrentPackageName());\n                UiObject2 details = requireUniqueDetailsDialog();'],
+    ['catch (StaleObjectException stale) {\n                // Retry only a retired accessibility node', 'catch (AssertionError stale) {\n                // Retry only a retired accessibility node'],
+    ['long deadline = SystemClock.uptimeMillis() + timeoutMs;\n        while (SystemClock.uptimeMillis() < deadline) {\n            try {\n                assertTrue("Accessibility cache refresh failed while reading MKV file"', 'long deadline = Long.MAX_VALUE;\n        while (SystemClock.uptimeMillis() < deadline) {\n            try {\n                assertTrue("Accessibility cache refresh failed while reading MKV file"'],
+  ]) {
+    assert.equal(driver.split(from).length, 2);
+    assert.throws(() => mkvFileObservationContract(driver.replace(from, to)));
+  }
+});
+
+test('details stale retry is limited to pre-input reads', () => {
+  safeDetailsOpeningContract(driver);
+  for (const [from, to] of [
+    ['catch (StaleObjectException stale) {\n                // No input has been attempted.', 'catch (AssertionError stale) {\n                // No input has been attempted.'],
+    ['details != null && hasVisibleBounds(details) && details.isEnabled()', 'details != null && hasVisibleBounds(details)'],
+    ['            } catch (StaleObjectException stale) {\n                // No input has been attempted.', '                details.click();\n            } catch (StaleObjectException stale) {\n                // No input has been attempted.'],
+    ['            details.click();\n            SystemClock.sleep(500);', '            assertTrue("enabled", details.isEnabled());\n            details.click();\n            SystemClock.sleep(500);'],
+    ['long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT_MS;\n        while (SystemClock.uptimeMillis() < deadline) {\n            UiObject2 details;', 'long deadline = Long.MAX_VALUE;\n        while (SystemClock.uptimeMillis() < deadline) {\n            UiObject2 details;'],
+  ]) {
+    assert.equal(driver.split(from).length, 2);
+    assert.throws(() => safeDetailsOpeningContract(driver.replace(from, to)));
   }
 });
