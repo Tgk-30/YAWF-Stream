@@ -137,6 +137,11 @@ function workflowContract(w, j) {
   assert.match(j, /decodedPlaybackClaimed'\] is False/);
 }
 
+function replaceUniqueFixture(source, before, after) {
+  assert.equal(source.split(before).length, 2, `Mutation target must occur once: ${before}`);
+  return source.replace(before, after);
+}
+
 function fixtureContract(f) {
   assert.match(f, /realpathSync\(raw\) !== raw/);
   assert.match(f, /if \(readdirSync\(ARTIFACT_DIR\)\.length !== 0\)/);
@@ -155,7 +160,7 @@ function fixtureContract(f) {
   assert.match(f, /app\.addHook\("onRequest"/);
   assert.match(f, /app\.addHook\("onResponse"/);
   assert.match(f, /MEDIA_PROBE_PATH/);
-  assert.match(f, /spawnSync\("ffprobe"/);
+  assert.match(f, /function writeMediaProbe\(\): void \{\s*const result = spawnSync\("ffprobe", \[/);
   assert.match(f, /format=format_name,duration,size:stream=index,codec_type,codec_name,profile,level,codec_tag_string,pix_fmt,width,height,r_frame_rate,sample_rate,channels/);
   assert.match(f, /video\?\.codec_name !== "h264"/);
   assert.match(f, /video\.pix_fmt !== "yuv420p"/);
@@ -163,7 +168,15 @@ function fixtureContract(f) {
   assert.match(f, /writeMediaProbe\(\)/);
   assert.match(f, /exactly segment000\.ts through segment011\.ts/);
   assert.match(f, /drawtext=fontfile=/);
-  assert.match(f, /externalFull\.headers\["content-type"\] !== "video\/mp4"/);
+  assert.match(f, /const SELECTED_NAME = fixtureCLI\.sourceMkv \? "synthetic\.mkv" : "synthetic\.mp4"/);
+  assert.match(f, /const SELECTED_PATH = fixtureCLI\.sourceMkv \? MKV_PATH : MOVIE_PATH/);
+  assert.match(f, /const SELECTED_MIME = fixtureCLI\.sourceMkv \? "video\/x-matroska" : "video\/mp4"/);
+  assert.match(f, /const PROVIDER_FILE = fixtureCLI\.sourceMkv \? "\/Synthetic\.Fixture\.Movie\.2026\.1080p\.WEB-DL\.x264\.mkv" : "\/Synthetic\.Fixture\.Movie\.2026\.1080p\.WEB-DL\.x264\.mp4"/);
+  assert.match(f, /case "\.mp4": return "video\/mp4";/);
+  assert.match(f, /case "\.mkv": return "video\/x-matroska";/);
+  assert.match(f, /const MOVIE_URL = `\$\{MEDIA_ORIGIN\}\/media\/\$\{SELECTED_NAME\}`/);
+  assert.match(f, /path: PROVIDER_FILE,\s*bytes: statSync\(SELECTED_PATH\)\.size/);
+  assert.match(f, /externalFull\.headers\["content-type"\] !== SELECTED_MIME/);
   assert.match(f, /externalFull\.headers\["accept-ranges"\] !== "bytes"/);
   assert.match(f, /externalFull\.headers\["content-disposition"\] != null/);
   assert.doesNotMatch(f, /externalReceiptEvents\.push\([^)]*(?:rawUrl|externalPath|capability)/s);
@@ -490,8 +503,17 @@ for (const [name, original, mutate, contract] of [
   ['fake decode claim', driver, s => s.replace('receipt.put("decodedPlaybackClaimed", false)', 'receipt.put("decodedPlaybackClaimed", true)'), driverContract],
   ['unbounded receipt', fixture, s => s.replace('EXTERNAL_RECEIPT_LIMIT = 128', 'EXTERNAL_RECEIPT_LIMIT = 99999'), fixtureContract],
   ['raw method type', fixture, s => s.replace('const method: "GET" | "HEAD" = methodValue', 'const method = methodValue'), fixtureContract],
-  ['missing ffprobe', fixture, s => s.replace('spawnSync("ffprobe"', 'spawnSync("true"'), fixtureContract],
-  ['missing exact MP4 content type', fixture, s => s.replace('externalFull.headers["content-type"] !== "video/mp4"', 'false'), fixtureContract],
+  ['missing ffprobe', fixture, s => replaceUniqueFixture(s,
+    'function writeMediaProbe(): void {\n  const result = spawnSync("ffprobe", [',
+    'function writeMediaProbe(): void {\n  const result = spawnSync("true", ['), fixtureContract],
+  ['missing selected content type', fixture, s => replaceUniqueFixture(s,
+    'externalFull.headers["content-type"] !== SELECTED_MIME', 'false'), fixtureContract],
+  ['unconditional selected content type', fixture, s => replaceUniqueFixture(s,
+    'const SELECTED_MIME = fixtureCLI.sourceMkv ? "video/x-matroska" : "video/mp4";',
+    'const SELECTED_MIME = "video/mp4";'), fixtureContract],
+  ['unbound selected media name', fixture, s => replaceUniqueFixture(s,
+    'const SELECTED_NAME = fixtureCLI.sourceMkv ? "synthetic.mkv" : "synthetic.mp4";',
+    'const SELECTED_NAME = "synthetic.mp4";'), fixtureContract],
   ['descending byte range admitted', fixture, s => s.replace('    (start != null && end != null && end < start)', '    false'), fixtureContract],
 ]) {
   test(`independently rejects ${name} mutant`, () => {
