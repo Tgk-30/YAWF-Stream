@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
+  cpSync,
   createReadStream,
   existsSync,
   lstatSync,
@@ -24,6 +25,7 @@ interface FixtureCLI {
   output: string;
   smokeOnly: boolean;
   foregroundLong: boolean;
+  ipadForeground: boolean;
 }
 
 function parseFixtureCLI(argv: string[]): FixtureCLI {
@@ -31,8 +33,14 @@ function parseFixtureCLI(argv: string[]): FixtureCLI {
   let output: string | null = null;
   let smokeOnly = false;
   let foregroundLong = false;
+  let ipadForeground = false;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
+    if (argument === "--ipad-foreground") {
+      if (ipadForeground) throw new Error("Duplicate --ipad-foreground argument.");
+      ipadForeground = true;
+      continue;
+    }
     if (argument === "--foreground-long") {
       if (foregroundLong) throw new Error("Duplicate --foreground-long argument.");
       foregroundLong = true;
@@ -62,7 +70,8 @@ function parseFixtureCLI(argv: string[]): FixtureCLI {
   if (repo == null || output == null) {
     throw new Error("Usage: server-ui-fixture.mts --repo <absolute-checkout> --output <absolute-empty-directory> [--smoke-only]");
   }
-  return { repo, output, smokeOnly, foregroundLong };
+  if (ipadForeground && !foregroundLong) throw new Error("--ipad-foreground requires --foreground-long.");
+  return { repo, output, smokeOnly, foregroundLong, ipadForeground };
 }
 
 function canonicalAbsoluteDirectory(raw: string, label: string, create: boolean): string {
@@ -1061,13 +1070,55 @@ async function main(): Promise<void> {
 
     markForegroundStage("server-build");
     const { buildApp } = await import(`${REPO}/server/src/app.ts`);
+    let ipadOptions: Record<string, unknown> = {};
+    let ipadRecorder: any = null;
+    let ipadObserver: any = null;
+    let servedWebDist = WEB_DIST;
+    if (fixtureCLI.ipadForeground) {
+      ipadObserver = await import("./ipad-foreground/passive_observer.mjs");
+      ipadRecorder = ipadObserver.createRecorder(ARTIFACT_DIR, APP_ORIGIN, MEDIA_ORIGIN);
+      // Copy assets unchanged; inject only a same-origin observer script tag into
+      // the copied HTML. Never modify the checkout or compiled asset bytes.
+      servedWebDist = join(runtimeDir, "ipad-web-dist");
+      const assets = ipadObserver.fingerprintAssets(WEB_DIST);
+      cpSync(WEB_DIST, servedWebDist, { recursive: true, errorOnExist: true, force: false });
+      const originalHtml = readFileSync(join(WEB_DIST, "index.html"), "utf8");
+      const observedHtml = ipadObserver.injectObserver(originalHtml);
+      writeFileSync(join(servedWebDist, "index.html"), observedHtml, { mode: 0o600 });
+      const copiedAssets = ipadObserver.fingerprintAssets(servedWebDist);
+      if (JSON.stringify(assets) !== JSON.stringify(copiedAssets)) throw new Error("IPAD_ASSET_COPY_CHANGED");
+      ipadRecorder.append("html-provenance", {
+        originalSha256: createHash("sha256").update(originalHtml).digest("hex"),
+        servedSha256: createHash("sha256").update(observedHtml).digest("hex"),
+        assets,
+      });
+      const { realTranscoder } = await import(`${REPO}/server/src/transcode.ts`);
+      ipadOptions = { transcoder: {
+        ...realTranscoder,
+        spawnHls(args: string[]) {
+          let ordinal: number | null = null;
+          try { ordinal = ipadRecorder.producerStart(args); } catch { /* Observation must not modify the production spawn. */ }
+          let child: ReturnType<typeof realTranscoder.spawnHls>;
+          try { child = realTranscoder.spawnHls(args); }
+          catch (error) {
+            try { ipadRecorder.append("producer-spawn-error", { ordinal }); } catch {}
+            throw error;
+          }
+          child.once("close", (code: number | null, signal: string | null) => {
+            try { ipadRecorder.append("producer-close", { ordinal, code, signalled: signal != null }); } catch {}
+          });
+          return child;
+        },
+      } };
+    }
     app = await buildApp({
+      ...ipadOptions,
       config: {
         host: HOST,
         port: APP_PORT,
         dataDir: runtimeDir,
         databasePath: join(runtimeDir, "fixture.sqlite"),
-        webDistPath: WEB_DIST,
+        webDistPath: servedWebDist,
         secretKey: randomBytes(32),
         setupToken: null,
         publicMode: false,
@@ -1081,6 +1132,12 @@ async function main(): Promise<void> {
         enableTranscode: fixtureCLI.foregroundLong,
       },
     });
+    if (fixtureCLI.ipadForeground) {
+      ipadObserver.installObserverRoutes(app, ipadRecorder);
+      app.addHook("onResponse", async (request: any, reply: any) => {
+        try { ipadRecorder.response(request, reply); } catch { /* Passive metadata must not affect responses. */ }
+      });
+    }
     if (fixtureCLI.foregroundLong) {
       writeFileSync(join(ARTIFACT_DIR, "foreground-runtime.json"), JSON.stringify({ runtimeDir }), { mode: 0o600 });
       app.addHook("onRequest", async (request: any, reply: any) => {

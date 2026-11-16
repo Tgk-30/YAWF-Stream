@@ -13,6 +13,7 @@ on:
       - scripts/prepare_foreground_seccomp.mjs
       - scripts/prepare_foreground_seccomp.test.mjs
       - scripts/foreground-playback/**
+      - scripts/ipad-foreground/**
   workflow_dispatch:
     inputs:
       run_mode:
@@ -44,6 +45,13 @@ jobs:
       - run: node --test scripts/foreground_playback_gate.test.mjs
       - run: node --test scripts/prepare_foreground_seccomp.test.mjs
       - run: node --test --test-name-pattern='fixture emits bounded token-free media and HTTP diagnostics' scripts/android_external_player_workflow.test.mjs
+      - name: Install locked passive observer contract dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: server
+      - name: Validate passive native observation contracts, not native playback
+        run: |
+          node --test scripts/ipad-foreground/passive_observer.test.mjs
+          python3 -I -B -m unittest discover -s scripts/ipad-foreground -p test_resource_guard.py
       - name: Install locked web test dependencies
         run: npm ci
         working-directory: web
