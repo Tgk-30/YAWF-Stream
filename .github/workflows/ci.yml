@@ -280,6 +280,9 @@ jobs:
       - name: Android Gradle bootstrap contracts
         run: node --test scripts/prepare_android_gradle.test.mjs scripts/fetch_android_gradle.test.mjs scripts/fetch_android_kotlin_compiler.test.mjs scripts/prepare_android_kotlin_gradle.test.mjs
 
+      - name: Android owned runtime preparation contracts
+        run: node --test scripts/android_owned_startup_runtime.test.mjs scripts/run_android_owned_startup_hosted.test.mjs scripts/prepare_android_owned_fault_alias.test.mjs
+
       - name: Android external-player runtime harness contracts
         run: node --test scripts/android_external_player_workflow.test.mjs scripts/runtime_external_settings_transaction.test.mjs
 
@@ -524,6 +527,31 @@ jobs:
       - name: Compile generated Android Kotlin
         working-directory: web/src-tauri/gen/android
         run: ./gradlew --no-daemon :app:compileArmDebugKotlin -x :app:rustBuildArmDebug
+
+      - name: Require Android startup construction and bootstrap behavior
+        env:
+          YAWF_REQUIRE_ANDROID_STARTUP_BEHAVIOR: "1"
+          YAWF_REQUIRE_ANDROID_FULLSCREEN_BEHAVIOR: "1"
+          YAWF_REQUIRE_ANDROID_GESTURE_BEHAVIOR: "1"
+          YAWF_REQUIRE_ANDROID_IME_BEHAVIOR: "1"
+          RUSTC: rustc
+        run: |
+          node --test --test-concurrency=1 \
+            scripts/android_async_startup.test.mjs \
+            scripts/android_fullscreen.test.mjs \
+            scripts/android_gesture_insets.test.mjs \
+            scripts/android_ime.test.mjs \
+            scripts/android_startup_runtime_vendor.test.mjs \
+            scripts/android_webview_startup_policy.test.mjs \
+            scripts/patch_tauri_android.test.mjs \
+            scripts/patch_tauri_android_cold_recovery.test.mjs \
+            scripts/patch_tauri_android_webview_compat.test.mjs \
+            scripts/android_creation_completion.test.mjs \
+            scripts/android_startup_bootstrap.test.mjs \
+            scripts/android_startup_workflow.test.mjs \
+            scripts/android_owned_window_destroy.test.mjs \
+            scripts/android_owned_window_destroy_kotlin.test.mjs \
+            scripts/android_owned_destroy_instrumentation_contract.test.mjs
 
       - name: Require actual Android fullscreen controller behavior
         env:

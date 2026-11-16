@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries>
+        <package android:name="com.tgk30.debridstreamer" />
+    </queries>
+    <application
+        android:allowBackup="false"
+        android:label="YAWF owned startup instrumentation"
+        android:supportsRtl="true" />
+</manifest>

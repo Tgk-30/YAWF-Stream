@@ -39,6 +39,9 @@ mod android_exit_policy;
 #[cfg(target_os = "android")]
 mod mobile_android_update;
 
+#[cfg(target_os = "android")]
+mod android_startup;
+
 // Android ACTION_VIEW chooser for cookie-free HTTP(S) stream capabilities.
 // The command is registered only by the Android handler and receives its grant
 // from a separate Android-only local capability.
@@ -891,14 +894,33 @@ pub fn run() {
 
     #[cfg(target_os = "android")]
     {
+        let mut context = tauri::generate_context!();
+        let mut deferred_main = Some(android_startup::defer_main_window(&mut context));
         let app = builder
-            .build(tauri::generate_context!())
+            .build(context)
             .expect("error while running tauri application");
         let mut exit_policy = android_exit_policy::NormalExitPolicy::default();
         app.run(move |app, event| match event {
-            tauri::RunEvent::ExitRequested { code, .. } => {
-                // No product handler currently prevents exit. Future calls to
-                // api.prevent_exit() MUST also call exit_policy.exit_prevented();
+            tauri::RunEvent::Ready => {
+                if let Some(config) = deferred_main.take() {
+                    android_startup::start(app.clone(), config);
+                }
+            }
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } => {
+                android_startup::window_destroyed(&label);
+            }
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
+                if android_startup::keep_startup_alive(code) {
+                    api.prevent_exit();
+                    exit_policy.exit_prevented();
+                    return;
+                }
+                // Outside the uncommitted startup quarantine, normal exits stay unchanged.
+                // Future api.prevent_exit() calls MUST also disarm exit_policy;
                 // Tauri exposes no observed prevention flag for this callback.
                 exit_policy.exit_requested(code);
                 #[cfg(feature = "android-lifecycle-probe")]

@@ -37,14 +37,12 @@ function assertCompatibilityContract(activity) {
     activity,
     /packageName != null &&\n        majorVersion != null &&\n        majorVersion >= MINIMUM_WEBVIEW_MAJOR_VERSION/,
   );
-  assert.ok(
-    onCreate.indexOf("webViewCompatibility = inspectWebViewCompatibility()") <
-      onCreate.indexOf("super.onCreate(savedInstanceState)"),
-  );
-  assert.match(
-    onCreate,
-    /if \(webViewCompatibility\.supported\) \{\n      androidUpdater = YawfAndroidUpdater\.attach\(this\)\n    \}/,
-  );
+  assert.doesNotMatch(onCreate, /inspectWebViewCompatibility\(\)|YawfAndroidUpdater\.attach/);
+  assert.ok(onCreate.indexOf("YawfWebViewStartup.bind(this)") < onCreate.indexOf("super.onCreate(savedInstanceState)"));
+  assert.ok(onCreate.indexOf("YawfWebViewStartup.showLoadingIfNeeded(this)") > onCreate.indexOf("super.onCreate(savedInstanceState)"));
+  assert.match(onWebViewCreate, /if \(!YawfWebViewStartup\.onWebViewCreate\(this, webView\)\) \{\n      webView\.visibility = View\.INVISIBLE\n      return/);
+  assert.ok(onWebViewCreate.indexOf("YawfWebViewStartup.onWebViewCreate(this, webView)") < onWebViewCreate.indexOf("webViewCompatibility = inspectWebViewCompatibility()"));
+  assert.match(onWebViewCreate, /if \(webViewCompatibility\.supported && !::androidUpdater\.isInitialized\) androidUpdater = YawfAndroidUpdater\.attach\(this\)/);
   assert.ok(
     onWebViewCreate.indexOf("if (!webViewCompatibility.supported)") <
       onWebViewCreate.indexOf("detachSafeAreaBridge()"),
@@ -251,7 +249,7 @@ test("migrates the exact previous fully patched activity and is a second-pass no
 
     const migratedGradle = readFileSync(fixture.gradle, "utf8");
     const hook = migratedGradle.slice(previousGradle.length);
-    assert.equal(migratedGradle.slice(0, previousGradle.length), previousGradle);
+    assert.equal(migratedGradle.slice(0, previousGradle.length), previousGradle.replace("webkit:1.14.0", "webkit:1.16.0"));
     assert.equal(hook, `
 // YAWF_FULLSCREEN_BEGIN
 // Always validate after every scheduled Rust producer, even if Kotlin is up to
@@ -310,7 +308,7 @@ test("contract check rejects security and compatibility semantic mutations", () 
     activity.replace("finishAndRemoveTask()", "finish()"),
     activity.replace("webView.visibility = View.INVISIBLE", "webView.visibility = View.VISIBLE"),
     activity.replace(
-      "if (webViewCompatibility.supported) {\n      androidUpdater = YawfAndroidUpdater.attach(this)\n    }",
+      "if (webViewCompatibility.supported && !::androidUpdater.isInitialized) androidUpdater = YawfAndroidUpdater.attach(this)",
       "androidUpdater = YawfAndroidUpdater.attach(this)",
     ),
   ];

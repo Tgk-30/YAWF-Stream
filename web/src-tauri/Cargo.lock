@@ -779,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "debridstreamer"
-version = "2.3.114"
+version = "2.3.115"
 dependencies = [
  "dirs 6.0.0",
  "dispatch2",
@@ -791,6 +791,7 @@ dependencies = [
  "libc",
  "libmpv2",
  "libmpv2-sys",
+ "ndk-context",
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
@@ -811,6 +812,7 @@ dependencies = [
  "tauri-plugin-process",
  "tauri-plugin-shell",
  "tauri-plugin-updater",
+ "tauri-runtime-wry",
  "tokio",
  "windows-sys 0.59.0",
 ]
@@ -4661,8 +4663,6 @@ dependencies = [
 [[package]]
 name = "tauri-runtime-wry"
 version = "2.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d61892587aea2a85245bcaec98c6fe46268874c0a0deae5535fb71ca7b93eae"
 dependencies = [
  "gtk",
  "http",
@@ -6208,8 +6208,6 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 [[package]]
 name = "wry"
 version = "0.57.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a819957a01b3119af85e638a38d242af76dbc87d130dca67bfd0441072e21ff0"
 dependencies = [
  "base64 0.22.1",
  "block2",
