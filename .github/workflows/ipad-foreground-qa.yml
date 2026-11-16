@@ -58,6 +58,7 @@ jobs:
           node --test scripts/ipad-foreground/evidence.test.mjs
           python3 -I -B -m unittest discover -s scripts/ipad-foreground -p test_native_contract.py
           python3 -I -B -m unittest discover -s scripts/ipad-foreground -p test_anchors.py
+          python3 -I -B -m unittest discover -s scripts/ipad-foreground -p test_prepare_toolchain.py
       - name: Install locked product dependencies and build current frontend
         shell: bash
         run: |
@@ -65,20 +66,33 @@ jobs:
           npm ci --prefix server
           npm ci --prefix web
           npm run build --prefix web
-      - name: Prepare official Homebrew QA media toolchain
+      - name: Prepare Homebrew QA ffmpeg 6.1.6, not shipping runtime
         shell: bash
         run: |
           set -euo pipefail
-          brew fetch --force-bottle ffmpeg
-          bottle="$(brew --cache --bottle ffmpeg)"
-          test -f "$bottle"
-          if ! brew list --versions ffmpeg >/dev/null; then brew install --force-bottle ffmpeg; fi
-          brew info --json=v2 ffmpeg > "$RUNNER_TEMP/ipad-bootstrap/formula.json"
-          prefix="$(brew --prefix ffmpeg)"
+          stage=BREW_FETCH
+          trap 'rc=$?; if (( rc != 0 )); then printf "{\"schemaVersion\":1,\"status\":\"refused\",\"code\":\"%s\",\"fullQualification\":false}\n" "$stage" > "$RUNNER_TEMP/ipad-receipt/status.json"; printf "IPAD_BOOTSTRAP_REFUSED=%s\n" "$stage" >&2; fi' EXIT
+          brew fetch --force-bottle ffmpeg@6 > "$RUNNER_TEMP/ipad-bootstrap/brew-fetch.log" 2>&1
+          stage=BREW_BOTTLE_CACHE_QUERY
+          bottle="$(brew --cache --force-bottle ffmpeg@6 2> "$RUNNER_TEMP/ipad-bootstrap/brew-cache-query.log")"
+          stage=BREW_BOTTLE_MISSING
+          test -f "$bottle" && test -r "$bottle"
+          stage=BREW_INSTALL
+          if brew list --versions --formula ffmpeg@6 > "$RUNNER_TEMP/ipad-bootstrap/brew-installed.txt" 2> "$RUNNER_TEMP/ipad-bootstrap/brew-list.log" && test -s "$RUNNER_TEMP/ipad-bootstrap/brew-installed.txt"; then
+            :
+          else
+            brew install --force-bottle ffmpeg@6 > "$RUNNER_TEMP/ipad-bootstrap/brew-install.log" 2>&1
+          fi
+          stage=BREW_FORMULA_INFO
+          brew info --json=v2 ffmpeg@6 > "$RUNNER_TEMP/ipad-bootstrap/formula.json" 2> "$RUNNER_TEMP/ipad-bootstrap/brew-info.log"
+          stage=BREW_PREFIX
+          prefix="$(brew --prefix ffmpeg@6 2> "$RUNNER_TEMP/ipad-bootstrap/brew-prefix.log")"
+          stage=BREW_TOOLCHAIN_ATTEST
           python3 scripts/ipad-foreground/prepare_toolchain.py \
             --info "$RUNNER_TEMP/ipad-bootstrap/formula.json" --bottle "$bottle" \
             --ffmpeg "$prefix/bin/ffmpeg" --ffprobe "$prefix/bin/ffprobe" \
             --node "$(command -v node)" --output "$RUNNER_TEMP/ipad-bootstrap/toolchain.json"
+          trap - EXIT
       - name: Execute owned native observation, not full qualification
         shell: bash
         env:
