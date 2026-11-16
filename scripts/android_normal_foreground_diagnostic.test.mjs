@@ -75,7 +75,8 @@ test('passive normal capture has strict separate non-qualification scope', () =>
     value.scope = 'android-passive-normal-viewing-diagnostic-only';
     value.playbackCase = 'auto-mkv';
     delete value.preWindowEngine; delete value.preWindowDecodedFrames; delete value.detailsClosedBeforeWindow;
-    value.evidence = 'owned-player-and-Pause-control-only';
+    value.evidence = 'owned-player-only';
+    value.preWindowPlayingControlVerified = false;
     value.engineVerified = false; value.fileVerified = false; value.decodedFrameBaselineVerified = false;
     for (const anchor of value.anchors) {
       anchor.file = anchor.file.replace('-hls.png', '-auto-mkv.png');
@@ -85,7 +86,7 @@ test('passive normal capture has strict separate non-qualification scope', () =>
     assert.throws(() => validateNativeReceipt(value));
     for (const mutate of [
       x => x.scope = 'android-normal-viewing-diagnostic-only', x => x.playbackCase = 'hls',
-      x => x.engineVerified = true, x => x.fileVerified = true, x => x.decodedFrameBaselineVerified = true,
+      x => x.engineVerified = true, x => x.fileVerified = true, x => x.decodedFrameBaselineVerified = true, x => x.preWindowPlayingControlVerified = true,
       x => x.preWindowEngine = 'Webview HLS transcode', x => x.evidence = 'playback',
       x => x.hostedAdmission = true, x => x.fullQualification = true, x => x.productionCauseEstablished = true,
       x => x.observerAbiIntegrated = true, x => x.noInputDuringWindow = false,

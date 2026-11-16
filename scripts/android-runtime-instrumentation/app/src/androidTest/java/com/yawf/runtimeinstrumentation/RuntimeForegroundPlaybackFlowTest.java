@@ -197,30 +197,22 @@ public final class RuntimeForegroundPlaybackFlowTest {
 
     private void runPassiveNormalDiagnostic() throws Exception {
         long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT_MS;
-        boolean pauseVisible = false;
+        boolean ownedReady = false;
         while (SystemClock.uptimeMillis() < deadline) {
             try {
                 assertTrue("Accessibility cache refresh failed before passive window", instrumentation.getUiAutomation().clearCache());
                 assertEquals("Product package lost foreground ownership", PRODUCT_PACKAGE, device.getCurrentPackageName());
                 assertNoOutOfScopeApproval();
                 assertNull("Details panel remained visible", findUniqueExactProductDialog(DETAILS_LABEL));
-                UiObject2 player = requireUniqueExactProductDialog(PLAYER_DIALOG_LABEL, "player");
-                UiObject2 pause = findLabeledClickableWithin(player, "Pause", "pause control");
-                boolean playVisible = false;
-                for (UiObject2 play : player.findObjects(By.desc(exactLabel("Play")))) {
-                    if (hasVisibleBounds(play)) playVisible = true;
-                }
-                for (UiObject2 play : player.findObjects(By.text(exactLabel("Play")))) {
-                    if (hasVisibleBounds(play)) playVisible = true;
-                }
-                if (pause != null && hasVisibleBounds(pause) && pause.isEnabled() && !playVisible) { pauseVisible = true; break; }
+                requireUniqueExactProductDialog(PLAYER_DIALOG_LABEL, "player");
+                ownedReady = true;
+                break;
             } catch (StaleObjectException stale) {
                 // Read-only reacquisition; no input is issued.
             }
             SystemClock.sleep(250);
         }
-        assertTrue("Visible Pause control unavailable before passive window", pauseVisible);
-        normalPlayingControl = true;
+        assertTrue("Owned player unavailable before passive window", ownedReady);
         phase = "measured-no-input-window";
         noInputWindowStarted = true;
         windowStartedMs = SystemClock.uptimeMillis();
@@ -931,13 +923,13 @@ public final class RuntimeForegroundPlaybackFlowTest {
             passive.put("scope", "android-passive-normal-viewing-diagnostic-only");
             passive.put("outcome", outcome);
             passive.put("playbackCase", playbackCase);
-            passive.put("evidence", "owned-player-and-Pause-control-only");
+            passive.put("evidence", "owned-player-only");
             passive.put("engineVerified", false);
             passive.put("fileVerified", false);
             passive.put("decodedFrameBaselineVerified", false);
             passive.put("windowRequiredMs", FULL_WINDOW_MS);
             passive.put("windowObservedMs", windowStartedMs >= 0 && windowEndedMs >= windowStartedMs ? windowEndedMs - windowStartedMs : 0);
-            passive.put("preWindowPlayingControlVerified", normalPlayingControl);
+            passive.put("preWindowPlayingControlVerified", false);
             passive.put("windowStartUptimeMs", windowStartedMs);
             passive.put("noInputDuringWindow", noInputWindowStarted);
             passive.put("hostedAdmission", false);
