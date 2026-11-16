@@ -79,6 +79,8 @@ public final class RuntimeForegroundPlaybackFlowTest {
             "(?is).*\\b(?:terms of service|license agreement|user agreement|binding terms)\\b.*");
     private static final Pattern INTEGER = Pattern.compile("\\A[0-9]{1,12}\\z");
     private static final Pattern BUFFER = Pattern.compile("\\A([0-9]{1,6}(?:\\.[0-9])?) s\\z");
+    private static final Pattern SAFE_FAILURE_CLASS = Pattern.compile(
+            "\\A[A-Za-z_$][A-Za-z0-9_$]{0,79}\\z");
 
     private Instrumentation instrumentation;
     private UiDevice device;
@@ -124,9 +126,36 @@ public final class RuntimeForegroundPlaybackFlowTest {
             outcome = "native-window-observed";
         } catch (Throwable caught) {
             failureClass = caught.getClass().getSimpleName();
+            sendRefusalDiagnostic(caught);
             throw caught;
         } finally {
             writeReceipt(outcome, failureClass);
+        }
+    }
+
+    private void sendRefusalDiagnostic(Throwable caught) {
+        Bundle diagnostic = new Bundle();
+        diagnostic.putString("yawfForegroundRefusalPhase", refusalPhase());
+        String simpleName = caught.getClass().getSimpleName();
+        diagnostic.putString(
+                "yawfForegroundRefusalClass",
+                SAFE_FAILURE_CLASS.matcher(simpleName).matches() ? simpleName : "OtherThrowable");
+        instrumentation.sendStatus(2, diagnostic);
+    }
+
+    private String refusalPhase() {
+        switch (phase) {
+            case "not-started":
+            case "launching-product":
+            case "server-login":
+            case "source-selection":
+            case "selecting-480p":
+            case "opening-read-only-details":
+            case "measured-no-input-window":
+            case "native-observation-complete":
+                return phase;
+            default:
+                return "unrecognized";
         }
     }
 

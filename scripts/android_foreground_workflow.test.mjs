@@ -25,6 +25,8 @@ function contract(source) {
     "scripts/android_foreground_playback_receipt.mjs",
     "scripts/android_foreground_playback_receipt.test.mjs",
     "scripts/android_foreground_workflow.test.mjs",
+    "scripts/android_foreground_refusal.py",
+    "scripts/android_foreground_refusal_test.py",
   ]) assert.ok(source.includes(`- ${path}`));
   assert.match(source, /workflow_dispatch:[\s\S]*run_mode:[\s\S]*options: \[admission, full\]/);
   assert.match(source, /playback_case:[\s\S]*options: \[direct, hls\]/);
@@ -163,7 +165,16 @@ function contract(source) {
   ));
   assert.match(source, /assert total<=42\*1024\*1024/);
   assert.match(source, /retention-days: 7/);
-  assert.match(source, /if: success\(\)/);
+  assert.match(source, /if: always\(\)/);
+  assert.match(source, /python3 -I -B scripts\/android_foreground_refusal_test\.py/);
+  assert.ok(source.includes(
+    '          python3 -I -B scripts/android_foreground_refusal.py \\\n' +
+    '            --input "$RUNNER_TEMP/instrumentation.txt" --output "$EVIDENCE/refusal.json"\n' +
+    '          test "$instrumentation_status" -eq 0\n' +
+    '          grep -Fq \'OK (1 test)\' "$RUNNER_TEMP/instrumentation.txt"'
+  ));
+  assert.match(source, /path: android-foreground-evidence/);
+  assert.doesNotMatch(source, /path:.*instrumentation\.txt/);
 }
 
 // A broken positive contract must never make negative mutations appear causal.
@@ -199,6 +210,23 @@ test("workflow does not promote native Stage 1 evidence into observer admission"
   assert.match(driver, /receipt\.put\("stage2ObserverAbiIntegrated", false\)/);
   assert.match(driver, /receipt\.put\("instrumentationWebViewAccessUsed", false\)/);
   assert.match(driver, /receipt\.put\("serverPassiveObserverUsed", true\)/);
+});
+
+test("native refusal metadata is one bounded public status diagnostic", () => {
+  assert.equal((driver.match(/instrumentation\.sendStatus\(/g) ?? []).length, 1);
+  assert.equal((driver.match(/yawfForegroundRefusalPhase/g) ?? []).length, 1);
+  assert.equal((driver.match(/yawfForegroundRefusalClass/g) ?? []).length, 1);
+  assert.match(driver, /SAFE_FAILURE_CLASS\.matcher\(simpleName\)\.matches\(\) \? simpleName : "OtherThrowable"/);
+  for (const phase of [
+    "not-started", "launching-product", "server-login", "source-selection", "selecting-480p",
+    "opening-read-only-details", "measured-no-input-window", "native-observation-complete",
+  ]) assert.match(driver, new RegExp(`case "${phase}":`));
+  assert.match(driver, /default:\s*return "unrecognized"/);
+  const diagnostic = driver.slice(
+    driver.indexOf("private void sendRefusalDiagnostic"),
+    driver.indexOf("private String refusalPhase"),
+  );
+  assert.doesNotMatch(diagnostic, /getMessage|printStackTrace|REPORT_KEY_STREAMRESULT|https?:|FIXTURE_URL|USERNAME|PASSWORD/);
 });
 
 test("workflow contract rejects public artifact substitution", () => {

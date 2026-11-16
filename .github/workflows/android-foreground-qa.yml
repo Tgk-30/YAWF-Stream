@@ -11,6 +11,8 @@ on:
       - scripts/android_foreground_playback_receipt.mjs
       - scripts/android_foreground_playback_receipt.test.mjs
       - scripts/android_foreground_workflow.test.mjs
+      - scripts/android_foreground_refusal.py
+      - scripts/android_foreground_refusal_test.py
   workflow_dispatch:
     inputs:
       run_mode:
@@ -188,6 +190,7 @@ jobs:
           (cd fixture-source/server && npm ci)
           node --test scripts/android_foreground_playback_receipt.test.mjs \
             scripts/android_foreground_workflow.test.mjs
+          python3 -I -B scripts/android_foreground_refusal_test.py
           gradle --project-dir scripts/android-runtime-instrumentation --no-daemon --max-workers=2 \
             :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
           app=scripts/android-runtime-instrumentation/app/build/outputs/apk/debug/app-debug.apk
@@ -408,6 +411,8 @@ jobs:
             > "$RUNNER_TEMP/instrumentation.txt" 2>&1
           instrumentation_status=$?
           set -e
+          python3 -I -B scripts/android_foreground_refusal.py \
+            --input "$RUNNER_TEMP/instrumentation.txt" --output "$EVIDENCE/refusal.json"
           test "$instrumentation_status" -eq 0
           grep -Fq 'OK (1 test)' "$RUNNER_TEMP/instrumentation.txt"
           test ! -e "$fixture_output/ipad-observer-refused"
@@ -473,10 +478,10 @@ jobs:
           PY
 
       - name: Upload bounded non-release evidence
-        if: success()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: android-phone105-foreground-${{ env.REQUESTED_MODE }}-${{ matrix.playback_case }}
           path: android-foreground-evidence
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
