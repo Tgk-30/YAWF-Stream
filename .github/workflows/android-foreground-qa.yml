@@ -324,11 +324,15 @@ jobs:
           ffmpeg -hide_banner -filters > "$RUNNER_TEMP/ffmpeg-filters.txt" 2>&1
           grep -Eq '\bdrawtext\b' "$RUNNER_TEMP/ffmpeg-filters.txt"
           test -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
-          setsid node fixture-source/server/node_modules/tsx/dist/cli.mjs \
+          ipad_qa_control_token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("hex"))')"
+          test "${#ipad_qa_control_token}" -eq 64
+          test -z "${ipad_qa_control_token//[0-9a-f]/}"
+          IPAD_QA_CONTROL_TOKEN="$ipad_qa_control_token" setsid node fixture-source/server/node_modules/tsx/dist/cli.mjs \
             fixture-source/scripts/android_external_player_server_fixture.mts \
             --repo "$GITHUB_WORKSPACE/fixture-source" --output "$fixture_output" \
             --foreground-long --ipad-foreground > "$RUNNER_TEMP/fixture.log" 2>&1 &
           fixture_pid=$!
+          unset ipad_qa_control_token
           fixture_identity="$(process_identity "$fixture_pid")"
           test "$fixture_identity" = "$(id -u):${fixture_pid}:${fixture_identity##*:}"
           deadline=$((SECONDS + 240))

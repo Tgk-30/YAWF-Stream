@@ -9,6 +9,13 @@ const driver = readFileSync(new URL(
 ), "utf8");
 const validator = readFileSync(new URL("./android_foreground_playback_receipt.mjs", import.meta.url), "utf8");
 
+function replaceUnique(source, before, after) {
+  assert.equal(source.split(before).length - 1, 1, `Mutation target is not unique: ${before}`);
+  const changed = source.replace(before, after);
+  assert.notEqual(changed, source);
+  return changed;
+}
+
 function contract(source) {
   assert.match(source, /^name: Android foreground playback QA$/m);
   assert.match(source, /push:[\s\S]*branches:[\s\S]*codex\/android-foreground114-qa[\s\S]*codex\/android-foreground114-full-qa/);
@@ -55,7 +62,7 @@ function contract(source) {
   assert.match(source, /SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64/);
   assert.match(source, /AVD_NAME: yawf-foreground-phone105-api36/);
   assert.match(source, /EMULATOR_SERIAL: emulator-5568/);
-  assert.match(source, /ADB_SERVER_PORT: "5142"/);
+  assert.match(source, /^      ADB_SERVER_PORT: "5142"$/m);
   assert.match(source, /ADB_SERVER_SOCKET: tcp:127\.0\.0\.1:5142/);
   assert.match(source, /ss -ltnH \| awk '\{print \$4\}' \| grep -Eq '\(\^\|:\)\(5037\|5142\|5568\|5569\)\$'/);
   assert.match(source, /Refusing an existing ADB or emulator listener on any bind address/);
@@ -102,6 +109,11 @@ function contract(source) {
   assert.equal((source.match(/\[ "\$current" = "\$adb_identity" \] \|\| return 1/g) ?? []).length, 2);
 
   assert.match(source, /--foreground-long --ipad-foreground/);
+  assert.ok(source.includes('randomBytes(32).toString("hex")'));
+  assert.ok(source.includes('test "${#ipad_qa_control_token}" -eq 64'));
+  assert.ok(source.includes('test -z "${ipad_qa_control_token//[0-9a-f]/}"'));
+  assert.ok(source.includes('IPAD_QA_CONTROL_TOKEN="$ipad_qa_control_token" setsid node'));
+  assert.match(source, /fixture_pid=\$!\n          unset ipad_qa_control_token/);
   assert.match(source, /--repo "\$GITHUB_WORKSPACE\/fixture-source"/);
   assert.match(source, /127\\\.0\\\.0\\\.1:43120/);
   assert.match(source, /127\\\.0\\\.0\\\.1:43121/);
@@ -130,6 +142,12 @@ function contract(source) {
   assert.match(source, /result\['hostedAdmission'\] is False and result\['fullQualification'\] is False/);
   assert.match(source, /'observerAbiIntegrated':False/);
   assert.match(source, /'runtimePublished':False/);
+  assert.ok(source.includes(
+    "            'runtimePublished':False,\n" +
+    "            'hostedAdmission':False,\n" +
+    "            'fullQualification':False,\n" +
+    "            'observerAbiIntegrated':False,"
+  ));
   assert.match(source, /assert total<=42\*1024\*1024/);
   assert.match(source, /retention-days: 7/);
   assert.match(source, /if: success\(\)/);
@@ -176,12 +194,20 @@ test("workflow contract rejects public artifact substitution", () => {
 });
 
 test("workflow contract rejects qualification inflation", () => {
-  const changed = workflow.replace("'hostedAdmission':False", "'hostedAdmission':True");
+  const changed = replaceUnique(workflow,
+    "            'hostedAdmission':False,", "            'hostedAdmission':True,");
   assert.throws(() => contract(changed));
 });
 
 test("workflow contract rejects removal of the private ADB port", () => {
-  const changed = workflow.replace("ADB_SERVER_PORT: \"5142\"", "ADB_SERVER_PORT: \"5037\"");
+  const changed = replaceUnique(workflow,
+    '      ADB_SERVER_PORT: "5142"', '      ADB_SERVER_PORT: "5037"');
+  assert.throws(() => contract(changed));
+});
+
+test("workflow contract rejects a missing fixture control token assignment", () => {
+  const changed = replaceUnique(workflow,
+    'IPAD_QA_CONTROL_TOKEN="$ipad_qa_control_token" setsid node', 'setsid node');
   assert.throws(() => contract(changed));
 });
 
