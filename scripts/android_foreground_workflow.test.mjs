@@ -62,9 +62,17 @@ function contract(source) {
   assert.match(source, /test "\$free_bytes" -ge \$\(\(12 \* 1024 \* 1024 \* 1024\)\)/);
   assert.match(source, /test "\$free_bytes" -ge \$\(\(6 \* 1024 \* 1024 \* 1024\)\)/);
   assert.match(source, /test -z "\$\(adb -H 127\.0\.0\.1 -P "\$ADB_SERVER_PORT" devices/);
+  assert.ok(source.includes(
+    'mapfile -t adb_pids < <(ss -ltnp | grep -E "127\\\\.0\\\\.0\\\\.1:${ADB_SERVER_PORT}[[:space:]]"',
+  ));
+  assert.ok(source.includes("| sed -nE 's/.*pid=([0-9]+),.*/\\1/p' | sort -u)"));
+  assert.match(source, /test "\$\{#adb_pids\[@\]\}" -eq 1/);
+  assert.ok(source.includes('adb_pid="${adb_pids[0]}"'));
   assert.match(source, /adb_identity="\$\(process_identity "\$adb_pid"\)"/);
   assert.match(source, /test "\$\{adb_identity%%:\*\}" = "\$\(id -u\)"/);
-  assert.match(source, /ss -ltnp \| grep -Eq "127\\\.0\\\.0\\\.1:\$\{ADB_SERVER_PORT\}\.\*pid=\$\{adb_pid\},"/);
+  assert.ok(source.includes(
+    'ss -ltnp | grep -Eq "127\\\\.0\\\\.0\\\\.1:${ADB_SERVER_PORT}.*pid=${adb_pid},"',
+  ));
   assert.match(source, /setsid emulator -avd "\$AVD_NAME" -port 5568/);
   assert.match(source, /-no-window -no-audio -no-snapshot/);
   assert.match(source, /adb -H 127\.0\.0\.1 -P "\$ADB_SERVER_PORT" -s "\$EMULATOR_SERIAL"/);
@@ -91,6 +99,7 @@ function contract(source) {
   assert.match(source, /current="\$\(process_identity "\$emulator_pid" 2>\/dev\/null\)"[\s\S]*if \[ "\$current" = "\$emulator_identity" \]; then[\s\S]*reverse --remove tcp:43120/);
   assert.match(source, /stop_owned_group "\$fixture_pid" "\$fixture_identity" \|\| status=1/);
   assert.match(source, /stop_owned_adb \|\| status=1/);
+  assert.equal((source.match(/\[ "\$current" = "\$adb_identity" \] \|\| return 1/g) ?? []).length, 2);
 
   assert.match(source, /--foreground-long --ipad-foreground/);
   assert.match(source, /--repo "\$GITHUB_WORKSPACE\/fixture-source"/);
@@ -198,6 +207,12 @@ test("workflow contract catches hosted admission and cleanup regressions", () =>
     ["section in {'installed','available'}", "section=='available'"],
     ['--max-filesize "$PUBLIC_APK_BYTES"', ""],
     ["(5037|5142|5568|5569)", "(5037)"],
+    ['adb_pid="${adb_pids[0]}"', 'adb_pid="1"'],
+    [
+      'ss -ltnp | grep -Eq "127\\\\.0\\\\.0\\\\.1:${ADB_SERVER_PORT}.*pid=${adb_pid},"',
+      ': # listener ownership guard removed',
+    ],
+    ['[ "$current" = "$adb_identity" ] || return 1', ': # ADB identity guard removed'],
     ["shell getprop ro.boot.qemu.avd_name", "emu avd name"],
     ['reverse tcp:43121 tcp:43121', ""],
     ['stop_owned_group "$fixture_pid" "$fixture_identity" || status=1', 'kill -TERM "$fixture_pid"'],
