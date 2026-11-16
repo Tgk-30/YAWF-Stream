@@ -5,7 +5,7 @@ import { isAbsolute, normalize, parse, join, dirname, basename } from "node:path
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export const KOTLIN_ASSET_API = "https://api.github.com/repos/JetBrains/kotlin/releases/assets/598615460";
+export const KOTLIN_JAR_URL = "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-compiler-embeddable/2.3.21/kotlin-compiler-embeddable-2.3.21.jar";
 export const KOTLIN_JAR_BYTES = 59720376;
 export const KOTLIN_JAR_SHA256 = "d3e70fb011675e77ef00f1a68918d3cd91eed26058977d1e3ea2a37a293233af";
 export const KOTLIN_JAR_SHA1 = "c4b47f8e33cdbeedd8c1415ab9f9ade870388162";
@@ -110,7 +110,7 @@ export function stageVerifiedKotlinCompilerPom(source, root) {
 export function kotlinPomDownloadInvocation(output) {
   const args = kotlinDownloadInvocation(output);
   args[args.indexOf(String(KOTLIN_JAR_BYTES))] = String(KOTLIN_POM_BYTES);
-  args[args.indexOf(KOTLIN_ASSET_API)] = KOTLIN_POM_URL;
+  args[args.indexOf(KOTLIN_JAR_URL)] = KOTLIN_POM_URL;
   return args;
 }
 export function kotlinDownloadInvocation(output) {
@@ -118,7 +118,7 @@ export function kotlinDownloadInvocation(output) {
     "--config", "-", "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "15",
     "--max-time", "60", "--retry", "2", "--retry-all-errors", "--retry-max-time", "180",
     "--max-filesize", String(KOTLIN_JAR_BYTES), "--header", "Accept: application/octet-stream",
-    "--write-out", "%{http_code}", KOTLIN_ASSET_API, "--output", output];
+    "--write-out", "%{http_code}", KOTLIN_JAR_URL, "--output", output];
 }
 export function kotlinTransferStatus(result) {
   const exit = Number.isInteger(result.status) && result.status >= 0 && result.status <= 255 ? result.status : "unavailable";
