@@ -91,6 +91,10 @@ function isInside(parent: string, child: string): boolean {
 }
 
 const fixtureCLI = parseFixtureCLI(process.argv.slice(2));
+const ipadControlToken = fixtureCLI.ipadForeground ? process.env.IPAD_QA_CONTROL_TOKEN : undefined;
+if (fixtureCLI.ipadForeground && (ipadControlToken == null || !/^[a-f0-9]{64}$/.test(ipadControlToken))) {
+  throw new Error("--ipad-foreground requires a per-run IPAD_QA_CONTROL_TOKEN.");
+}
 const REPO = canonicalAbsoluteDirectory(fixtureCLI.repo, "--repo", false);
 const ARTIFACT_DIR = canonicalAbsoluteDirectory(fixtureCLI.output, "--output", true);
 if (isInside(REPO, ARTIFACT_DIR) || isInside(ARTIFACT_DIR, REPO)) {
@@ -1076,7 +1080,7 @@ async function main(): Promise<void> {
     let servedWebDist = WEB_DIST;
     if (fixtureCLI.ipadForeground) {
       ipadObserver = await import("./ipad-foreground/passive_observer.mjs");
-      ipadRecorder = ipadObserver.createRecorder(ARTIFACT_DIR, APP_ORIGIN, MEDIA_ORIGIN);
+      ipadRecorder = ipadObserver.createRecorder(ARTIFACT_DIR, APP_ORIGIN, MEDIA_ORIGIN, ipadControlToken);
       // Copy assets unchanged; inject only a same-origin observer script tag into
       // the copied HTML. Never modify the checkout or compiled asset bytes.
       servedWebDist = join(runtimeDir, "ipad-web-dist");
