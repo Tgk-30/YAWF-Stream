@@ -1149,6 +1149,9 @@ async function main(): Promise<void> {
         if (request.method !== "GET" || !/^\/api\/stream\/[^/]+\/480p_seg_\d{5}\.ts$/.test(path) ||
             !existsSync(join(ARTIFACT_DIR, "hold-segments"))) return;
         writeFileSync(join(ARTIFACT_DIR, "segment-held"), "held\n", { mode: 0o600 });
+        if (fixtureCLI.ipadForeground) {
+          try { ipadRecorder.held(request); } catch { /* Keep the original hold behavior unchanged. */ }
+        }
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, 120_000);
           reply.raw.once("close", () => { clearTimeout(timer); resolve(); });

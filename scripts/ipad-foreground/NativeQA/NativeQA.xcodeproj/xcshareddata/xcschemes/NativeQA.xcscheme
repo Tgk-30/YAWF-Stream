@@ -1,0 +1,23 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Scheme LastUpgradeVersion="2700" version="1.7">
+ <BuildAction parallelizeBuildables="NO" buildImplicitDependencies="YES">
+  <BuildActionEntries>
+   <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
+    <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="700000000000000000000001" BuildableName="NativeQAAnchor.app" BlueprintName="NativeQAAnchor" ReferencedContainer="container:NativeQA.xcodeproj" />
+   </BuildActionEntry>
+   <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
+    <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="700000000000000000000002" BuildableName="SafariNativeInputTests.xctest" BlueprintName="SafariNativeInputTests" ReferencedContainer="container:NativeQA.xcodeproj" />
+   </BuildActionEntry>
+  </BuildActionEntries>
+ </BuildAction>
+ <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.PosixSpawn" shouldUseLaunchSchemeArgsEnv="NO">
+  <Testables>
+   <TestableReference skipped="NO" parallelizable="NO">
+    <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="700000000000000000000002" BuildableName="SafariNativeInputTests.xctest" BlueprintName="SafariNativeInputTests" ReferencedContainer="container:NativeQA.xcodeproj" />
+   </TestableReference>
+  </Testables>
+  <MacroExpansion>
+   <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="700000000000000000000001" BuildableName="NativeQAAnchor.app" BlueprintName="NativeQAAnchor" ReferencedContainer="container:NativeQA.xcodeproj" />
+  </MacroExpansion>
+ </TestAction>
+</Scheme>

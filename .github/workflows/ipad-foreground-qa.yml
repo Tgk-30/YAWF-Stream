@@ -1,0 +1,102 @@
+name: Isolated iPad foreground observation
+
+on:
+  push:
+    branches:
+      - codex/ipad-foreground114-qa
+      - codex/ipad-foreground114-full-qa
+    paths:
+      - .github/workflows/ipad-foreground-qa.yml
+      - scripts/ipad-foreground/**
+      - scripts/android_external_player_server_fixture.mts
+  workflow_dispatch:
+    inputs:
+      run_mode:
+        description: Admission uses 15 seconds only. Full remains unqualified pending independent clock review.
+        required: true
+        type: choice
+        default: admission
+        options:
+          - admission
+          - full
+
+permissions:
+  contents: read
+
+jobs:
+  native-observation:
+    if: ${{ github.ref_type == 'branch' && github.repository == 'Tgk-30/YAWF-Stream' && github.actor == github.repository_owner }}
+    runs-on: macos-26
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        case: ${{ fromJSON(((github.event_name == 'push' && github.ref == 'refs/heads/codex/ipad-foreground114-full-qa') || (github.event_name == 'workflow_dispatch' && inputs.run_mode == 'full')) && '["direct","hls","stall"]' || '["admission-direct","admission-hls"]') }}
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+    steps:
+      - name: Establish sanitized refusal receipt and capacity floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/ipad-receipt" "$RUNNER_TEMP/ipad-bootstrap"
+          printf '{"schemaVersion":1,"status":"refused","code":"BOOTSTRAP_INCOMPLETE","fullQualification":false}\n' > "$RUNNER_TEMP/ipad-receipt/status.json"
+          python3 -c 'import os,sys; v=os.statvfs(sys.argv[1]); assert v.f_bavail*v.f_frsize >= 8053063680, "START_7P5_GIB_REQUIRED"' "$RUNNER_TEMP"
+          echo "HOMEBREW_CACHE=$RUNNER_TEMP/ipad-bootstrap/brew-cache" >> "$GITHUB_ENV"
+          echo "npm_config_cache=$RUNNER_TEMP/ipad-bootstrap/npm-cache" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.3
+      - name: Check native observation policy contracts
+        run: |
+          node --test scripts/ipad-foreground/evidence.test.mjs
+          python3 -I -B -m unittest discover -s scripts/ipad-foreground -p test_native_contract.py
+          python3 -I -B -m unittest discover -s scripts/ipad-foreground -p test_anchors.py
+      - name: Install locked product dependencies and build current frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --prefix server
+          npm ci --prefix web
+          npm run build --prefix web
+      - name: Prepare official Homebrew QA media toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew fetch --force-bottle ffmpeg
+          bottle="$(brew --cache --bottle ffmpeg)"
+          test -f "$bottle"
+          if ! brew list --versions ffmpeg >/dev/null; then brew install --force-bottle ffmpeg; fi
+          brew info --json=v2 ffmpeg > "$RUNNER_TEMP/ipad-bootstrap/formula.json"
+          prefix="$(brew --prefix ffmpeg)"
+          python3 scripts/ipad-foreground/prepare_toolchain.py \
+            --info "$RUNNER_TEMP/ipad-bootstrap/formula.json" --bottle "$bottle" \
+            --ffmpeg "$prefix/bin/ffmpeg" --ffprobe "$prefix/bin/ffprobe" \
+            --node "$(command -v node)" --output "$RUNNER_TEMP/ipad-bootstrap/toolchain.json"
+      - name: Execute owned native observation, not full qualification
+        shell: bash
+        env:
+          QA_CASE: ${{ matrix.case }}
+        run: |
+          set -euo pipefail
+          python3 -I -B scripts/ipad-foreground/run_native.py \
+            --root "$(cd "$RUNNER_TEMP" && pwd -P)/ipad-runtime" \
+            --receipt "$(cd "$RUNNER_TEMP" && pwd -P)/ipad-receipt/status.json" \
+            --case "$QA_CASE" --toolchain "$(cd "$RUNNER_TEMP" && pwd -P)/ipad-bootstrap/toolchain.json"
+      - name: Retain bounded status and synthetic player crops
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipad-foreground-status-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ipad-receipt/status.json
+            ${{ runner.temp }}/ipad-receipt/anchors/manifest.json
+            ${{ runner.temp }}/ipad-receipt/anchors/anchor-*.png
+          if-no-files-found: error
+          retention-days: 3

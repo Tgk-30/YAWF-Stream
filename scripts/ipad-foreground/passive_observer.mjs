@@ -245,6 +245,16 @@ export function createRecorder(output, origin, mediaOrigin, controlToken) {
       quality: header('x-yawf-transcode-quality'), start: header('x-yawf-transcode-start'),
       frontier: header('x-yawf-hls-snapshot-frontier'), endlist: header('x-yawf-hls-snapshot-endlist') });
   }
+  function held(request) {
+    let url;
+    try { url = new URL(request.raw.url, origin); } catch { return; }
+    const match = /^\/api\/stream\/([^/]+)\/480p_seg_(\d{5})\.ts$/.exec(url.pathname);
+    const generation = url.searchParams.get('generation');
+    if (!match || request.method !== 'GET') return;
+    append('segment-held', { stream: digest('stream', match[1]),
+      generation: typeof generation === 'string' && /^transcode-[A-Za-z0-9_-]{1,100}$/.test(generation) ? digest('generation', generation) : null,
+      segment: Number(match[2]) });
+  }
   function observe(observation) {
     let doc = documents.get(observation.document);
     if (!doc) {
@@ -269,7 +279,7 @@ export function createRecorder(output, origin, mediaOrigin, controlToken) {
     if (Buffer.byteLength(JSON.stringify(result)) > 16 * 1024) return null;
     return result;
   }
-  return { append, observe, producerStart, response, state, get failed() { return failed; }, origin };
+  return { append, observe, producerStart, response, held, state, get failed() { return failed; }, origin };
 }
 
 export function installObserverRoutes(app, recorder) {

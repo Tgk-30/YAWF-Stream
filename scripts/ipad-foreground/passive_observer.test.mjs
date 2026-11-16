@@ -217,9 +217,10 @@ test('producer and HLS request attribution are sanitized and correlate the actua
     { statusCode: 200, getHeader() { return undefined; } });
   recorder.response({ method: 'GET', raw: { url: '/api/stream/private-session?token=do-not-record' } },
     { statusCode: 206, getHeader() { return undefined; } });
+  recorder.held({ method: 'GET', raw: { url: `/api/stream/private-session/480p_seg_00002.ts?generation=${gen}&token=do-not-record` } });
   const data = readFileSync(join(path, 'ipad-observations.jsonl'), 'utf8');
   assert.doesNotMatch(data, /private-session|do-not-record|synthetic\.mp4|\/private\//);
-  const [producer, response, direct] = data.trim().split('\n').map(JSON.parse);
+  const [producer, response, direct, held] = data.trim().split('\n').map(JSON.parse);
   assert.equal(producer.generation, response.generation);
   assert.equal(producer.fixed480, true);
   assert.equal(producer.inputLocal, true);
@@ -229,6 +230,10 @@ test('producer and HLS request attribution are sanitized and correlate the actua
   assert.equal(direct.kind, 'direct-response');
   assert.equal(direct.stream, response.stream);
   assert.equal(direct.stream, createHash('sha256').update('ipad-qa-stream:private-session').digest('hex'));
+  assert.equal(held.kind, 'segment-held');
+  assert.equal(held.stream, direct.stream);
+  assert.equal(held.generation, producer.generation);
+  assert.equal(held.segment, 2);
   assert.deepEqual(readdirSync(path), ['ipad-observations.jsonl']);
 });
 
