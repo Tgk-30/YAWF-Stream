@@ -1069,6 +1069,78 @@ describe("VideoPlayer shell", () => {
     }
   });
 
+  it("does not let a pending side tap override an explicit transport skip", () => {
+    vi.useFakeTimers();
+    deviceKindMock.mockReturnValue("ios");
+    try {
+      render(<VideoPlayer url="https://x/movie.mp4" title="Touch film" onClose={() => {}} />);
+      const video = document.querySelector("video.player-video") as HTMLVideoElement;
+      Object.defineProperties(video, {
+        currentTime: { configurable: true, value: 40, writable: true },
+        duration: { configurable: true, value: 120 },
+      });
+      video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      const play = vi.mocked(video.play);
+      const pause = vi.mocked(video.pause);
+      play.mockClear();
+      pause.mockClear();
+
+      fireEvent.pointerDown(video, { pointerType: "touch" });
+      fireEvent.click(video, { clientX: 90 });
+      fireEvent.click(screen.getByRole("button", { name: "Back 10 seconds" }));
+      expect(video.currentTime).toBe(30);
+      act(() => vi.advanceTimersByTime(500));
+
+      expect(play).not.toHaveBeenCalled();
+      expect(pause).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(["pointer hold", "legacy touch hold", "keyboard click"] as const)(
+    "does not let a pending side tap interrupt Fill screen after %s",
+    (input) => {
+      vi.useFakeTimers();
+      deviceKindMock.mockReturnValue("ios");
+      const restorePlatform = replaceProperty(navigator, "standalone", true);
+      try {
+        render(<VideoPlayer url="https://x/movie.mp4" title="Touch fit" onClose={() => {}} />);
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        video.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+        const fit = screen.getByRole("button", { name: "Fill screen" });
+        const play = vi.mocked(video.play);
+        const pause = vi.mocked(video.pause);
+        play.mockClear();
+        pause.mockClear();
+
+        fireEvent.pointerDown(video, { pointerType: "touch" });
+        fireEvent.click(video, { clientX: 90 });
+        act(() => vi.advanceTimersByTime(250));
+        if (input === "pointer hold") {
+          fireEvent(fit.querySelector("svg") ?? fit, new PointerEvent("pointerdown", {
+            bubbles: true, pointerType: "touch", pointerId: 3, button: 0, isPrimary: true,
+          }));
+        } else if (input === "legacy touch hold") {
+          fireEvent.touchStart(fit, { touches: [{ identifier: 3 }] });
+        } else {
+          fireEvent.click(fit, { detail: 0 });
+        }
+        act(() => vi.advanceTimersByTime(100));
+        expect(play).not.toHaveBeenCalled();
+        expect(pause).not.toHaveBeenCalled();
+        if (input !== "keyboard click") {
+          expect(video.style.objectFit).toBe("contain");
+          fireEvent.click(fit);
+        }
+        expect(video.style.objectFit).toBe("cover");
+        expect(document.querySelector("video.player-video")).toBe(video);
+        expect(fit).toHaveAttribute("aria-pressed", "true");
+      } finally {
+        restorePlatform();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("cancels a pending side-zone single tap when a player modal opens", () => {
     vi.useFakeTimers();
     deviceKindMock.mockReturnValue("ios");
@@ -1242,6 +1314,87 @@ describe("VideoPlayer shell", () => {
     });
     expect(onProgress).toHaveBeenLastCalledWith(55, 100);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not save an Android TV growing HLS window as the full title duration", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const play = vi.fn();
+    const onProgress = vi.fn();
+    const onClose = vi.fn();
+    window.YawfAndroidTV = { play, stop: vi.fn() };
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/tv-window/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Growing TV rendition"
+        startPositionSeconds={3}
+        timelineOffsetSeconds={480}
+        onProgress={onProgress}
+        onClose={onClose}
+      />,
+    );
+
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(play.mock.calls[0]![0]).startPositionSeconds).toBe(3);
+    act(() => {
+      window.dispatchEvent(new CustomEvent("yawf-android-tv-progress", {
+        detail: { positionSeconds: 59.7, durationSeconds: 60 },
+      }));
+    });
+    expect(onProgress).toHaveBeenCalledWith(539.7, null);
+    act(() => {
+      window.dispatchEvent(new CustomEvent("yawf-android-tv-closed", {
+        detail: { positionSeconds: 0, durationSeconds: null },
+      }));
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onProgress).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses late full-source duration for Android TV HLS without reopening playback", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const info = deferred<{ durationSeconds: number; tracks: [] }>();
+    const loadSourceInfo = vi.fn(() => info.promise);
+    const play = vi.fn();
+    const stop = vi.fn();
+    const onProgress = vi.fn();
+    window.YawfAndroidTV = { play, stop };
+    render(
+      <VideoPlayer
+        url="https://server.example/api/stream/tv-window/index.m3u8?quality=480p"
+        engine="webview-hls-transcode"
+        title="Known TV duration"
+        timelineOffsetSeconds={480}
+        serverOptimized={{
+          qualities: ["480p"],
+          request: vi.fn().mockResolvedValue(null),
+          loadSourceInfo,
+        }}
+        onProgress={onProgress}
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(loadSourceInfo).toHaveBeenCalledTimes(1));
+    expect(play).toHaveBeenCalledTimes(1);
+    act(() => {
+      window.dispatchEvent(new CustomEvent("yawf-android-tv-progress", {
+        detail: { positionSeconds: 0, durationSeconds: null },
+      }));
+    });
+    expect(onProgress).not.toHaveBeenCalled();
+    await act(async () => {
+      info.resolve({ durationSeconds: 3600, tracks: [] });
+      await info.promise;
+    });
+    act(() => {
+      window.dispatchEvent(new CustomEvent("yawf-android-tv-progress", {
+        detail: { positionSeconds: 60, durationSeconds: 72 },
+      }));
+    });
+    expect(onProgress).toHaveBeenLastCalledWith(540, 3600);
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(stop).not.toHaveBeenCalled();
   });
 
   it("keeps the external capability for a direct Android TV source", async () => {
@@ -2556,6 +2709,64 @@ describe("WebviewPlayer", () => {
     );
   });
 
+  it("keeps direct players visible and playlist fallbacks collapsed in installed iPad More", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    vi.stubGlobal("location", new URL("https://server.example/watch"));
+    const target = `https://server.example/api/external-stream/session-1/${"L".repeat(43)}`;
+    const restores = [replaceProperty(navigator, "userAgent", "Macintosh"),
+      replaceProperty(navigator, "platform", "MacIntel"), replaceProperty(navigator, "maxTouchPoints", 5),
+      replaceProperty(navigator, "standalone", true), replaceProperty(HTMLElement.prototype, "requestFullscreen", undefined),
+      replaceProperty(HTMLElement.prototype, "webkitRequestFullscreen", undefined)];
+    try {
+      const user = userEvent.setup();
+      render(
+        <VideoPlayer
+          url="https://server.example/api/stream/session-1"
+          externalPlaybackUrl={target}
+          sourceFileName="Film.mp4"
+          title="Film"
+          onClose={() => {}}
+        />,
+      );
+      const video = document.querySelector("video")!;
+      video.currentTime = 49.2;
+      const pause = vi.mocked(video.pause);
+      pause.mockClear();
+      await user.click(screen.getByRole("button", { name: "Playback settings" }));
+      const sheet = screen.getByRole("dialog", { name: "Playback settings" });
+      const dialog = within(sheet);
+      const body = sheet.querySelector(".player-options-scrollbody");
+      const options = dialog.getByRole("button", { name: "Copy link or download playlist" });
+      const vlc = dialog.getByRole("link", { name: /Open in VLC/ });
+      expect(sheet).toHaveClass("has-bounded-settings-scroll");
+      expect(body).toContainElement(dialog.getByRole("slider", { name: /Subtitle position/ }));
+      expect(body).not.toContainElement(dialog.getByRole("button", { name: "Close playback settings" }));
+      expect(vlc).toHaveAttribute("href", `vlc-x-callback://x-callback-url/stream?url=${encodeURIComponent(target)}`);
+      expect(dialog.getByRole("link", { name: /Open in Infuse/ })).toBeVisible();
+      expect(dialog.getByRole("slider", { name: /Subtitle position/ })).toBeVisible();
+      expect(options).toHaveAttribute("aria-expanded", "false");
+      expect(dialog.queryByRole("button", { name: /Download player playlist/ })).toBeNull();
+      expect(dialog.queryByRole("button", { name: /^Copy stream link/ })).toBeNull();
+
+      options.focus();
+      await user.keyboard("{Enter}");
+      expect(options).toHaveAttribute("aria-expanded", "true");
+      const group = document.getElementById(options.getAttribute("aria-controls")!);
+      expect(group).toBeVisible();
+      expect(within(group!).getByRole("button", { name: /Download player playlist/ })).toBeVisible();
+      expect(within(group!).getByRole("button", { name: /^Copy stream link/ })).toBeVisible();
+      await user.keyboard("{Enter}");
+      expect(options).toHaveFocus();
+      expect(options).toHaveAttribute("aria-expanded", "false");
+      expect(group).not.toBeVisible();
+      expect(group).toBeEmptyDOMElement();
+      expect(vlc).toBeVisible();
+      expect(document.querySelector("video")).toBe(video);
+      expect(video.currentTime).toBe(49.2);
+      expect(pause).not.toHaveBeenCalled();
+    } finally { restores.reverse().forEach((restore) => restore()); }
+  });
+
   it("keeps Playback settings as the active modal and restores its exact trigger", async () => {
     const onClose = vi.fn();
     render(
@@ -2571,6 +2782,7 @@ describe("WebviewPlayer", () => {
     fireEvent.click(trigger);
     const dialog = screen.getByRole("dialog", { name: "Playback settings" });
     await waitFor(() => expect(dialog).toHaveFocus());
+    expect(dialog.querySelector(".player-options-scrollbody")).toBeNull();
 
     fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
     expect(screen.getByRole("button", { name: /Keyboard shortcuts/ })).toHaveFocus();
@@ -3835,6 +4047,114 @@ describe("WebviewPlayer", () => {
     }
   });
 
+  it("covers an iPad quality replacement with the previous picture until the new reader presents a frame", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const originalUrl = "https://server.example/api/stream/session-1";
+    const optimizedUrl = `${originalUrl}/index.m3u8?quality=480p&start=24`;
+    const request = vi.fn(async () => ({
+      url: optimizedUrl, timelineOffsetSeconds: 24, startPositionSeconds: 0, quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    const drawImage = vi.fn();
+    const context = vi.spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockImplementation(() => ({ drawImage }) as unknown as CanvasRenderingContext2D);
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+    const canPlay = vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue("probably");
+    try {
+      render(<VideoPlayer url={originalUrl} title="Quality picture" sourceFileName="title.mp4" iosHlsPlaybackMode="native"
+        serverOptimized={{ qualities: ["480p"], request }} onClose={() => {}} />);
+      const current = () => document.querySelector("video.player-video") as HTMLVideoElement;
+      const cover = () => document.querySelector("canvas.player-quality-frame") as HTMLCanvasElement;
+      const original = current();
+      await waitFor(() => expect(original.src).toBe(originalUrl));
+      for (const [key, value] of Object.entries({ readyState: 4, paused: false, videoWidth: 1920, videoHeight: 1080 })) {
+        Object.defineProperty(original, key, { configurable: true, value });
+      }
+      original.currentTime = 24;
+      fireEvent.timeUpdate(original);
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      fireEvent.click(screen.getByRole("button", { name: "480p" }));
+      await waitFor(() => expect(current()).not.toBe(original));
+      const replacement = current();
+      const requestFrame = vi.fn(() => 19);
+      Object.defineProperty(replacement, "requestVideoFrameCallback", { configurable: true, value: requestFrame });
+      expect(drawImage).toHaveBeenCalledWith(original, 0, 0, 960, 540);
+      expect(cover()).toBeVisible();
+      expect(requestFrame).not.toHaveBeenCalled();
+      for (const [key, value] of Object.entries({ readyState: 4, paused: false, duration: 60, videoWidth: 640, videoHeight: 360 })) {
+        Object.defineProperty(replacement, key, { configurable: true, value });
+      }
+      replacement.currentTime = 0;
+      fireEvent.canPlay(replacement);
+      await waitFor(() => expect(requestFrame).toHaveBeenCalledTimes(1));
+      expect(cover()).toBeVisible();
+      const onFrame = (requestFrame.mock.calls as unknown as [VideoFrameRequestCallback][])[0][0];
+      onFrame(0, { mediaTime: 0 } as VideoFrameCallbackMetadata);
+      await waitFor(() => expect(cover()).not.toBeVisible());
+      expect(cover().width).toBe(0);
+    } finally {
+      canPlay.mockRestore();
+      context.mockRestore();
+      play.mockRestore();
+    }
+  });
+
+  it("keeps subtitle position across both Device Original and optimized reader replacements", async () => {
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const originalUrl = "https://server.example/api/stream/session-1";
+    const optimizedUrl = `${originalUrl}/index.m3u8?quality=480p&start=24`;
+    const request = vi.fn(async () => ({
+      url: optimizedUrl,
+      timelineOffsetSeconds: 24,
+      startPositionSeconds: 0,
+      quality: "480p" as const,
+    }));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("#EXTM3U\n", { status: 200 })));
+    render(<VideoPlayer url={originalUrl} title="First title" sourceFileName="title.mp4"
+      savedPrefs={{ subtitlePosition: 83 }}
+      serverOptimized={{ qualities: ["480p"], request }} onClose={() => {}} />);
+    const video = () => document.querySelector("video.player-video") as HTMLVideoElement;
+    const settings = () => {
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      return screen.getByRole("slider", { name: /Subtitle position/ });
+    };
+    const original = video();
+    await waitFor(() => expect(original.src).toBe(originalUrl));
+    Object.defineProperty(original, "readyState", { configurable: true, value: 4 });
+    original.currentTime = 24;
+    fireEvent.timeUpdate(original);
+    const before = settings();
+    expect(before).toHaveValue("83");
+    fireEvent.change(before, { target: { value: "61" } });
+    fireEvent.click(screen.getByRole("button", { name: "480p" }));
+    await waitFor(() => expect(video()).not.toBe(original));
+    const optimized = video();
+    await waitFor(() => expect(hlsInstances[0]?.loadSource).toHaveBeenCalledWith(optimizedUrl));
+    const changed = settings();
+    expect(changed).toHaveValue("61");
+    fireEvent.change(changed, { target: { value: "37" } });
+    fireEvent.click(screen.getByRole("button", { name: "Device Original" }));
+    await waitFor(() => expect(video()).not.toBe(optimized));
+    expect(video().src).toBe(originalUrl);
+    expect(settings()).toHaveValue("37");
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not carry a subtitle position into a different title using the same original URL", async () => {
+    const url = "https://server.example/video.mp4";
+    const onClose = vi.fn();
+    const { rerender } = render(<VideoPlayer url={url} title="First title"
+      savedPrefs={{ subtitlePosition: 82 }} onClose={onClose} />);
+    fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+    const subtitleSlider = () => screen.getByRole("slider", { name: /Subtitle position/ });
+    expect(subtitleSlider()).toHaveValue("82");
+    fireEvent.change(subtitleSlider(), { target: { value: "60" } });
+    expect(subtitleSlider()).toHaveValue("60");
+    rerender(<VideoPlayer url={url} title="Different title" savedPrefs={{ subtitlePosition: 75 }} onClose={onClose} />);
+    expect(subtitleSlider()).toHaveValue("75");
+  });
+
   it("pins an exact zero HLS handoff so EVENT startup cannot choose the live edge", async () => {
     globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
     const request = vi.fn(async () => ({
@@ -3978,14 +4298,89 @@ describe("WebviewPlayer", () => {
       request: vi.fn(),
     };
 
+    function installIphoneManagedMse() {
+      const typeSupported = vi.fn(() => true);
+      class ManagedMediaSource {
+        static isTypeSupported = typeSupported;
+        addSourceBuffer() {}
+      }
+      const restore = [
+        replaceProperty(globalThis, "MediaSource", undefined),
+        replaceProperty(globalThis, "ManagedMediaSource", ManagedMediaSource),
+        replaceProperty(globalThis, "SourceBuffer", undefined),
+        replaceProperty(globalThis, "WebKitSourceBuffer", undefined),
+      ];
+      return { typeSupported, restore: () => restore.reverse().forEach((reset) => reset()) };
+    }
+
+    it("binds growing fixed HLS to the managed iPhone reader in Automatic", async () => {
+      prepareTrustedServerHls();
+      const mms = installIphoneManagedMse();
+      try {
+        const view = render(<VideoPlayer url={manifestUrl} title="Managed fixed server HLS"
+          serverOptimized={optimization} onClose={() => {}} />);
+        await waitFor(() => expect(hlsInstances).toHaveLength(1));
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        expect(hlsInstances[0].config).toMatchObject({ preferManagedMediaSource: true, startPosition: 0 });
+        expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(manifestUrl);
+        expect(hlsInstances[0].attachMedia).toHaveBeenCalledWith(video);
+        // Simulate hls.js's ManagedMediaSource-local route restriction.
+        video.setAttribute("disableremoteplayback", "");
+        view.unmount();
+        expect(hlsInstances[0].destroy).toHaveBeenCalledOnce();
+        expect(video.hasAttribute("disableremoteplayback")).toBe(false);
+      } finally {
+        mms.restore();
+      }
+    });
+
     it.each([
-      ["native route", "native", false, false],
+      ["the explicit Native preference", "native", manifestUrl],
+      ["the adaptive ladder", "automatic", manifestUrl.replace("quality=480p", "quality=auto")],
+      ["an unrelated provider origin", "automatic", manifestUrl.replace("server.example", "provider.example")],
+    ] as const)("preserves the native path for %s on a managed-only iPhone", async (_name, mode, url) => {
+      prepareTrustedServerHls();
+      const mms = installIphoneManagedMse();
+      try {
+        render(<VideoPlayer url={url} title="Native HLS" iosHlsPlaybackMode={mode}
+          serverOptimized={{ ...optimization, qualities: ["480p", "auto"] }} onClose={() => {}} />);
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        await waitFor(() => expect(video.src.split("#")[0]).toBe(url));
+        expect(hlsInstances).toHaveLength(0);
+        expect(video.hasAttribute("disableremoteplayback")).toBe(false);
+      } finally {
+        mms.restore();
+      }
+    });
+
+    it("revalidates the managed iPhone capability after the lazy engine import", async () => {
+      prepareTrustedServerHls();
+      const mms = installIphoneManagedMse();
+      try {
+        hlsIsSupported.mockImplementationOnce(() => {
+          mms.typeSupported.mockReturnValue(false);
+          return true;
+        });
+        render(<VideoPlayer url={manifestUrl} title="Managed HLS loss" serverOptimized={optimization} onClose={() => {}} />);
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        await waitFor(() => expect(video.src).toBe(`${manifestUrl}#t=0.001`));
+        expect(hlsInstances).toHaveLength(0);
+      } finally {
+        mms.restore();
+      }
+    });
+
+    it.each([
+      ["explicit Native with MSE available", "native", true, false],
+      ["automatic without standard MSE", "automatic", false, false],
+      ["automatic hls.js unsupported fallback", "automatic", true, false],
+      ["automatic capability revalidation", "automatic", true, true],
       ["hls.js unsupported fallback", "compatibility", true, false],
       ["compatibility capability revalidation", "compatibility", true, true],
     ] as const)("pins a fresh zero start through the %s assignment path", async (_label, mode, withMse, revalidate) => {
       prepareTrustedServerHls();
       const mse = withMse ? installStandardMse() : null;
-      if (withMse && !revalidate) hlsIsSupported.mockReturnValue(false);
+      if (mode !== "native" && withMse && !revalidate) hlsIsSupported.mockReturnValue(false);
       try {
         render(
           <VideoPlayer
@@ -4002,6 +4397,65 @@ describe("WebviewPlayer", () => {
         expect(hlsInstances).toHaveLength(0);
       } finally {
         mse?.restore();
+      }
+    });
+
+    it("falls back to native if Automatic cannot initialize the HLS engine", async () => {
+      prepareTrustedServerHls();
+      const mse = installStandardMse();
+      hlsIsSupported.mockImplementationOnce(() => { throw new Error("MSE initialization failed"); });
+      try {
+        render(
+          <VideoPlayer url={manifestUrl} title="Automatic fallback" serverOptimized={optimization} onClose={() => {}} />,
+        );
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        await waitFor(() => expect(video.src).toBe(`${manifestUrl}#t=0.001`));
+        expect(hlsInstances).toHaveLength(0);
+      } finally {
+        mse.restore();
+      }
+    });
+
+    it.each(["360p", "480p", "720p", "1080p"] as const)("defaults fixed trusted %s to standard MSE", async (quality) => {
+      prepareTrustedServerHls();
+      const mse = installStandardMse();
+      const videoUrl = manifestUrl.replace("quality=480p", `quality=${quality}`);
+      const rendition = { ...optimization, qualities: [quality], defaultQuality: quality };
+      try {
+        const view = render(
+          <VideoPlayer url={videoUrl} title="Automatic HLS" serverOptimized={rendition} onClose={() => {}} />,
+        );
+        await waitFor(() => expect(hlsInstances).toHaveLength(1));
+        expect(hlsInstances[0].config).toMatchObject({ preferManagedMediaSource: false, startPosition: 0 });
+        expect(hlsInstances[0].loadSource).toHaveBeenCalledWith(videoUrl);
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        expect(hlsInstances[0].attachMedia).toHaveBeenCalledWith(video);
+        view.rerender(
+          <VideoPlayer url={videoUrl} title="Automatic HLS" serverOptimized={{ ...rendition }} onClose={() => {}} />,
+        );
+        expect(hlsInstances[0].destroy).not.toHaveBeenCalled();
+        expect(hlsInstances).toHaveLength(1);
+      } finally {
+        mse.restore();
+      }
+    });
+
+    it.each([
+      ["untrusted same-looking path", "https://provider.example/api/stream/session-fresh/index.m3u8?quality=480p&start=0"],
+      ["trusted adaptive ladder", manifestUrl.replace("quality=480p", "quality=auto")],
+      ["trusted manifest without a fixed quality", manifestUrl.replace("?quality=480p&start=0", "")],
+    ] as const)("leaves %s on native in Automatic", async (_case, videoUrl) => {
+      prepareTrustedServerHls();
+      const mse = installStandardMse();
+      try {
+        render(
+          <VideoPlayer url={videoUrl} title="Native HLS" serverOptimized={{ ...optimization, qualities: ["480p", "auto"] }} onClose={() => {}} />,
+        );
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        await waitFor(() => expect(video.src.split("#")[0]).toBe(videoUrl));
+        expect(hlsInstances).toHaveLength(0);
+      } finally {
+        mse.restore();
       }
     });
 
@@ -7042,6 +7496,10 @@ describe("WebviewPlayer", () => {
     return { slider, current, request, view, prepared, release: (position: number) => releasePreparation(prepared(position)) };
   }
 
+  const paintScrubPreview = () => act(async () => {
+    await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()));
+  });
+
   it.each(["hls.js", "native Safari"])(
     "commits the real touch scrub release target with deferred %s preparation",
     async (renderer) => {
@@ -7053,6 +7511,7 @@ describe("WebviewPlayer", () => {
       fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
       fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 50 });
       fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 75 });
+      await paintScrubPreview();
       expect(request).toHaveBeenCalledTimes(1);
       expect(slider).toHaveAttribute("aria-valuenow", "750");
       current.currentTime = 5;
@@ -7158,13 +7617,14 @@ describe("WebviewPlayer", () => {
   }
 
   for (const layout of ["desktop", "touch"] as const) {
-    it.each([true, false])(`[preview] keeps ${layout} pointer motion media-free while paused=%s and commits only its owner release`, (wasPaused) => {
+    it.each([true, false])(`[preview] keeps ${layout} pointer motion media-free while paused=%s and commits only its owner release`, async (wasPaused) => {
       const { video, slider, writes, request, nativeClock } = realLocalScrub(wasPaused, layout);
       const playCalls = vi.mocked(video.play).mock.calls.length, pauseCalls = vi.mocked(video.pause).mock.calls.length;
       fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 20 });
       expect(writes).not.toHaveBeenCalled(); expect(request).not.toHaveBeenCalled();
       expect(slider).toHaveAttribute("aria-valuenow", "200");
       fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+      await paintScrubPreview();
       expect(writes).not.toHaveBeenCalled(); expect(video.currentTime).toBe(100);
       expect(slider).toHaveAttribute("aria-valuenow", "800");
       expect(slider.querySelector(".scrubbar-fill")).toHaveStyle({ transform: "scaleX(0.8)" });
@@ -7194,6 +7654,7 @@ describe("WebviewPlayer", () => {
     Object.defineProperty(current, "currentTime", { configurable: true, get: () => localTime, set: writes });
     fireEvent.pointerDown(slider, { pointerId: 7, pointerType: "touch", clientX: 40 });
     fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 40.2 });
+    await paintScrubPreview();
     expect(writes).not.toHaveBeenCalled(); expect(request).toHaveBeenCalledTimes(1);
     expect(slider).toHaveAttribute("aria-valuenow", "402");
     fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 40.6 });
@@ -7252,7 +7713,7 @@ describe("WebviewPlayer", () => {
     expect(writes).not.toHaveBeenCalled();
   });
 
-  it("keeps real local touch previews and keyboard seeks immediate", () => {
+  it("keeps real local touch previews frame-paced and keyboard seeks immediate", async () => {
     scrubBarMode.actual = true;
     render(<VideoPlayer url="https://x/movie.mp4" title="Local touch" onClose={() => {}} />);
     const video = document.querySelector("video.player-video") as HTMLVideoElement;
@@ -7264,6 +7725,7 @@ describe("WebviewPlayer", () => {
     expect(video.currentTime).toBe(0);
     expect(slider).toHaveAttribute("aria-valuenow", "200");
     fireEvent.pointerMove(slider, { pointerId: 7, pointerType: "touch", clientX: 80 });
+    await paintScrubPreview();
     expect(video.currentTime).toBe(0);
     expect(slider).toHaveAttribute("aria-valuenow", "800");
     fireEvent.pointerUp(slider, { pointerId: 7, pointerType: "touch", clientX: 85 });
@@ -9725,6 +10187,20 @@ describe("WebviewPlayer", () => {
     return { request, exit, restore: () => restores.reverse().forEach((restore) => restore()) };
   }
 
+  it("checks chrome activity once per bubbling pointer move", () => {
+    const clock = vi.spyOn(performance, "now").mockReturnValue(100);
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="Player activity" onClose={() => {}} />);
+      const stage = document.querySelector(".player-stage")!;
+      fireEvent.pointerMove(stage);
+      clock.mockClear();
+      fireEvent.pointerMove(stage);
+      expect(clock).toHaveBeenCalledTimes(1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it("fullscreens the complete desktop player pane without replacing or reloading the media", async () => {
     const fullscreen = mockPlayerFullscreen();
     try {
@@ -9763,6 +10239,127 @@ describe("WebviewPlayer", () => {
     } finally { fullscreen.restore(); }
   });
 
+  it("locks orientation once per mobile fullscreen entry and never relocks after exiting", async () => {
+    deviceKindMock.mockReturnValue("android");
+    const fullscreen = mockPlayerFullscreen();
+    const accepted = deferred<void>();
+    const start = fullscreen.request.getMockImplementation()!;
+    fullscreen.request.mockImplementation(function (this: HTMLElement) {
+      void start.call(this);
+      return accepted.promise;
+    });
+    const lock = vi.fn(async () => {});
+    const unlock = vi.fn();
+    const restoreOrientation = replaceProperty(window.screen, "orientation", { lock, unlock });
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="T" onClose={() => {}} />);
+      fireEvent.click(screen.getByRole("button", { name: "Enter fullscreen" }));
+      fireEvent(document, new Event("webkitfullscreenchange"));
+      expect(lock).toHaveBeenCalledExactlyOnceWith("landscape");
+      fireEvent.click(screen.getByRole("button", { name: "Exit fullscreen" }));
+      await act(async () => { accepted.resolve(); await accepted.promise; });
+      expect(lock).toHaveBeenCalledTimes(1);
+      expect(unlock).toHaveBeenCalledTimes(1);
+    } finally { restoreOrientation(); fullscreen.restore(); }
+  });
+
+  it.each(["installed iPad", "Android app"] as const)("fills the inline video without changing modes on %s", async (platform) => {
+    deviceKindMock.mockReturnValue(platform === "installed iPad" ? "ios" : "android");
+    const restorePlatform = platform === "installed iPad"
+      ? replaceProperty(navigator, "standalone", true)
+      : replaceProperty(window, "__YAWF_NATIVE_SAFE_AREA__", { getInsets: vi.fn() });
+    const fullscreen = mockPlayerFullscreen();
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="Quick fill" onClose={() => {}} />);
+      const pane = screen.getByRole("dialog", { name: "Playing Quick fill" });
+      const video = pane.querySelector("video.player-video") as HTMLVideoElement;
+      await waitFor(() => expect(video.src).toBe("https://x/test.mp4"));
+      video.currentTime = 42;
+      const fill = screen.getByRole("button", { name: "Fill screen" });
+      expect(fill.closest(".player-touch-actions")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Enter fullscreen" })).toBeNull();
+      vi.mocked(video.load).mockClear();
+      vi.mocked(video.pause).mockClear();
+      fireEvent.click(fill);
+      expect(fill).toHaveAttribute("aria-pressed", "true");
+      expect(video.style.objectFit).toBe("cover");
+      act(() => {
+        fill.click();
+        expect(video.style.objectFit).toBe("contain");
+        fill.click();
+        expect(video.style.objectFit).toBe("cover");
+      });
+      fireEvent.click(fill);
+      expect(fill).toHaveAttribute("aria-pressed", "false");
+      expect(video.style.objectFit).toBe("contain");
+      expect(fullscreen.request).not.toHaveBeenCalled();
+      expect(pane.querySelector("video")).toBe(video);
+      expect(video.currentTime).toBe(42);
+      expect(video.load).not.toHaveBeenCalled();
+      expect(video.pause).not.toHaveBeenCalled();
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      const settings = screen.getByRole("dialog", { name: "Playback settings" });
+      await userEvent.click(within(settings).getByRole("button", { name: "Enter fullscreen" }));
+      expect(fullscreen.request.mock.instances[0]).toBe(pane);
+      expect(settings).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Exit fullscreen" }));
+      expect(fullscreen.exit).toHaveBeenCalledTimes(1);
+    } finally {
+      fullscreen.restore();
+      restorePlatform();
+    }
+  });
+
+  it("does not rerender the playback controller or scrubber for inline Fill or Fit", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    const restorePlatform = replaceProperty(navigator, "standalone", true);
+    const defaultQuality = vi.fn(() => undefined);
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="Quick fit" onClose={() => {}}
+        serverOptimized={{
+          qualities: [],
+          get defaultQuality() { return defaultQuality(); },
+          request: vi.fn(async () => { throw new Error("No quality change expected"); }),
+        }} />);
+      const video = document.querySelector("video")!;
+      await waitFor(() => expect(video.src).toBe("https://x/test.mp4"));
+      expect(defaultQuality).toHaveBeenCalled();
+      defaultQuality.mockClear();
+      scrubBarMock.mockClear();
+
+      const fill = screen.getByRole("button", { name: "Fill screen" });
+      for (const fit of ["cover", "contain"] as const) {
+        fireEvent.click(fill);
+        expect(video.style.objectFit).toBe(fit);
+        expect(fill).toHaveAttribute("aria-pressed", String(fit === "cover"));
+      }
+      expect(defaultQuality).not.toHaveBeenCalled();
+      expect(scrubBarMock).not.toHaveBeenCalled();
+    } finally { restorePlatform(); }
+  });
+
+  it("applies all three fit choices from touch browser chrome and keeps settings in sync", () => {
+    deviceKindMock.mockReturnValue("ios");
+    const standalone = replaceProperty(navigator, "standalone", false);
+    try {
+      render(<VideoPlayer url="https://x/three-fits.mp4" title="Screen fit" onClose={() => {}} />);
+      const video = document.querySelector("video")!;
+      fireEvent.click(screen.getByRole("button", { name: "Video fit, Fit" }));
+      expect(video.style.objectFit).toBe("cover");
+      fireEvent.click(screen.getByRole("button", { name: "Video fit, Fill" }));
+      expect(video.style.objectFit).toBe("fill");
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      const settings = within(screen.getByRole("dialog", { name: "Playback settings" }));
+      expect(settings.getByRole("button", { name: "Stretch" })).toHaveAttribute("aria-pressed", "true");
+      fireEvent.click(settings.getByRole("button", { name: "Fit" }));
+      expect(video.style.objectFit).toBe("contain");
+      expect(settings.getByRole("button", { name: "Fit" })).toHaveAttribute("aria-pressed", "true");
+      fireEvent.click(settings.getByRole("button", { name: "Close playback settings" }));
+      expect(screen.getByRole("button", { name: "Video fit, Fit" })).toBeInTheDocument();
+      expect(document.querySelector("video")).toBe(video);
+    } finally { standalone(); }
+  });
+
   it("keeps touch transport, audio, settings, captions and details inside the fullscreen pane", async () => {
     deviceKindMock.mockReturnValue("android");
     Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
@@ -9780,13 +10377,15 @@ describe("WebviewPlayer", () => {
           request: vi.fn(async () => ({ url: "https://x/optimized.m3u8", quality: "480p" as const, timelineOffsetSeconds: 0, startPositionSeconds: 0 })),
         }} />);
       const pane = screen.getByRole("dialog", { name: "Playing Touch T" });
-      await userEvent.click(screen.getByRole("button", { name: "Enter fullscreen" }));
+      await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      await userEvent.click(within(screen.getByRole("dialog", { name: "Playback settings" }))
+        .getByRole("button", { name: "Enter fullscreen" }));
       expect(fullscreen.request.mock.instances[0], "touch fullscreen must own header and custom transport").toBe(pane);
       expect(document.fullscreenElement).toContainElement(pane.querySelector(".player-touch-controls"));
-      for (const name of ["Close player", "Back 10 seconds", "Forward 10 seconds", "Audio tracks", "Subtitles", "Playback settings", "Exit fullscreen"]) {
+      for (const name of ["Close player", "Back 10 seconds", "Forward 10 seconds", /^Audio track/, "Subtitles", "Playback settings", "Exit fullscreen"]) {
         expect(document.fullscreenElement, `fullscreen must include ${name}`).toContainElement(screen.getByRole("button", { name }));
       }
-      await userEvent.click(screen.getByRole("button", { name: "Audio tracks" }));
+      await userEvent.click(screen.getByRole("button", { name: /^Audio track/ }));
       expect(document.fullscreenElement).toContainElement(await screen.findByRole("dialog", { name: "Audio tracks" }));
       await userEvent.click(screen.getByRole("button", { name: "Close audio tracks" }));
       await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
@@ -10010,13 +10609,15 @@ describe("WebviewPlayer", () => {
       replaceProperty(navigator, "userAgent", "iPhone"), replaceProperty(navigator, "standalone", true)];
     try {
       render(<VideoPlayer url="https://x/test.mp4" title="System" onClose={() => {}} />);
-      expect(screen.getByRole("button", { name: "Enter system fullscreen" })).toHaveTextContent("System fullscreen");
-      await userEvent.click(screen.getByRole("button", { name: "Enter system fullscreen" }));
-      expect(enter.mock.instances[0]).toBe(document.querySelector("video"));
       await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      const action = within(screen.getByRole("dialog", { name: "Playback settings" }))
+        .getByRole("button", { name: "Enter system fullscreen" });
+      expect(action).toHaveTextContent("System fullscreen");
       expect(screen.getByText("System fullscreen uses your device's controls instead of YAWF controls.")).toBeInTheDocument();
       expect(screen.queryByRole("link", { name: /Open YAWF in browser/ })).toBeNull();
       expect(screen.queryByText("YAWF fullscreen in Safari")).toBeNull();
+      await userEvent.click(action);
+      expect(enter.mock.instances[0]).toBe(document.querySelector("video"));
     } finally { restores.reverse().forEach((restore) => restore()); }
   });
 
@@ -10035,7 +10636,11 @@ describe("WebviewPlayer", () => {
       const src = video.src; video.currentTime = 23;
       vi.mocked(video.pause).mockClear();
       await userEvent.click(screen.getByRole("button", { name: "Playback settings" }));
-      expect(screen.getByText("YAWF fullscreen in Safari")).toBeInTheDocument();
+      const help = screen.getByRole("button", { name: "YAWF fullscreen in Safari" });
+      expect(help).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByText("https://server.example/yawf/watch")).toBeNull();
+      await userEvent.click(help);
+      expect(help).toHaveAttribute("aria-expanded", "true");
       expect(screen.getByText("For fullscreen with YAWF controls, open Safari and enter this server address. Sign in and resume playback there if needed.")).toBeInTheDocument();
       const address = screen.getByText("https://server.example/yawf/watch");
       expect(address.tagName).toBe("CODE");
@@ -11112,6 +11717,74 @@ describe("WebviewPlayer", () => {
       movingGesture(video, "pen");
       expect(play).not.toHaveBeenCalled(); expect(pause).not.toHaveBeenCalled();
       expect(video.paused).toBe(false);
+    });
+
+    it.each(["ios", "android"] as const)("reveals the %s toolbar on a stationary touch release without a click", (layout) => {
+      // JSDOM cannot emit a trusted touch. Drive the native listeners directly;
+      // browser QA separately witnesses actual trusted events on the video.
+      const add = vi.spyOn(HTMLVideoElement.prototype, "addEventListener");
+      const descriptor = Object.getOwnPropertyDescriptor(document, "elementFromPoint");
+      try {
+        const { video, play, pause } = setup(layout);
+        Object.defineProperty(document, "elementFromPoint", { configurable: true, value: () => video });
+        const touch = { identifier: 7, clientX: 50, clientY: 50 };
+        const drive = (type: string, touches: unknown[], changedTouches: unknown[] = []) => {
+          const listener = add.mock.calls.find(([event], i) => event === type && add.mock.contexts[i] === video)?.[1];
+          const preventDefault = vi.fn();
+          act(() => {
+            if (typeof listener === "function") listener.call(video, {
+              touches, changedTouches, isTrusted: true, cancelable: true, defaultPrevented: false, preventDefault,
+            } as unknown as TouchEvent);
+          });
+          return preventDefault;
+        };
+        drive("touchstart", [touch]);
+        drive("touchmove", [{ ...touch, clientX: 65 }]);
+        expect(drive("touchend", [], [touch])).not.toHaveBeenCalled();
+        expect(document.querySelector(".player-bar")).not.toHaveClass("is-visible");
+
+        drive("touchstart", [touch]);
+        expect(drive("touchend", [], [touch])).toHaveBeenCalledTimes(1);
+        expect(document.querySelector(".player-bar")).toHaveClass("is-visible");
+        expect(play).not.toHaveBeenCalled();
+        expect(pause).not.toHaveBeenCalled();
+
+        drive("touchstart", [touch]);
+        expect(drive("touchend", [], [touch])).not.toHaveBeenCalled();
+        pointer(video, "pointerdown");
+        fireEvent.click(video, { detail: 1, clientX: 50, clientY: 50 });
+        expect(pause).toHaveBeenCalledTimes(1);
+      } finally {
+        add.mockRestore();
+        if (descriptor == null) Reflect.deleteProperty(document, "elementFromPoint");
+        else Object.defineProperty(document, "elementFromPoint", descriptor);
+      }
+    });
+
+    it("[legacy-touch-reveal] reveals instead of pausing when WebView omits pointer type", () => {
+      const { video, play, pause } = setup("android");
+      const tap = () => {
+        pointer(video, "pointerdown", "");
+        fireEvent.touchStart(video, { touches: [{ identifier: 3 }] });
+        pointer(video, "pointerup", "");
+        fireEvent.touchEnd(video, { touches: [], changedTouches: [{ identifier: 3 }] });
+        fireEvent.click(video, { detail: 1, clientX: 50, clientY: 50 });
+      };
+      tap();
+      expect(document.querySelector(".player-bar")).toHaveClass("is-visible");
+      expect(pause).not.toHaveBeenCalled();
+      expect(video.paused).toBe(false);
+      tap();
+      expect(pause).toHaveBeenCalledTimes(1);
+      expect(play).not.toHaveBeenCalled();
+    });
+
+    it("[legacy-touch-reveal] does not retain a cancelled touch for the next mouse click", () => {
+      const { video, pause } = setup("android");
+      fireEvent.touchStart(video, { touches: [{ identifier: 3 }] });
+      fireEvent.touchCancel(video, { touches: [], changedTouches: [{ identifier: 3 }] });
+      fireEvent.click(video, { detail: 1, clientX: 50, clientY: 50 });
+      expect(pause).toHaveBeenCalledTimes(1);
     });
 
     it("[gesture-reveal] does not resume when playback pauses during a hidden reveal gesture", () => {
@@ -13944,6 +14617,47 @@ describe("VideoPlayer predictive episode transitions", () => {
     fireEvent(video, new Event("timeupdate"));
   }
 
+  it("does not rerender movie controls on late clock ticks", () => {
+    const { video } = renderPredictive({ upNext: null });
+    setPlaybackPosition(video, 80, 120);
+    iconMock.mockClear();
+    for (const time of [81, 82, 83, 84, 85]) {
+      video.currentTime = time;
+      fireEvent.timeUpdate(video);
+    }
+    expect(screen.getByTestId("scrub-bar")).toHaveAttribute("data-current-time", "85");
+    expect(iconMock).not.toHaveBeenCalled();
+    expect(screen.queryByText("Up next")).toBeNull();
+  });
+
+  it("updates only on episode warning crossings and uses a corrected duration without another tick", () => {
+    const { video } = renderPredictive();
+    setPlaybackPosition(video, 105, 120);
+    iconMock.mockClear();
+    for (const time of [106, 107, 108, 109]) {
+      video.currentTime = time;
+      fireEvent.timeUpdate(video);
+    }
+    expect(iconMock).not.toHaveBeenCalled();
+    expect(screen.queryByText("Up next")).toBeNull();
+    video.currentTime = 110;
+    fireEvent.timeUpdate(video);
+    expect(screen.getByText("Up next")).toBeInTheDocument();
+    iconMock.mockClear();
+    video.currentTime = 112;
+    fireEvent.timeUpdate(video);
+    expect(iconMock).not.toHaveBeenCalled();
+    Object.defineProperty(video, "duration", { configurable: true, value: 140 });
+    fireEvent.durationChange(video);
+    expect(screen.queryByText("Up next")).toBeNull();
+    video.currentTime = 130;
+    fireEvent.timeUpdate(video);
+    expect(screen.getByText("Up next")).toBeInTheDocument();
+    video.currentTime = 125;
+    fireEvent.timeUpdate(video);
+    expect(screen.queryByText("Up next")).toBeNull();
+  });
+
   it("shows the adaptive early prompt without advancing before EOF", async () => {
     vi.useFakeTimers();
     try {
@@ -14029,6 +14743,7 @@ function eventedCaptionList() {
       let mode = initial;
       const track = Object.assign(new EventTarget(), {
         label, language, kind, cues: [],
+        get activeCues() { return this.cues; },
       });
       Object.defineProperty(track, "mode", {
         get: () => mode,
@@ -14310,6 +15025,7 @@ describe("webview caption layout", () => {
   let intrinsicWidth = 1920;
   let resizeObservers: Array<{ callback: () => void; disconnect: ReturnType<typeof vi.fn> }>;
   let restoreVisual: () => void;
+  let restoreStandalone: () => void;
   let visual: VisualViewport & { width: number; height: number; offsetTop: number; offsetLeft: number };
   const rect = (box: { left: number; top: number; width: number; height: number }) => ({
     ...box, right: box.left + box.width, bottom: box.top + box.height,
@@ -14320,9 +15036,12 @@ describe("webview caption layout", () => {
     snapToLines: true, lineAlign: "start", position: "auto" as number | "auto",
     positionAlign: "auto", size: 100, vertical: "", region: null,
   });
+  const frame = () => act(() => { vi.advanceTimersToNextFrame(); });
   beforeEach(() => {
+    vi.useFakeTimers();
     captionMenuMode.actual = true;
     deviceKindMock.mockReturnValue("ios");
+    restoreStandalone = replaceProperty(navigator, "standalone", true);
     vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("maybe");
     list = eventedCaptionList();
     stage = { left: 0, top: 0, width: 400, height: 800 };
@@ -14369,6 +15088,8 @@ describe("webview caption layout", () => {
     });
   });
   afterEach(() => {
+    vi.useRealTimers();
+    restoreStandalone();
     restoreVisual();
     document.documentElement.style.removeProperty("--sub-font-scale");
     vi.restoreAllMocks();
@@ -14382,6 +15103,11 @@ describe("webview caption layout", () => {
     });
     return { track, currentCue };
   }
+  function measureVideoLayout(video: HTMLVideoElement) {
+    const measure = vi.mocked(HTMLElement.prototype.getBoundingClientRect);
+    measure.mockClear();
+    return () => measure.mock.contexts.filter(element => element === video).length;
+  }
 
   it("anchors default native captions to the visible letterboxed picture, not the portrait transport", () => {
     render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
@@ -14391,6 +15117,92 @@ describe("webview caption layout", () => {
     expect(currentCue.lineAlign).toBe("end");
     expect(currentCue.startTime).toBe(1);
     expect(currentCue.endTime).toBe(5);
+  });
+
+  it("changes Fill without reading the full subtitle track and restores cues when they stop showing", () => {
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const video = document.querySelector("video")!;
+    const { track, currentCue } = addCaption();
+    const inactive = Array.from({ length: 2000 }, (_, i) => ({ ...cue(), startTime: i + 10 }));
+    const fullTrack = vi.fn(() => [currentCue, ...inactive]);
+    const nextCue = cue("The next line");
+    let active = [currentCue];
+    Object.defineProperties(track, {
+      cues: { get: fullTrack },
+      activeCues: { get: () => active },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Fill screen" }));
+    expect(video.style.objectFit).toBe("cover");
+    expect(document.querySelector("video")).toBe(video);
+    expect(fullTrack).not.toHaveBeenCalled();
+    expect(inactive.every(inactiveCue => inactiveCue.line === "auto")).toBe(true);
+    frame();
+    expect(currentCue.line).toBeCloseTo(80.25);
+
+    active = [nextCue];
+    act(() => { track.dispatchEvent(new Event("cuechange")); });
+    expect(currentCue.line).toBe("auto");
+    expect(currentCue.snapToLines).toBe(true);
+    expect(nextCue.line).toBeCloseTo(80.25);
+    expect(fullTrack).not.toHaveBeenCalled();
+  });
+
+  it("does not measure caption geometry when Fill has nothing to lay out", () => {
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const video = document.querySelector("video")!;
+    const measure = measureVideoLayout(video);
+
+    fireEvent.click(screen.getByRole("button", { name: "Fill screen" }));
+    expect(video.style.objectFit).toBe("cover");
+    frame();
+    expect(measure()).toBe(0);
+  });
+
+  it("measures caption geometry once at the final viewport size in a display-event burst", () => {
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const { currentCue } = addCaption();
+    const measure = measureVideoLayout(document.querySelector("video")!);
+    act(() => {
+      osdTop = 450;
+      resizeObservers[0]!.callback();
+      window.dispatchEvent(new Event("resize"));
+      window.dispatchEvent(new Event("orientationchange"));
+      visual.dispatchEvent(new Event("resize"));
+      document.dispatchEvent(new Event("fullscreenchange"));
+      osdTop = 410;
+    });
+    expect(measure()).toBe(0);
+    act(() => { vi.advanceTimersToNextFrame(); });
+    expect(measure()).toBe(1);
+    expect(currentCue.line).toBeCloseTo(50.25);
+  });
+
+  it("changes Fill on the same reader before measuring active captions once for the final geometry", () => {
+    render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
+    const video = document.querySelector("video")!;
+    const { currentCue } = addCaption();
+    const initialLine = currentCue.line;
+    const measure = measureVideoLayout(video);
+    const fill = screen.getByRole("button", { name: "Fill screen" });
+
+    fireEvent.click(fill);
+    expect(video.style.objectFit).toBe("cover");
+    expect(fill).toHaveAttribute("aria-pressed", "true");
+    expect(document.querySelector("video")).toBe(video);
+    expect(currentCue.line).toBe(initialLine);
+    expect(measure()).toBe(0);
+
+    // Rotation and ResizeObserver often follow the same display interaction.
+    act(() => {
+      osdTop = 625;
+      resizeObservers[0]!.callback();
+      window.dispatchEvent(new Event("resize"));
+    });
+    frame();
+    expect(measure()).toBe(1);
+    expect(currentCue.line).not.toBe(initialLine);
+    expect(currentCue.line).toBeCloseTo(77.125);
   });
 
   it("keeps the touch paused frame free of decorative artwork while retaining caption transport", () => {
@@ -14434,34 +15246,39 @@ describe("webview caption layout", () => {
     expect(resizeObservers[0]).toBeDefined();
     osdTop = 450;
     act(() => { resizeObservers[0]!.callback(); });
+    frame();
     expect(currentCue.line).toBeCloseTo(55.25);
     osdTop = 430;
     fireEvent(window, new Event("resize"));
+    frame();
     expect(currentCue.line).toBeCloseTo(52.75);
     osdTop = 410;
     fireEvent(window, new Event("orientationchange"));
+    frame();
     expect(currentCue.line).toBeCloseTo(50.25);
     stage = { left: 0, top: 0, width: 800, height: 400 };
     visual.width = 800;
     visual.height = 400;
     osdTop = 300;
     fireEvent(window, new Event("resize"));
+    frame();
     expect(currentCue.line).toBeCloseTo(73);
     stage = { left: 0, top: 0, width: 400, height: 800 };
     visual.width = 400;
     osdTop = 650;
     visual.height = 450;
     act(() => { visual.dispatchEvent(new Event("resize")); });
+    frame();
     expect(currentCue.line).toBeCloseTo(54.21875);
     expect(currentCue.line).toBeLessThan(original as number);
     visual.offsetTop = 400;
     visual.height = 200;
     act(() => { visual.dispatchEvent(new Event("scroll")); });
+    frame();
     expect(currentCue.line).toBeCloseTo(62.65625);
   });
 
   it("uses visible chrome bounds but returns to picture preference when chrome hides", async () => {
-    vi.useFakeTimers();
     osdTop = 450;
     render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
     const { currentCue } = addCaption();
@@ -14470,8 +15287,10 @@ describe("webview caption layout", () => {
     fireEvent.play(document.querySelector("video")!);
     await act(async () => { await vi.advanceTimersByTimeAsync(3300); });
     expect(document.querySelector(".player-osd")).not.toHaveClass("is-visible");
+    frame();
     expect(currentCue.line).toBeGreaterThan(60);
     fireEvent.pointerMove(document.querySelector(".webview-player")!);
+    frame();
     expect(currentCue.line).toBeCloseTo(55.25);
   });
 
@@ -14482,18 +15301,24 @@ describe("webview caption layout", () => {
     expect(currentCue.lineAlign).toBe("start");
     fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
     fireEvent.change(screen.getByRole("slider", { name: /Subtitle position/ }), { target: { value: "90" } });
+    frame();
     expect(currentCue.line).toBeCloseTo(61.25);
     fireEvent.click(screen.getByRole("button", { name: "Fill screen" }));
+    frame();
     expect(currentCue.line).toBeCloseTo(80.25);
     fireEvent.click(screen.getByRole("button", { name: "Stretch" }));
+    frame();
     expect(currentCue.line).toBeCloseTo(80.25);
     fireEvent.click(screen.getByRole("button", { name: "Fit" }));
     fireEvent.change(screen.getByRole("slider", { name: /^Zoom/ }), { target: { value: "2" } });
+    frame();
     expect(currentCue.size).toBeCloseTo(48);
     expect(document.querySelector("video")!.style.getPropertyValue("--player-caption-font-size")).toBe("12.375px");
     fireEvent.change(screen.getByRole("slider", { name: /Pan vertically/ }), { target: { value: "25" } });
+    frame();
     expect(currentCue.line).toBeLessThan(60);
     fireEvent.change(screen.getByRole("slider", { name: /Pan horizontally/ }), { target: { value: "50" } });
+    frame();
     expect(currentCue.position).toBeLessThan(50);
     expect(currentCue.size).toBeLessThan(50);
   });
@@ -14565,6 +15390,7 @@ describe("webview caption layout", () => {
   });
 
   it("disposes observers and stale callbacks, restoring the old owner's native cue geometry", () => {
+    vi.useFakeTimers();
     const props = { url: "https://x/native.mp4", title: "T", onClose: () => {} };
     const { rerender, unmount } = render(<VideoPlayer {...props} sourceRevision={0} />);
     const { track, currentCue } = addCaption();
@@ -14572,6 +15398,7 @@ describe("webview caption layout", () => {
     const oldResize = resizeObservers[0]!;
     expect(oldResize).toBeDefined();
     const staleLayoutRefresh = list.addEventListener.mock.calls.find(([event]) => event === "change")![1] as () => void;
+    act(() => { oldResize.callback(); });
     rerender(<VideoPlayer {...props} sourceRevision={1} />);
     expect(oldResize.disconnect).toHaveBeenCalledOnce();
     expect(remove).toHaveBeenCalledWith("cuechange", expect.any(Function));
@@ -14581,6 +15408,7 @@ describe("webview caption layout", () => {
     currentCue.line = 17;
     osdTop = 400;
     act(() => { oldResize.callback(); staleLayoutRefresh(); track.dispatchEvent(new Event("cuechange")); });
+    act(() => { vi.advanceTimersToNextFrame(); });
     expect(currentCue.line).toBe(17);
     expect(current.line).toBeCloseTo(61.25);
     unmount();
@@ -14633,6 +15461,7 @@ describe("webview caption layout", () => {
   });
 
   it("does not reserve custom controls excluded by document fullscreen", () => {
+    vi.useFakeTimers();
     osdTop = 450;
     render(<VideoPlayer url="https://x/native.mp4" title="T" onClose={() => {}} />);
     const { currentCue } = addCaption();
@@ -14640,9 +15469,11 @@ describe("webview caption layout", () => {
     const restoreFullscreen = replaceProperty(document, "fullscreenElement", document.querySelector(".player-stage"));
     try {
       fireEvent(document, new Event("fullscreenchange"));
+      act(() => { vi.advanceTimersToNextFrame(); });
       expect(currentCue.line).toBeCloseTo(61.25);
     } finally { restoreFullscreen(); }
     fireEvent(document, new Event("fullscreenchange"));
+    act(() => { vi.advanceTimersToNextFrame(); });
     expect(currentCue.line).toBeCloseTo(55.25);
   });
 
@@ -17399,6 +18230,85 @@ describe("terminal post-start source recovery", () => {
     expect(refresh).toHaveBeenCalledExactlyOnceWith(25.75, expect.objectContaining({ paused: false })); expect(fallback).not.toHaveBeenCalled();
   });
 
+  function androidDecodeFixture({ android = true, trusted = true } = {}) {
+    if (android) {
+      deviceKindMock.mockReturnValue("android");
+      Object.defineProperty(window, "__YAWF_NATIVE_SAFE_AREA__", {
+        configurable: true, value: { getInsets: vi.fn() },
+      });
+    }
+    globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+    const original = trusted ? "https://server.example/api/stream/session-1" : "https://other.example/api/stream/session-1";
+    const compatible = "https://server.example/api/stream/session-1/index.m3u8?quality=480p";
+    const request = vi.fn(async (_quality: string, position: number) => ({
+      url: compatible, timelineOffsetSeconds: position, startPositionSeconds: 0, quality: "480p" as const,
+    }));
+    const refresh = vi.fn(async () => {});
+    const fetcher = vi.fn(async () => new Response("#EXTM3U\n", { status: 200 }));
+    vi.stubGlobal("fetch", fetcher);
+    const onEnded = vi.fn();
+    const props = { url: original, title: "Android decode recovery", refreshCurrentSource: refresh,
+      serverOptimized: { qualities: ["480p"] as const, request }, onClose: vi.fn(), onEnded };
+    return { props, refresh, request, compatible, fetcher, onEnded };
+  }
+
+  it("[android-decode-compat] tries one trusted compatible rendition at the owned position after a started decoder error", async () => {
+    const f = androidDecodeFixture();
+    render(<VideoPlayer {...f.props} />);
+    const old = document.querySelector("video.player-video") as HTMLVideoElement;
+    terminalError(old, terminalMedia(old), 3);
+    fireEvent.error(old);
+    fireEvent.ended(old);
+    await flushTerminal();
+    expect(f.refresh).not.toHaveBeenCalled();
+    expect(f.request).toHaveBeenCalledExactlyOnceWith("480p", 25.75);
+    expect(f.fetcher).toHaveBeenCalledWith(f.compatible, expect.objectContaining({ credentials: "include", cache: "no-store" }));
+    expect(f.onEnded).not.toHaveBeenCalled();
+    const next = document.querySelector("video.player-video") as HTMLVideoElement;
+    expect(next).not.toBe(old);
+    expect(next.volume).toBe(0.35);
+    expect(next.muted).toBe(true);
+    expect(next.playbackRate).toBe(1.25);
+  });
+
+  it("[android-decode-compat] does not spend the compatible-rendition attempt twice on a re-resolved direct file", async () => {
+    const f = androidDecodeFixture();
+    f.request.mockRejectedValueOnce(new Error("The server is busy."));
+    const view = render(<VideoPlayer {...f.props} />);
+    let video = document.querySelector("video.player-video") as HTMLVideoElement;
+    terminalError(video, terminalMedia(video), 3);
+    await flushTerminal();
+    expect(f.request).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Retry playback" })).toBeVisible();
+    view.rerender(<VideoPlayer {...f.props} url="https://server.example/api/stream/session-2" sourceRevision={1} />);
+    await flushTerminal();
+    video = document.querySelector("video.player-video") as HTMLVideoElement;
+    terminalError(video, terminalMedia(video), 3);
+    await flushTerminal();
+    expect(f.request).toHaveBeenCalledTimes(1);
+    expect(f.refresh).toHaveBeenCalledExactlyOnceWith(25.75, expect.objectContaining({ paused: false }));
+  });
+
+  it.each(["original", "network", "untrusted", "desktop"] as const)(
+    "[android-decode-compat] retains ordinary refresh for %s",
+    async (lane) => {
+      const f = androidDecodeFixture({ android: lane !== "desktop", trusted: lane !== "untrusted" });
+      render(<VideoPlayer {...f.props} />);
+      let video = document.querySelector("video.player-video") as HTMLVideoElement;
+      if (lane === "original") {
+        fireEvent.pointerMove(video);
+        fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+        fireEvent.click(screen.getByRole("button", { name: /^Device Original$/ }));
+        await flushTerminal();
+        video = document.querySelector("video.player-video") as HTMLVideoElement;
+      }
+      terminalError(video, terminalMedia(video), lane === "network" ? 2 : 3);
+      await flushTerminal();
+      expect(f.request).not.toHaveBeenCalled();
+      expect(f.refresh).toHaveBeenCalledExactlyOnceWith(25.75, expect.objectContaining({ paused: false }));
+    },
+  );
+
   it("[terminal-controls] keeps pending exact handoff errors out of fresh resolution", async () => {
     const refresh = vi.fn(async () => {});
     render(<VideoPlayer url="https://x/handoff.mp4" title="Pending" startPositionSeconds={50}
@@ -17528,10 +18438,10 @@ describe("existing HTML reader foreground ownership90", () => {
   const restore: Array<() => void> = [];
   afterEach(() => { while (restore.length) restore.pop()!(); });
   async function flush90() { await act(async () => { for (let i = 0; i < 20; i += 1) await Promise.resolve(); }); }
-  async function setup90(offset = 0, device: "ios" | "android" = "android", nativeHls = false, mediaDuration = 1000, hlsJs = false) {
+  async function setup90(offset = 0, device: "ios" | "android" = "android", nativeHls = false, mediaDuration = 1000, hlsJs = false, androidShell = true) {
     vi.useFakeTimers(); deviceKindMock.mockReturnValue(device);
     if (nativeHls) vi.mocked(HTMLMediaElement.prototype.canPlayType).mockReturnValue("probably");
-    restore.push(replaceProperty(window, "__YAWF_NATIVE_SAFE_AREA__", { getInsets: vi.fn() }));
+    if (androidShell) restore.push(replaceProperty(window, "__YAWF_NATIVE_SAFE_AREA__", { getInsets: vi.fn() }));
     restore.push(replaceProperty(document, "visibilityState", "visible"));
     const tracks = Object.assign(new EventTarget(), { 0: { id: "jp", label: "Japanese", language: "jpn", enabled: true }, length: 1 });
     restore.push(replaceProperty(HTMLMediaElement.prototype, "audioTracks", tracks));
@@ -17748,6 +18658,125 @@ describe("existing HTML reader foreground ownership90", () => {
     const f = await setup90(0, "ios", true); f.hide(); f.show(); await flush90();
     fireEvent.timeUpdate(f.video); expect(f.state.time).toBe(300); f.platformPause(); await flush90();
     expect(f.attempts).toEqual([300]); expect(f.state.paused).toBe(false); expect(f.refresh).not.toHaveBeenCalled();
+  });
+
+  async function installedNativeExit(model: "iPad" | "iPhone" = "iPad", standalone = true, nativeHls = false) {
+    restore.push(replaceProperty(navigator, "standalone", standalone));
+    restore.push(replaceProperty(navigator, "userAgent", `Mozilla/5.0 (${model}; CPU OS 26_5 like Mac OS X) AppleWebKit/605.1.15`));
+    const f = await setup90(0, "ios", nativeHls, 1000, false, false);
+    let inFullscreen = false;
+    Object.defineProperties(f.video, {
+      webkitDisplayingFullscreen: { configurable: true, get: () => inFullscreen },
+      webkitPresentationMode: { configurable: true, get: () => inFullscreen ? "fullscreen" : "inline" },
+    });
+    const begin = () => {
+      inFullscreen = true;
+      fireEvent(f.video, new Event("webkitbeginfullscreen"));
+    };
+    const end = () => {
+      inFullscreen = false;
+      fireEvent(f.video, new Event("webkitendfullscreen"));
+    };
+    const dismissalPause = () => {
+      inFullscreen = false;
+      f.platformPause();
+    };
+    begin();
+    return { ...f, begin, end, dismissalPause };
+  }
+
+  const advanceExitClock = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+
+  it.each([["iPad", false], ["iPhone", true]] as const)(
+    "[release-native-exit] %s resumes on the same reader immediately, including the first delayed dismissal pause",
+    async (model, nativeHls) => {
+      const f = await installedNativeExit(model, true, nativeHls);
+      const src = f.video.getAttribute("src");
+      f.dismissalPause();
+      await advanceExitClock(4);
+      f.end();
+      f.end();
+      expect(f.attempts).toEqual([300]);
+      expect(f.state.paused).toBe(false);
+      await advanceExitClock(474);
+      f.state.time = 300.46;
+      f.platformPause();
+      expect(f.attempts).toEqual([300, 300.46]);
+      expect(f.state.paused).toBe(false);
+      f.platformPause();
+      expect(f.attempts).toHaveLength(2);
+      expect(f.state.paused).toBe(true);
+      expect(document.querySelector("video.player-video")).toBe(f.video);
+      expect(f.video.getAttribute("src")).toBe(src);
+      expect(f.writes).toEqual([]);
+      expect(f.refresh).not.toHaveBeenCalled();
+    },
+  );
+
+  it("[release-native-exit] supports end then coincident pause without resuming an uncorrelated late pause", async () => {
+    const f = await installedNativeExit();
+    f.end();
+    expect(f.attempts).toEqual([]);
+    await advanceExitClock(4);
+    f.platformPause();
+    expect(f.attempts).toEqual([300]);
+    f.begin();
+    f.end();
+    await advanceExitClock(80);
+    f.platformPause();
+    expect(f.attempts).toEqual([300]);
+    expect(f.state.paused).toBe(true);
+  });
+
+  it("[release-native-exit] does not override intentional Pause in the native surface even immediately before exit", async () => {
+    const f = await installedNativeExit();
+    f.platformPause(); // Fullscreen still owns playback.
+    await advanceExitClock(4);
+    f.end();
+    await advanceExitClock(700);
+    expect(f.attempts).toEqual([]);
+    expect(f.state.paused).toBe(true);
+  });
+
+  it.each(["web controls", "Media Session", "expired", "background", "seek", "pip", "source", "new fullscreen"] as const)(
+    "[release-native-exit] leaves a later pause alone once %s supersedes the dismissal",
+    async (transition) => {
+      const handlers = new Map<MediaSessionAction, MediaSessionActionHandler | null>();
+      if (transition === "Media Session") restore.push(replaceProperty(navigator, "mediaSession", {
+        metadata: null, playbackState: "none",
+        setActionHandler: (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => handlers.set(action, handler),
+        setPositionState: vi.fn(),
+      }));
+      const f = await installedNativeExit();
+      f.dismissalPause();
+      f.end();
+      expect(f.attempts).toEqual([300]);
+      if (transition === "web controls") fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+      if (transition === "Media Session") {
+        const pause = handlers.get("pause");
+        expect(pause).toBeTypeOf("function");
+        act(() => pause?.({ action: "pause" }));
+      }
+      if (transition === "background") f.hide("visibility");
+      if (transition === "seek") fireEvent.seeking(f.video);
+      if (transition === "pip") fireEvent(f.video, new Event("enterpictureinpicture"));
+      if (transition === "source") f.view.rerender(<VideoPlayer {...f.props} sourceRevision={1} />);
+      if (transition === "new fullscreen") f.begin();
+      if (transition === "expired") await advanceExitClock(750);
+      f.platformPause();
+      await flush90();
+      expect(f.attempts).toEqual([300]);
+      expect(f.state.paused).toBe(true);
+    },
+  );
+
+  it("[release-native-exit] does not change ordinary Safari tab playback", async () => {
+    const f = await installedNativeExit("iPad", false);
+    f.dismissalPause();
+    f.end();
+    await advanceExitClock(700);
+    expect(f.attempts).toEqual([]);
+    expect(f.state.paused).toBe(true);
   });
 
   async function setupForegroundIdle92(offset = 0, mediaDuration = 1000, hlsJs = false) {

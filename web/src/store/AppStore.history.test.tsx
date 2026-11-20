@@ -98,6 +98,7 @@ function HistoryHarness() {
         {store.browseFiltersOpen ? "open" : "closed"}
       </output>
       <output data-testid="detail">{store.detailItem?.id ?? "none"}</output>
+      <output data-testid="detail-visit">{store.detailVisitId ?? "none"}</output>
       <output data-testid="detail-sources">
         {store.detailSourcesOpen ? "open" : "closed"}
       </output>
@@ -177,6 +178,30 @@ describe("AppStore browser history", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+  });
+
+  it("round-trips a Detail visit through nested history without reusing it on a fresh open", async () => {
+    render(<AppStoreProvider><HistoryHarness /></AppStoreProvider>);
+    fireEvent.click(screen.getByText("detail"));
+    const first = screen.getByTestId("detail-visit").textContent;
+    expect(first).not.toBe("none");
+    fireEvent.click(screen.getByText("sources"));
+    expect(window.history.state.detailVisitId).toBe(first);
+    fireEvent.click(screen.getByText("player"));
+    expect(window.history.state.detailVisitId).toBe(first);
+    await browserBack();
+    expect(screen.getByTestId("detail-visit")).toHaveTextContent(first!);
+    expect(screen.getByTestId("detail-sources")).toHaveTextContent("open");
+    await browserBack();
+    expect(screen.getByTestId("detail-visit")).toHaveTextContent(first!);
+    expect(screen.getByTestId("detail-sources")).toHaveTextContent("closed");
+    await browserForward();
+    expect(screen.getByTestId("detail-visit")).toHaveTextContent(first!);
+    fireEvent.click(screen.getByText("detail"));
+    const second = screen.getByTestId("detail-visit").textContent;
+    expect(second).not.toBe("none");
+    expect(second).not.toBe(first);
+    expect(window.history.state.detailVisitId).toBe(second);
   });
 
   it("Back closes Detail and keeps the Browse overlay beneath it", async () => {

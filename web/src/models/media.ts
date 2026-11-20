@@ -45,6 +45,14 @@ export interface MediaPreview {
   tmdbId?: number | null;
   /** Optional 16:9 backdrop path - populated for hero/spotlight surfaces. */
   backdropPath?: string | null;
+  /** Search-only navigation hint, not part of library or playback identity. */
+  searchContinuationSeason?: number;
+}
+
+export function withoutSearchContinuation(preview: MediaPreview): MediaPreview {
+  if (preview.searchContinuationSeason == null) return preview;
+  const { searchContinuationSeason: _, ...canonical } = preview;
+  return canonical;
 }
 
 export const MediaPreview = {

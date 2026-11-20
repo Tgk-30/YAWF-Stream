@@ -53,6 +53,80 @@ function makeMockFetch(handler: (url: URL) => MockResponse): MockFetch {
 const ok = (body: string): MockResponse => ({ status: 200, body });
 const serverError = (body: string): MockResponse => ({ status: 500, body });
 
+describe("continuation title search", () => {
+  const empty = JSON.stringify({ page: 1, results: [], total_pages: 0, total_results: 0 });
+  const parent = JSON.stringify({
+    id: 30984,
+    name: "Bleach",
+    first_air_date: "2004-10-05",
+    poster_path: "/bleach.jpg",
+    external_ids: { imdb_id: "tt0434665" },
+  });
+
+  it.each([
+    ["bleach thousand year blood war", null],
+    ["BLEACH: Thousand‑Year Blood War", "series"],
+    ["bleach tybw", null],
+    ["BLEACH 千年血戦篇", "series"],
+  ] as const)("finds the canonical arc for %s", async (query, type) => {
+    const mock = makeMockFetch((url) =>
+      ok(url.pathname === "/3/tv/30984" ? parent : empty),
+    );
+    const service = new TMDBService("key", mock.fetchImpl);
+    const result = await service.search(query, type);
+    expect(result).toEqual({
+      page: 1,
+      totalPages: 1,
+      totalResults: 1,
+      items: [expect.objectContaining({
+        id: "tmdb-30984",
+        tmdbId: 30984,
+        title: "Bleach",
+        year: 2004,
+        type: "series",
+        searchContinuationSeason: 17,
+      })],
+    });
+    expect(mock.hits()).toBe(1);
+    expect(mock.lastURL()?.pathname).toBe("/3/tv/30984");
+    expect(await service.search(query, type, 2)).toEqual({ ...result, page: 2, items: [] });
+    expect(mock.hits()).toBe(1);
+  });
+
+  it.each([["bleach", null], ["bleach tybw movie", null], ["bleach tybw", "movie"]] as const)(
+    "does not redirect ordinary or movie-only searches: %s / %s",
+    async (query, type) => {
+      const mock = makeMockFetch(() => ok(empty));
+      const service = new TMDBService("key", mock.fetchImpl);
+      await expect(service.search(query, type)).resolves.toMatchObject({ items: [] });
+      expect(mock.hits()).toBe(1);
+      expect(mock.lastURL()?.pathname).toBe(type === "movie" ? "/3/search/movie" : "/3/search/multi");
+      expect(mock.lastURL()?.searchParams.get("query")).toBe(query);
+    },
+  );
+
+  it("does not make a shortcut for a conflicting parent identity", async () => {
+    const mock = makeMockFetch((url) =>
+      ok(url.pathname === "/3/tv/30984"
+        ? parent.replace("tt0434665", "tt14986406")
+        : searchBody),
+    );
+    await expect(new TMDBService("key", mock.fetchImpl).search("bleach tybw", null))
+      .resolves.toMatchObject({ items: expect.arrayContaining([expect.objectContaining({ title: "Fight Club" })]) });
+    expect(mock.hits()).toBe(2);
+  });
+
+  it("falls back to normal search when the parent record is missing", async () => {
+    const mock = makeMockFetch((url) =>
+      url.pathname === "/3/tv/30984" ? { status: 404, body: "{}" } : ok(empty),
+    );
+    await expect(new TMDBService("key", mock.fetchImpl).search("bleach tybw", null))
+      .resolves.toMatchObject({ items: [] });
+    expect(mock.hits()).toBe(2);
+    expect(mock.lastURL()?.searchParams.get("query")).toBe("bleach tybw");
+  });
+});
+
 describe("TMDBService privacy gate", () => {
   it("throws NetworkBlockedError in Offline mode before requesting metadata", async () => {
     const mock = makeMockFetch(() => ok(searchBody));

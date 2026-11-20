@@ -415,6 +415,38 @@ test("public status stays readable under UMask 0077 while private state stays re
   assert.match(helper, /mkdirSync\(PATHS\.root, \{ recursive: true, mode: 0o700 \}\)/);
 });
 
+test("the rollback web fingerprint detects a changed lazy asset even when index.html is unchanged", (t) => {
+  const source = readFileSync(new URL("../deploy/updater/yawf-server-update.mjs", import.meta.url), "utf8");
+  const script = /async function webBundleHash\(id\) \{[\s\S]*?const script = `([\s\S]*?)`;/u.exec(source)?.[1];
+  assert.ok(script, "the installed web fingerprint must be exercised");
+  const directory = mkdtempSync(join(tmpdir(), "yawf-updater-web-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const root = join(directory, "web-dist");
+  mkdirSync(join(root, "assets"), { recursive: true });
+  writeFileSync(join(root, "index.html"), "<title>Fixture</title>");
+  const asset = join(root, "assets", "player.js");
+  const runHash = () => spawnSync(process.execPath, ["-e", script.replace("'/app/web-dist'", JSON.stringify(root))], { encoding: "utf8" });
+  writeFileSync(asset, "const generation = 1;");
+  const before = runHash();
+  assert.equal(before.status, 0, before.stderr);
+  assert.match(before.stdout, /^[a-f0-9]{64}$/);
+  assert.equal(runHash().stdout, before.stdout);
+  writeFileSync(asset, "const generation = 2;");
+  const after = runHash();
+  assert.equal(after.status, 0, after.stderr);
+  assert.notEqual(after.stdout, before.stdout);
+  unlinkSync(asset);
+  symlinkSync(join(root, "index.html"), asset);
+  const symlink = runHash();
+  assert.notEqual(symlink.status, 0);
+  assert.match(symlink.stderr, /Invalid web entry/);
+  unlinkSync(asset);
+  unlinkSync(join(root, "index.html"));
+  const incomplete = runHash();
+  assert.notEqual(incomplete.status, 0);
+  assert.match(incomplete.stderr, /Missing web index/);
+});
+
 
 function activeStreamGuardScript() {
   const source = readFileSync(new URL("../deploy/updater/yawf-server-update.mjs", import.meta.url), "utf8");

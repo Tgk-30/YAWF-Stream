@@ -28,6 +28,7 @@ import {
   type TrendingWindow,
 } from "./types";
 import { assertNetworkAllowed } from "../../lib/networkPolicy";
+import { findContinuationByTitle } from "../../data/episodeSource";
 
 // MARK: - Raw TMDB response shapes (snake_case as the API returns them).
 //
@@ -392,6 +393,30 @@ export class TMDBService implements MetadataProvider {
     type: MediaType | null,
     page = 1,
   ): Promise<MetadataSearchResult> {
+    const continuation = type === "movie" ? undefined : findContinuationByTitle(query);
+    if (continuation != null) {
+      // Catalog search returns shows, not arcs. Use the verified parent record
+      // rather than inventing a standalone card for a retired TMDB id.
+      const parentId = `tmdb-${continuation.parentTmdbId}`;
+      const parent = await this.getDetail(parentId, "series").catch((error: unknown) => {
+        if (error instanceof TMDBError && error.kind === "notFound") return null;
+        throw error;
+      });
+      if (parent?.tmdbId === continuation.parentTmdbId && parent.id === continuation.parentImdbId) {
+        const item: MediaPreview = {
+          id: parentId,
+          type: "series",
+          tmdbId: parent.tmdbId,
+          title: parent.title,
+          year: parent.year,
+          posterPath: parent.posterPath,
+          backdropPath: parent.backdropPath,
+          searchContinuationSeason: continuation.displaySeasonStart,
+        };
+        return { items: page === 1 ? [item] : [], page, totalResults: 1, totalPages: 1 };
+      }
+    }
+
     const path = type != null ? `/search/${MediaTypeNS.tmdbPath(type)}` : "/search/multi";
 
     const params: Record<string, string> = {

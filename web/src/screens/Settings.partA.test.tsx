@@ -47,6 +47,7 @@ const platformState = vi.hoisted(() => ({
   device: "desktop" as "ios" | "android" | "mac" | "windows" | "linux" | "desktop" | "unknown",
   standalone: false,
   standardMse: true,
+  managedMse: false,
 }));
 let smartPreloadOn = false;
 
@@ -130,6 +131,10 @@ vi.mock("../lib/iosHlsPlayback", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/iosHlsPlayback")>();
   return { ...actual, supportsStandardIosHlsMse: () => platformState.standardMse };
 });
+
+vi.mock("../lib/iosManagedHlsPlayback", () => ({
+  supportsManagedIosHlsMse: () => platformState.managedMse,
+}));
 
 vi.mock("../data/traktConnection", () => ({
   isTraktConnected,
@@ -260,6 +265,7 @@ beforeEach(() => {
   platformState.device = "desktop";
   platformState.standalone = false;
   platformState.standardMse = true;
+  platformState.managedMse = false;
   smartPreloadOn = false;
   updateSettings.mockClear();
   clearPendingSettingsSection.mockClear();
@@ -1599,19 +1605,40 @@ describe("Settings · Playback (local caps)", () => {
     platformState.device = "ios";
     renderAt("playback");
     const engine = screen.getByRole("combobox", { name: "iPhone and iPad HLS playback" });
-    expect(engine).toHaveValue("native");
+    expect(engine).toHaveValue("automatic");
+    expect(screen.getByRole("option", { name: "Automatic (recommended)" })).toBeEnabled();
     expect(screen.getByRole("option", { name: "Compatibility mode" })).toBeEnabled();
     await userEvent.click(screen.getByRole("button", {
       name: "About iPhone and iPad HLS playback",
     }));
     expect(screen.getByRole("tooltip")).toHaveTextContent(
-      /applies to the next player you open/i,
+      /apply to the next player you open/i,
     );
     expect(screen.getByRole("tooltip")).toHaveTextContent(
-      /AirPlay requires Native mode/i,
+      /For AirPlay on those streams, choose Native mode/i,
     );
     fireEvent.change(engine, { target: { value: "compatibility" } });
     expect(engine).toHaveValue("compatibility");
+  });
+
+  it("explains Automatic and Native in managed-only iPhone playback settings", async () => {
+    platformState.device = "ios";
+    platformState.standardMse = false;
+    platformState.managedMse = true;
+    renderAt("playback");
+    const engine = screen.getByRole("combobox", { name: "iPhone and iPad HLS playback" });
+    expect(engine).toHaveValue("automatic");
+    expect(screen.getByRole("option", { name: "Native, with AirPlay" })).toBeEnabled();
+    expect(screen.getByRole("option", { name: "Compatibility mode" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", {
+      name: "About iPhone and iPad HLS playback",
+    }));
+    const help = screen.getByRole("tooltip");
+    expect(help).toHaveTextContent(/Automatic uses the web streaming engine for eligible Server Optimized streams/);
+    expect(help).toHaveTextContent(/For AirPlay on those streams, choose Native mode/);
+    expect(help).not.toHaveTextContent(/New players use Native mode/);
+    fireEvent.change(engine, { target: { value: "native" } });
+    expect(engine).toHaveValue("native");
   });
 
   it("keeps Native selectable and disables compatibility when standard MSE is unavailable", async () => {

@@ -95,7 +95,8 @@ function makeFakeTranscoder(opts: { detect?: boolean; writeOutput?: boolean; sou
           for (const rendition of renditions) {
             writeFileSync(
               join(dir, `${rendition}.m3u8`),
-              FAKE_MANIFEST.replaceAll("seg_00000.ts", `${rendition}_seg_00000.ts`),
+              FAKE_MANIFEST.replace("#EXT-X-PLAYLIST-TYPE:VOD", "#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:EVENT")
+                .replaceAll("seg_00000.ts", `${rendition}_seg_00000.ts`),
             );
             writeFileSync(join(dir, `${rendition}_seg_00000.ts`), fakeMpegTsSegment(sourceStart * 90_000));
           }
@@ -2601,6 +2602,45 @@ describe("DebridStreamer server", () => {
     }
   });
 
+  it("server search returns the Bleach continuation shortcut without a standalone TMDB record", async () => {
+    const owner = await setupOwner(app);
+    const q = encodeURIComponent("bleach thousand year blood war");
+    expect((await app.inject({ method: "GET", url: `/api/search?q=${q}` })).statusCode).toBe(401);
+    await request(owner, {
+      method: "PUT",
+      url: "/api/admin/credentials",
+      csrf: true,
+      payload: { provider: "tmdb", value: "tmdb-key", label: "TMDB" },
+    });
+    const originalFetch = globalThis.fetch;
+    const paths: string[] = [];
+    globalThis.fetch = (async (url) => {
+      const path = new URL(String(url)).pathname;
+      paths.push(path);
+      return Response.json(path === "/3/tv/30984" ? {
+        id: 30984, name: "Bleach", first_air_date: "2004-10-05",
+        external_ids: { imdb_id: "tt0434665" },
+      } : { page: 1, total_pages: 0, total_results: 0, results: [] });
+    }) as typeof fetch;
+    try {
+      const result = await request(owner, { method: "GET", url: `/api/search?q=${q}` });
+      expect(result.statusCode).toBe(200);
+      expect(result.json()).toEqual({
+        items: [expect.objectContaining({
+          id: "tmdb-30984", title: "Bleach", type: "series", tmdbId: 30984,
+          searchContinuationSeason: 17,
+        })],
+        page: 1, totalPages: 1, totalResults: 1,
+      });
+      const movies = await request(owner, { method: "GET", url: `/api/search?q=${q}&type=movie` });
+      expect(movies.statusCode).toBe(200);
+      expect(movies.json()).toMatchObject({ items: [] });
+      expect(paths).toEqual(["/3/tv/30984", "/3/search/movie"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("fails closed instead of using merged TMDB numbering when Bleach's canonical guide is unavailable", async () => {
     const owner = await setupOwner(app);
     await request(owner, {
@@ -4366,6 +4406,49 @@ describe("DebridStreamer server", () => {
     } finally { await on.close(); }
   });
 
+  it("transcode: keeps the readiness and rendition target stable as a short first segment grows", async () => {
+    const fake = makeFakeTranscoder();
+    const spawn = vi.spyOn(fake, "spawnHls");
+    const on = await buildTranscodeApp({ maxTranscodes: 2 }, fake);
+    try {
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const root = `/api/stream/${session.id}/`;
+      const url = `${root}index.m3u8?quality=480p&start=34`;
+      const created = await request(owner, { method: "GET", url });
+      const child = created.body.match(/^480p\.m3u8\?generation=[^\r\n]+/m)![0];
+      const dir = dirname(spawn.mock.calls[0]![0].at(-1)!);
+      const playlist = (target: number, tail?: string) => [
+        "#EXTM3U", "#EXT-X-VERSION:3", `#EXT-X-TARGETDURATION:${target}`,
+        "#EXT-X-MEDIA-SEQUENCE:0", "#EXT-X-PLAYLIST-TYPE:EVENT",
+        "#EXTINF:4.800000,", "480p_seg_00000.ts", ...(tail == null ? [] : [
+          `#EXTINF:${tail},`, "480p_seg_00001.ts",
+        ]), "",
+      ].join("\n");
+      const check = async (target: number, frontier: string, tail?: string) => {
+        writeFileSync(join(dir, "480p.m3u8"), playlist(target, tail));
+        const master = await request(owner, { method: "GET", url });
+        expect(master.headers["x-yawf-hls-snapshot-frontier"]).toBe(frontier);
+        expect(master.headers["x-yawf-hls-snapshot-generation"]).toBe(child.split("=")[1]);
+        expect(master.headers["x-yawf-hls-snapshot-target"]).toBe("6");
+        const rendition = await request(owner, { method: "GET", url: root + child });
+        expect(rendition.statusCode).toBe(200);
+        expect(rendition.body).toContain("#EXT-X-TARGETDURATION:6\n");
+        expect(rendition.body).toContain("#EXTINF:4.800000,\n");
+        expect(rendition.body).toContain("480p_seg_00000.ts?generation=");
+      };
+      await check(5, "4.8");
+      writeFileSync(join(dir, "480p_seg_00001.ts"), fakeMpegTsSegment(39 * 90_000));
+      await check(6, "10.8", "6.000000");
+      writeFileSync(join(dir, "480p.m3u8"), playlist(7, "6.500000"));
+      const oversized = await request(owner, { method: "GET", url });
+      expect(oversized.headers["x-yawf-hls-snapshot-version"]).toBe("1");
+      expect(oversized.headers["x-yawf-hls-snapshot-target"]).toBeUndefined();
+      expect((await request(owner, { method: "GET", url: root + child })).statusCode).toBe(503);
+      expect(spawn).toHaveBeenCalledTimes(1);
+    } finally { await on.close(); }
+  });
+
   it("transcode: abandoned prepared replacement keeps current playback and lease alive", async () => {
     const fake = makeFakeTranscoder();
     const spawn = vi.spyOn(fake, "spawnHls");
@@ -4390,7 +4473,17 @@ describe("DebridStreamer server", () => {
       expect((await request(owner, { method: "GET", url: `${root}360p.m3u8` })).statusCode).toBe(404);
       expect(kill).not.toHaveBeenCalled();
       expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(200);
-      // A committed engine's exact rendition read activates the prepared job.
+      // A playlist outside the configured cadence must not retire playback.
+      const candidatePath = join(dirname(spawn.mock.calls[1]![0].at(-1)!), "360p.m3u8");
+      const validCandidate = readFileSync(candidatePath, "utf8");
+      const invalidCandidate = validCandidate.replace(/#EXTINF:[0-9.]+,/, "#EXTINF:6.500000,");
+      expect(invalidCandidate).not.toBe(validCandidate);
+      writeFileSync(candidatePath, invalidCandidate);
+      expect((await request(owner, { method: "GET", url: root + preparedChild })).statusCode).toBe(503);
+      expect(kill).not.toHaveBeenCalled();
+      expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(200);
+      writeFileSync(candidatePath, validCandidate);
+      // A committed engine's exact valid rendition read activates the job.
       expect((await request(owner, { method: "GET", url: root + preparedChild })).statusCode).toBe(200);
       expect(kill).toHaveBeenCalledTimes(1);
       expect((await request(owner, { method: "HEAD", url: root + currentChild })).statusCode).toBe(404);
@@ -4623,6 +4716,72 @@ describe("DebridStreamer server", () => {
       await noFfmpeg.close();
     }
   });
+
+  it("transcode startup recovery restores HLS after a transient boot timeout without restarting", async () => {
+    const inspection = vi.fn<NonNullable<Transcoder["inspectStartup"]>>()
+      .mockResolvedValueOnce({ state: "retryable-timeout" })
+      .mockResolvedValueOnce({ state: "ready", capabilities: {
+        videoEncoders: ["libx264"], toneMapping: true, audioTrackSelection: true,
+      } });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let on: FastifyInstance | undefined;
+    try {
+      on = await buildTranscodeApp({ transcodeVideoEncoder: "h264_nvenc", updateCheck: false }, {
+        ...makeFakeTranscoder(), inspectStartup: inspection,
+      });
+      const owner = await setupOwner(on);
+      const session = await createRawSession(owner);
+      const bootstrap = () => request(owner, { method: "GET", url: "/api/bootstrap" });
+      const pending = await bootstrap();
+      expect(pending.headers["cache-control"]).toBe("private, no-store");
+      expect(pending.json()).toMatchObject({ transcodeAvailable: false, transcodeRetryPending: true });
+      expect((await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8` })).statusCode).toBe(404);
+      expect(inspection).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(6_000);
+      const ready = (await bootstrap()).json();
+      expect(ready).not.toHaveProperty("transcodeRetryPending");
+      expect(ready).toMatchObject({ transcodeAvailable: true, transcodeCapabilities: {
+        hardwareEncoder: "libx264", availableVideoEncoders: ["libx264"], audioTrackSelection: true,
+      } });
+      vi.useRealTimers();
+      expect((await request(owner, { method: "GET", url: `/api/stream/${session.id}/index.m3u8?quality=480p` })).statusCode).toBe(200);
+      expect(inspection).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); await on?.close(); }
+  });
+
+  it.each(["disabled", "permanent", "retry exhausted", "shutdown before retry", "shutdown during retry"] as const)(
+    "transcode startup recovery is bounded or inert: %s", async (scenario) => {
+      let complete!: (value: Awaited<ReturnType<NonNullable<Transcoder["inspectStartup"]>>>) => void;
+      const inspection = vi.fn<NonNullable<Transcoder["inspectStartup"]>>();
+      inspection.mockResolvedValueOnce({ state: scenario === "permanent" ? "unavailable" : "retryable-timeout" });
+      if (scenario === "shutdown during retry") {
+        inspection.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+      } else inspection.mockResolvedValue({ state: "retryable-timeout" });
+      const start = vi.spyOn(TranscodeRegistry.prototype, "start");
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      let on: FastifyInstance | undefined;
+      try {
+        on = await buildTranscodeApp({ enableTranscode: scenario !== "disabled" }, {
+          ...makeFakeTranscoder(), inspectStartup: inspection,
+        });
+        if (scenario === "shutdown before retry") { await on.close(); on = undefined; }
+        await vi.advanceTimersByTimeAsync(6_000);
+        if (scenario === "shutdown during retry") {
+          await on.close();
+          expect(inspection.mock.calls[1]?.[0]?.aborted).toBe(true);
+          complete({ state: "ready", capabilities: { videoEncoders: ["libx264"], toneMapping: true } });
+          on = undefined;
+        } else if (on != null) {
+          const response = await on.inject({ method: "GET", url: "/api/bootstrap" });
+          expect(response.json()).toMatchObject({ transcodeAvailable: false });
+          expect(response.json()).not.toHaveProperty("transcodeRetryPending");
+        }
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(start).not.toHaveBeenCalled();
+        expect(inspection).toHaveBeenCalledTimes(scenario === "disabled" ? 0 : scenario === "permanent" || scenario === "shutdown before retry" ? 1 : 2);
+      } finally { vi.useRealTimers(); await on?.close(); start.mockRestore(); }
+    },
+  );
 
   it("transcode: reports detected encoders and safely falls back to software", async () => {
     const base = makeFakeTranscoder();

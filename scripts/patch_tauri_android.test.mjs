@@ -268,6 +268,16 @@ test("patches the origin-attested Server Mode player bridge idempotently", () =>
     assert.doesNotMatch(activity, /setMessage\([^)]*pending\.url/s);
     assert.match(activity, /Intent\(Intent\.ACTION_VIEW\)/);
     assert.match(activity, /setDataAndType\(Uri\.parse\(pending\.url\), "video\/\*"\)/);
+    const externalVideoIntent = activity.slice(
+      activity.indexOf("val viewIntent = Intent(Intent.ACTION_VIEW)"),
+      activity.indexOf('startActivity(Intent.createChooser(viewIntent, "Open external player"))'),
+    );
+    // Just Player uses this documented extra for the display title and to
+    // begin a warm handoff with a saved position. No stream/profile metadata.
+    assert.deepEqual(
+      [...externalVideoIntent.matchAll(/putExtra\(([^)]+)\)/g)].map((extra) => extra[1]),
+      ['"title", "YAWF Stream"'],
+    );
     assert.match(activity, /WebViewCompat\.removeWebMessageListener/);
     assert.doesNotMatch(activity, /mobile_open_external_player/);
     assert.match(

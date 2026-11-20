@@ -24,6 +24,7 @@ import { TorrentResult } from "../services/indexers/models";
 // --- mutable mock state -----------------------------------------------------
 
 let mockDetailItem: MediaPreview | null = null;
+let mockDetailVisitId: string | null = null;
 let mockDetail: DetailState;
 let mockStreams: StreamsState;
 let mockWatchlist: MediaPreview[] = [];
@@ -94,6 +95,7 @@ vi.mock("../store/AppStore", () => ({
     const [trailerOpen, setTrailerOpen] = useState(false);
     return {
     detailItem: mockDetailItem,
+    detailVisitId: mockDetailVisitId,
     closeDetail,
     openDetail,
     navigate,
@@ -771,6 +773,7 @@ afterEach(() => {
 describe("Detail null guard", () => {
   it("renders nothing when there is no selected item", () => {
     mockDetailItem = null;
+  mockDetailVisitId = null;
     const { container } = render(<Detail />);
     expect(container.firstChild).toBeNull();
   });
@@ -860,6 +863,106 @@ describe("Detail base render", () => {
       "torbox",
       expect.objectContaining({ season: 2, episode: 7 }),
     ));
+  });
+
+  it.each(["cinemeta", "tmdb", "parent-only"] as const)(
+    "opens a TYBW search shortcut only with the verified continuation guide (%s)",
+    async (numbering) => {
+      serverModeOn = true;
+      mockDetailItem = preview("tmdb-30984", {
+        type: "series", title: "Bleach", year: 2004, tmdbId: 30984,
+        searchContinuationSeason: 17,
+      });
+      mockDetail = detailState({
+        item: mediaItem({
+          id: "tt0434665", type: "series", title: "Bleach", year: 2004, tmdbId: 30984,
+        }),
+        imdbId: "tt0434665",
+      });
+      testLocalStorage.setItem("ds_episode_overrides", JSON.stringify({
+        "tmdb-30984": { season: 2, episode: 7 },
+      }));
+      const seasons = [
+        { id: 2, seasonNumber: 2, episodeCount: 21, name: "Season 2" },
+        { id: 17, seasonNumber: 17, episodeCount: 13, name: "Thousand-Year Blood War" },
+        { id: 18, seasonNumber: 18, episodeCount: 13, name: "The Separation" },
+      ];
+      fetchServerSeasons.mockResolvedValue({
+        seasons: numbering === "parent-only" ? seasons.slice(0, 1) : seasons,
+        numbering: numbering === "parent-only" ? "cinemeta" : numbering,
+        guideVersion: numbering === "tmdb" ? null : "2",
+      });
+      fetchServerEpisodes.mockResolvedValue({
+        episodes: [], numbering: "cinemeta", guideVersion: "2",
+      });
+      render(<Detail />);
+
+      if (numbering === "cinemeta") {
+        const selection = await screen.findByTestId("episode-picker-selection");
+        expect(selection).toHaveAttribute("data-season", "17");
+        expect(selection).toHaveAttribute("data-episode", "1");
+        expect(useStreamsMock).toHaveBeenLastCalledWith(
+          "tt14986406", "series", 1, 1, "Bleach: Thousand-Year Blood War", 2022,
+          mockServices.indexers, mockServices.debrid, false,
+        );
+        expect(JSON.parse(testLocalStorage.getItem("ds_episode_overrides")!))
+          .toEqual({ "tmdb-30984": { season: 2, episode: 7 } });
+
+        pickerSelection = { season: 18, episode: 3 };
+        await userEvent.click(screen.getByTestId("pick-episode"));
+        await waitFor(() => expect(useStreamsMock).toHaveBeenLastCalledWith(
+          "tt14986406", "series", 2, 3, "Bleach: Thousand-Year Blood War", 2022,
+          mockServices.indexers, mockServices.debrid, false,
+        ));
+      } else {
+        expect(await screen.findByRole("button", { name: "Retry episode guide" })).toBeInTheDocument();
+        expect(useStreamsMock.mock.calls.every(([id]) => id == null)).toBe(true);
+      }
+    },
+  );
+
+  it("retains the continuation episode across history clones, but not on a fresh open", async () => {
+    serverModeOn = true;
+    mockDetailItem = preview("tmdb-30984", {
+      type: "series", title: "Bleach", year: 2004, tmdbId: 30984,
+      searchContinuationSeason: 17,
+    });
+    mockDetailVisitId = "1000:1";
+    mockDetail = detailState({
+      item: mediaItem({ id: "tt0434665", type: "series", title: "Bleach", tmdbId: 30984 }),
+      imdbId: "tt0434665",
+    });
+    fetchServerSeasons.mockResolvedValue({
+      numbering: "cinemeta", guideVersion: "2",
+      seasons: [17, 18].map((seasonNumber) => ({
+        id: seasonNumber, seasonNumber, episodeCount: 13, name: `Season ${seasonNumber}`,
+      })),
+    });
+    fetchServerEpisodes.mockResolvedValue({ episodes: [], numbering: "cinemeta", guideVersion: "2" });
+    const { rerender } = render(<Detail />);
+    await screen.findByTestId("episode-picker-selection");
+    pickerSelection = { season: 18, episode: 3 };
+    await userEvent.click(screen.getByTestId("pick-episode"));
+    expect(await screen.findByTestId("streampicker")).toHaveAttribute("data-episode", "3");
+
+    mockDetailItem = { ...mockDetailItem };
+    useStreamsMock.mockClear();
+    rerender(<Detail />);
+    await userEvent.click(screen.getByRole("button", { name: /Episodes$/ }));
+    const selection = await screen.findByTestId("episode-picker-selection");
+    expect(selection).toHaveAttribute("data-season", "18");
+    expect(selection).toHaveAttribute("data-episode", "3");
+    expect(useStreamsMock).toHaveBeenLastCalledWith(
+      "tt14986406", "series", 2, 3, "Bleach: Thousand-Year Blood War", 2022,
+      mockServices.indexers, mockServices.debrid, false,
+    );
+    expect(useStreamsMock.mock.calls.some((call) => call[0] === "tt14986406" && call[2] === 1)).toBe(false);
+
+    mockDetailVisitId = "1000:2";
+    rerender(<Detail />);
+    expect(screen.getByTestId("episode-picker-selection")).toHaveAttribute("data-season", "17");
+    expect(screen.getByTestId("episode-picker-selection")).toHaveAttribute("data-episode", "1");
+    mockDetailVisitId = null;
   });
 
   it("maps Bleach display S17 to TYBW search, file selection, and scrobble identity", async () => {

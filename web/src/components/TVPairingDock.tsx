@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   createTVRemoteSession,
   revokeTVRemoteSession,
@@ -10,11 +10,17 @@ import {
 } from "../lib/tvRemoteSession";
 import "./TVRemote.css";
 
-export function TVPairingDock() {
+export function TVPairingDock({ covered = false }: { covered?: boolean }) {
   const session = useTVRemoteSession();
   const [error, setError] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
+  const [expiredSessionId, setExpiredSessionId] = useState<string | null>(null);
+  const newCodeHintId = useId();
   const refreshInFlight = useRef(false);
+  const pairingDeadline = session == null ? NaN : Date.parse(session.pairingExpiresAt);
+  const codeExpired = session != null && (
+    expiredSessionId === session.id || !Number.isFinite(pairingDeadline) || pairingDeadline <= Date.now()
+  );
 
   const refresh = useCallback(async () => {
     if (!isServerMode() || refreshInFlight.current) return;
@@ -36,19 +42,27 @@ export function TVPairingDock() {
   }, [session]);
 
   useEffect(() => {
-    if (session == null && !refreshInFlight.current) void refresh();
-  }, [refresh, session]);
+    if (!covered && session == null && !refreshInFlight.current) void refresh();
+  }, [covered, refresh, session]);
 
   useEffect(() => {
-    if (session == null) return;
-    const expiresAt = Date.parse(session.pairingExpiresAt);
-    if (!Number.isFinite(expiresAt)) return;
+    if (session == null || codeExpired) return;
+    // The deadline belongs to the one-time code, not the paired controller.
+    // Hide the code locally without revoking or recreating the viewer session.
     const timer = window.setTimeout(
-      () => void refresh(),
-      Math.max(0, expiresAt - Date.now()),
+      () => setExpiredSessionId(session.id),
+      Math.max(0, pairingDeadline - Date.now()),
     );
     return () => window.clearTimeout(timer);
-  }, [refresh, session]);
+  }, [codeExpired, pairingDeadline, session]);
+
+  useEffect(() => {
+    if (covered) setCollapsed(true);
+  }, [covered]);
+
+  // Keep the session active for an already paired phone, but never draw the
+  // dock over Detail or a modal that owns input.
+  if (covered) return null;
 
   if (!isServerMode()) {
     return (
@@ -76,11 +90,21 @@ export function TVPairingDock() {
           <span className="tv-pairing-eyebrow">Phone remote</span>
           {session != null ? (
             <>
-              <strong className="tv-pairing-code">{session.pairingCode}</strong>
-              <p>
-                Open <b>/remote</b> on your phone and enter this one-time code.
-              </p>
-              <button type="button" className="btn" onClick={() => void refresh()}>
+              {codeExpired ? (
+                <p role="status">The pairing code has expired.</p>
+              ) : (
+                <>
+                  <strong className="tv-pairing-code">{session.pairingCode}</strong>
+                  <p>Open <b>/remote</b> on your phone and enter this one-time code.</p>
+                </>
+              )}
+              <p id={newCodeHintId}>Creating a new code disconnects any paired phone.</p>
+              <button
+                type="button"
+                className="btn"
+                aria-describedby={newCodeHintId}
+                onClick={() => void refresh()}
+              >
                 New code
               </button>
             </>

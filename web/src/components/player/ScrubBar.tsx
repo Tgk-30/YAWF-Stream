@@ -55,63 +55,100 @@ export function ScrubBar({
 }: ScrubBarProps) {
   const barRef = useRef<HTMLDivElement | null>(null);
   const activePointerRef = useRef<number | null>(null);
-  const [hoverX, setHoverX] = useState<number | null>(null);
-  const [hoverTime, setHoverTime] = useState<number | null>(null);
+  const directContactRef = useRef(false);
+  const [hover, setHover] = useState<{ x: number; time: number } | null>(null);
   const [pointerPreview, setPointerPreview] = useState<number | null>(null);
+  const moveFrameRef = useRef<number | null>(null);
+  const queuedMoveRef = useRef<{ x: number; id: number } | null>(null);
   const scrubbingChangeRef = useRef(onScrubbingChange);
   useLayoutEffect(() => { scrubbingChangeRef.current = onScrubbingChange; }, [onScrubbingChange]);
 
+  const cancelMove = useCallback(() => {
+    if (moveFrameRef.current != null) window.cancelAnimationFrame(moveFrameRef.current);
+    moveFrameRef.current = null;
+    queuedMoveRef.current = null;
+  }, []);
+
   const finishScrubbing = useCallback((pointerId: number) => {
     if (activePointerRef.current !== pointerId) return;
+    cancelMove();
     activePointerRef.current = null;
     const bar = barRef.current;
     if (bar?.hasPointerCapture?.(pointerId)) bar.releasePointerCapture(pointerId);
+    if (directContactRef.current) setHover(null);
+    directContactRef.current = false;
     setPointerPreview(null);
     scrubbingChangeRef.current?.(false);
-  }, []);
+  }, [cancelMove]);
 
   useLayoutEffect(() => {
-    if (disabled && activePointerRef.current != null) finishScrubbing(activePointerRef.current);
-  }, [disabled, finishScrubbing]);
+    if (!disabled) return;
+    cancelMove();
+    if (activePointerRef.current != null) finishScrubbing(activePointerRef.current);
+    setHover(null);
+  }, [cancelMove, disabled, finishScrubbing]);
   useLayoutEffect(() => {
     const bar = barRef.current;
     return () => {
+      cancelMove();
       const pointerId = activePointerRef.current;
       activePointerRef.current = null;
       if (pointerId == null) return;
       if (bar?.hasPointerCapture?.(pointerId)) bar.releasePointerCapture(pointerId);
       scrubbingChangeRef.current?.(false);
     };
-  }, []);
+  }, [cancelMove]);
 
   const timeAtX = useCallback(
-    (clientX: number): { time: number; ratio: number } | null => {
+    (clientX: number): { time: number; x: number } | null => {
       const bar = barRef.current;
       if (bar == null || !Number.isFinite(duration) || duration <= 0) return null;
       const rect = bar.getBoundingClientRect();
       if (!Number.isFinite(rect.width) || rect.width <= 0) return null;
       const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-      return { time: ratio * duration, ratio };
+      return { time: ratio * duration, x: ratio * rect.width };
     },
     [duration],
   );
 
-  const updatePointerPosition = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
+  const move = useCallback(
+    (x: number, id: number) => {
       if (disabled) return;
-      const at = timeAtX(e.clientX);
+      const at = timeAtX(x);
       if (at == null) return;
-      const rect = barRef.current!.getBoundingClientRect();
-      setHoverX(e.clientX - rect.left);
-      setHoverTime(at.time);
-      onHover(at.time);
-      if (activePointerRef.current === e.pointerId) {
+      setHover(at);
+      // Dragging by touch/pen already has immediate numeric feedback. Don't
+      // start a second decoder and download video ranges under the finger.
+      if (!directContactRef.current) onHover(at.time);
+      if (activePointerRef.current === id) {
         if (onSeekPreview != null) setPointerPreview(at.time);
         (onSeekPreview ?? onSeek)(at.time);
       }
     },
     [disabled, onHover, onSeek, onSeekPreview, timeAtX],
   );
+  const latestMoveRef = useRef(move);
+  useLayoutEffect(() => { latestMoveRef.current = move; }, [move]);
+
+  const updatePointerPosition = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (disabled) return;
+    const active = activePointerRef.current;
+    if (active != null ? active !== event.pointerId : event.pointerType === "touch") return;
+    if (onSeekPreview == null) {
+      move(event.clientX, event.pointerId);
+      return;
+    }
+    // The player commits only on release. Render the latest drag sample once
+    // per paint, with one layout read and no work for superseded positions.
+    queuedMoveRef.current = { x: event.clientX, id: event.pointerId };
+    if (moveFrameRef.current != null) return;
+    moveFrameRef.current = window.requestAnimationFrame(() => {
+      moveFrameRef.current = null;
+      const sample = queuedMoveRef.current;
+      queuedMoveRef.current = null;
+      if (sample != null) latestMoveRef.current(sample.x, sample.id);
+    });
+  };
 
   const handleLeave = useCallback(() => {
     if (disabled) return;
@@ -119,10 +156,10 @@ export function ScrubBar({
     // Clearing it here would make a scrub appear to stop at the first missed
     // pixel on compact mobile controls.
     if (activePointerRef.current != null) return;
-    setHoverX(null);
-    setHoverTime(null);
+    cancelMove();
+    setHover(null);
     onLeave();
-  }, [disabled, onLeave]);
+  }, [cancelMove, disabled, onLeave]);
 
   const handleClick = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -179,24 +216,25 @@ export function ScrubBar({
       ? Math.max(0, Math.min(1, displayedTime / duration))
       : 0;
 
-  const showTooltip = hoverX != null && (preview != null || touchPresentation);
-  const tooltipTime = pointerPreview ?? preview?.time ?? hoverTime ?? displayedTime;
+  const thumbnail = directContactRef.current ? null : preview;
+  const showTooltip = hover != null && (thumbnail != null || touchPresentation);
+  const tooltipTime = pointerPreview ?? thumbnail?.time ?? hover?.time ?? displayedTime;
 
   return (
     <div className={`scrubbar-wrap${touchPresentation ? " is-touch" : ""}`}>
-      {showTooltip && (
+      {showTooltip && hover != null && (
         <div
-          className={`scrub-tooltip glass-raised glass-lit${preview == null ? " is-numeric-only" : ""}`}
-          style={{ left: `${hoverX}px` }}
+          className={`scrub-tooltip glass-raised glass-lit${thumbnail == null ? " is-numeric-only" : ""}`}
+          style={{ left: `${hover.x}px` }}
         >
-          {preview?.image ? (
+          {thumbnail?.image ? (
             <img
               className="scrub-thumb"
-              src={preview.image}
+              src={thumbnail.image}
               alt=""
               draggable={false}
             />
-          ) : preview != null ? (
+          ) : thumbnail != null ? (
             <div className="scrub-thumb scrub-thumb-empty" />
           ) : null}
           <span className="scrub-time">{formatTime(tooltipTime)}</span>
@@ -209,12 +247,14 @@ export function ScrubBar({
         onPointerLeave={handleLeave}
         onPointerDown={(event) => {
           if (disabled || (activePointerRef.current != null && activePointerRef.current !== event.pointerId)) return;
+          if (event.button > 0) return;
           const at = timeAtX(event.clientX);
           if (at == null) return;
-          const rect = event.currentTarget.getBoundingClientRect();
-          setHoverX(event.clientX - rect.left);
-          setHoverTime(at.time);
+          cancelMove();
+          setHover(at);
           activePointerRef.current = event.pointerId;
+          directContactRef.current = event.pointerType === "touch" || event.pointerType === "pen";
+          if (directContactRef.current) onLeave();
           event.currentTarget.setPointerCapture?.(event.pointerId);
           scrubbingChangeRef.current?.(true);
           if (onSeekPreview != null) setPointerPreview(at.time);
@@ -252,8 +292,8 @@ export function ScrubBar({
             style={{ left: `${progress * 100}%` }}
             aria-hidden="true"
           />
-          {hoverX != null && (
-            <div className="scrubbar-hover" style={{ left: `${hoverX}px` }} />
+          {hover != null && (
+            <div className="scrubbar-hover" style={{ left: `${hover.x}px` }} />
           )}
         </div>
       </div>

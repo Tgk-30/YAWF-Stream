@@ -112,9 +112,14 @@ export interface NavigationHistoryEntry {
   route: ScreenId;
   browseContext: BrowseContext | null;
   detailItem: MediaPreview | null;
+  detailVisitId?: string | null;
   layer: NavigationHistoryLayer;
   localFilePlayer: { path: string; title: string } | null;
 }
+
+// Same title can be opened multiple times. A fresh document has a different
+// time origin, so even an older history entry doesn't alias a new open.
+let detailVisitSequence = 0;
 
 const NAVIGATION_HISTORY_LAYERS = new Set<NavigationHistoryLayer>([
   "none",
@@ -160,6 +165,10 @@ export function readNavigationHistoryEntry(
   if (
     (candidate.browseContext != null && typeof candidate.browseContext !== "object") ||
     (candidate.detailItem != null && typeof candidate.detailItem !== "object") ||
+    (candidate.detailVisitId != null &&
+      (candidate.detailItem == null ||
+        typeof candidate.detailVisitId !== "string" ||
+        !/^\d{1,16}:\d{1,16}$/.test(candidate.detailVisitId))) ||
     (candidate.localFilePlayer != null &&
       (typeof candidate.localFilePlayer !== "object" ||
         typeof candidate.localFilePlayer.path !== "string" ||
@@ -201,6 +210,7 @@ export interface AppStore {
 
   // Detail overlay
   detailItem: MediaPreview | null;
+  detailVisitId: string | null;
   openDetail: (item: MediaPreview) => void;
   closeDetail: () => void;
   detailSourcesOpen: boolean;
@@ -352,7 +362,12 @@ const CachedResolutionsContext = createContext<Record<
 
 export function AppStoreProvider({ children }: { children: ReactNode }) {
   const [route, setRoute] = useState<ScreenId>("discover");
-  const [detailItem, setDetailItem] = useState<MediaPreview | null>(null);
+  const [detailVisit, setDetailVisit] = useState<{
+    item: MediaPreview;
+    id: string | null;
+  } | null>(null);
+  const detailItem = detailVisit?.item ?? null;
+  const detailVisitId = detailVisit?.id ?? null;
   const [localFilePlayer, setLocalFilePlayer] = useState<{
     path: string;
     title: string;
@@ -965,10 +980,11 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       route,
       browseContext,
       detailItem,
+      detailVisitId,
       layer: "filters",
       localFilePlayer,
     });
-  }, [browseContext, detailItem, localFilePlayer, pushNavigationHistory, route]);
+  }, [browseContext, detailItem, detailVisitId, localFilePlayer, pushNavigationHistory, route]);
 
   const closeBrowseFilters = useCallback(() => {
     goBackForClose(() => setBrowseFiltersOpen(false));
@@ -981,10 +997,11 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       route,
       browseContext,
       detailItem,
+      detailVisitId,
       layer: "trailer",
       localFilePlayer,
     });
-  }, [browseContext, detailItem, localFilePlayer, pushNavigationHistory, route]);
+  }, [browseContext, detailItem, detailVisitId, localFilePlayer, pushNavigationHistory, route]);
 
   const closeTrailer = useCallback(() => {
     goBackForClose(() => setTrailerOpen(false));
@@ -999,12 +1016,14 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       route,
       browseContext,
       detailItem,
+      detailVisitId,
       layer: returnToSources ? "detail-player-sources" : "detail-player",
       localFilePlayer,
     });
   }, [
     browseContext,
     detailItem,
+    detailVisitId,
     detailSourcesOpen,
     localFilePlayer,
     pushNavigationHistory,
@@ -1173,7 +1192,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       setRoute(initial.route);
       setBrowseContext(null);
       setBrowseFiltersOpen(false);
-      setDetailItem(null);
+      setDetailVisit(null);
       setTrailerOpen(false);
       setDetailSourcesOpen(false);
       setDetailPlayerOpen(false);
@@ -1207,7 +1226,10 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         setRoute(entry.route);
         setBrowseContext(entry.browseContext);
         setBrowseFiltersOpen(entry.layer === "filters" && entry.browseContext != null);
-        setDetailItem(entry.detailItem);
+        setDetailVisit(entry.detailItem == null ? null : {
+          item: entry.detailItem,
+          id: entry.detailVisitId ?? null,
+        });
         setTrailerOpen(entry.layer === "trailer" && entry.detailItem != null);
         setDetailSourcesOpen(
           entry.detailItem?.type === "series" &&
@@ -1240,7 +1262,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   const navigate = useCallback((next: ScreenId, options?: { replace?: boolean }) => {
     setBrowseContext(null);
     setBrowseFiltersOpen(false);
-    setDetailItem(null);
+    setDetailVisit(null);
     setTrailerOpen(false);
     setDetailSourcesOpen(false);
     setDetailPlayerOpen(false);
@@ -1302,7 +1324,8 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   }, [durableProfileReady, services.hasDebrid, refreshCachedResolutions, watchlistReadyGeneration]);
 
   const openDetail = useCallback((item: MediaPreview) => {
-    setDetailItem(item);
+    const visitId = `${Math.round(performance.timeOrigin)}:${++detailVisitSequence}`;
+    setDetailVisit({ item, id: visitId });
     setBrowseFiltersOpen(false);
     setTrailerOpen(false);
     setDetailSourcesOpen(false);
@@ -1311,6 +1334,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       route,
       browseContext,
       detailItem: item,
+      detailVisitId: visitId,
       layer: "none",
       localFilePlayer,
     });
@@ -1340,7 +1364,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       setTrailerOpen(false);
       setDetailSourcesOpen(false);
       setDetailPlayerOpen(false);
-      setDetailItem(null);
+      setDetailVisit(null);
     });
   }, [goBackForClose]);
 
@@ -1351,12 +1375,14 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       route,
       browseContext,
       detailItem,
+      detailVisitId,
       layer: "detail-sources",
       localFilePlayer,
     });
   }, [
     browseContext,
     detailItem,
+    detailVisitId,
     detailSourcesOpen,
     localFilePlayer,
     pushNavigationHistory,
@@ -1378,10 +1404,11 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       route,
       browseContext,
       detailItem,
+      detailVisitId,
       layer: "local-player",
       localFilePlayer: next,
     });
-  }, [browseContext, detailItem, pushNavigationHistory, route]);
+  }, [browseContext, detailItem, detailVisitId, pushNavigationHistory, route]);
 
   const closeLocalFilePlayer = useCallback(() => {
     goBackForClose(() => setLocalFilePlayer(null));
@@ -1394,7 +1421,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
     setRoute("search");
     setBrowseContext(null);
     setBrowseFiltersOpen(false);
-    setDetailItem(null);
+    setDetailVisit(null);
     setTrailerOpen(false);
     setDetailPlayerOpen(false);
     pushNavigationHistory({
@@ -1736,6 +1763,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       openSettingsSection,
       clearPendingSettingsSection,
       detailItem,
+      detailVisitId,
       openDetail,
       closeDetail,
       detailSourcesOpen,
@@ -1793,6 +1821,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
       openSettingsSection,
       clearPendingSettingsSection,
       detailItem,
+      detailVisitId,
       openDetail,
       closeDetail,
       detailSourcesOpen,

@@ -63,6 +63,8 @@ import {
   parsePublishedTranscodeSnapshot,
   rewriteGeneratedWebVttForTimeline,
   rewriteTranscodeManifest,
+  rewriteTranscodeVideoRendition,
+  transcodeVideoRenditionQuality,
 } from "./transcodeHls.js";
 import {
   demandAwareNodeReadable,
@@ -73,7 +75,7 @@ import { fetchOmdbRatings, fetchOmdbViaBroker, type OMDBRatings } from "./omdb.j
 import { embeddedSecret } from "./embeddedSecrets.js";
 import { bandwidthCapStatus, type BandwidthCapStatus } from "./bandwidth.js";
 import { lstat, open, readFile } from "node:fs/promises";
-import { realTranscoder } from "./transcode.js";
+import { realTranscoder, type TranscoderStartupInspection, type TranscoderCapabilities } from "./transcode.js";
 import {
   MANIFEST_NAME,
   TranscodeRegistry,
@@ -2624,18 +2626,24 @@ function streamContentType(fileName: string): string | null {
   return MIME_TYPES[ext] ?? null;
 }
 
+type TranscodeRuntime = {
+  ready: boolean;
+  retryPending: boolean;
+  activeEncoder: ServerConfig["transcodeVideoEncoder"] | null;
+  toneMappingAvailable: boolean;
+  subtitleSidecarAvailable: boolean;
+  audioTrackSelectionAvailable: boolean;
+  availableVideoEncoders: ServerConfig["transcodeVideoEncoder"][];
+  readonly registry: TranscodeRegistry;
+};
+
+const TRANSCODE_STARTUP_RETRY_DELAY_MS = 6_000;
+
 function registerRoutes(
   app: FastifyInstance,
   db: AppDatabase,
   config: ServerConfig,
-  transcode: {
-    ready: boolean;
-    toneMappingAvailable: boolean;
-    subtitleSidecarAvailable: boolean;
-    audioTrackSelectionAvailable: boolean;
-    availableVideoEncoders: ServerConfig["transcodeVideoEncoder"][];
-    registry: TranscodeRegistry;
-  },
+  transcode: TranscodeRuntime,
   directTorrent: DirectTorrentRegistry | null,
   transfers: StreamTransferRecorder,
 ): void {
@@ -2659,7 +2667,8 @@ function registerRoutes(
     setupTokenRequired: userCount(db) === 0 && config.setupToken != null,
   }));
 
-  app.get("/api/bootstrap", async (request) => {
+  app.get("/api/bootstrap", async (request, reply) => {
+    reply.header("cache-control", "private, no-store");
     const auth = readAuth(db, request);
     return {
       setupRequired: userCount(db) === 0,
@@ -2676,6 +2685,7 @@ function registerRoutes(
       // Whether server-side transcoding is actually usable (operator flag on AND
       // ffmpeg present at boot), so the client only offers it when it'll work.
       transcodeAvailable: transcode.ready,
+      ...(transcode.retryPending ? { transcodeRetryPending: true } : {}),
       directTorrentAvailable: directTorrent != null,
       transcodeCapabilities: {
         adaptive: transcode.ready,
@@ -2687,7 +2697,7 @@ function registerRoutes(
           transcode.ready && transcode.subtitleSidecarAvailable,
         audioTrackSelection:
           transcode.ready && transcode.audioTrackSelectionAvailable,
-        hardwareEncoder: config.transcodeVideoEncoder,
+        hardwareEncoder: transcode.activeEncoder ?? config.transcodeVideoEncoder,
         availableVideoEncoders: transcode.ready
           ? transcode.availableVideoEncoders
           : [],
@@ -2795,7 +2805,7 @@ function registerRoutes(
         enabled: config.enableTranscode,
         ready: transcode.ready,
         configuredEncoder: config.transcodeVideoEncoder,
-        activeEncoder: transcode.ready ? config.transcodeVideoEncoder : null,
+        activeEncoder: transcode.activeEncoder,
         availableVideoEncoders: transcode.ready
           ? transcode.availableVideoEncoders
           : [],
@@ -6582,7 +6592,8 @@ function registerRoutes(
     const row = loadTranscodeSession(request);
     if (row == null) throw httpError(404, "Stream session not found.");
     const generation = (request.query as { generation?: string }).generation;
-    if (request.method === "HEAD" && /^(?:1080p|720p|480p|360p)\.m3u8$/.test(asset) && generation != null) {
+    const videoQuality = transcodeVideoRenditionQuality(asset);
+    if (request.method === "HEAD" && videoQuality != null && generation != null) {
       reply.header("cache-control", "private, no-store");
       rateLimit(request, `stream-retention:${row.id}`, 12, 60_000);
       if (
@@ -6599,16 +6610,19 @@ function registerRoutes(
     reply.header("cache-control", "no-store");
     if (asset.endsWith(".m3u8")) {
       const manifest = await readGeneratedManifest(path);
+      const rewritten = videoQuality == null
+        ? rewriteTranscodeManifest(manifest, generation)
+        : rewriteTranscodeVideoRendition(manifest, videoQuality, generation);
+      if (rewritten == null) throw httpError(503, "Transcode rendition is not ready.");
       // Preparation alone cannot retire the reader still playing. Commit only
-      // after a real engine reads this exact generation's rendition playlist.
+      // after a real engine reads this exact generation's valid rendition.
       const activatePrepared = request.method === "GET" &&
-        typeof generation === "string" &&
-        /^(?:1080p|720p|480p|360p)\.m3u8$/.test(asset);
+        typeof generation === "string" && videoQuality != null;
       if (transcode.registry.dirForAsset(row.id, asset, generation, activatePrepared) !== dir) {
         throw httpError(404, "Transcode asset not found.");
       }
       reply.header("content-type", "application/vnd.apple.mpegurl");
-      return reply.send(rewriteTranscodeManifest(manifest, generation));
+      return reply.send(rewritten);
     }
     if (asset.endsWith(".vtt")) {
       reply.header("content-type", "text/vtt; charset=utf-8");
@@ -6640,15 +6654,19 @@ function registerRoutes(
 }
 
 export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyInstance> {
-  let config = loadConfig(options.config);
+  const config = loadConfig(options.config);
   const db = new AppDatabase(config.databasePath);
   const transfers = streamTransferRecorder(db);
   let directTorrentRegistry: DirectTorrentRegistry | null = null;
   let transcodeRegistry: TranscodeRegistry | null = null;
   let app: FastifyInstance | null = null;
   let resourcesClosed = false;
+  const mediaStartupAbort = new AbortController();
+  let mediaRetryTimer: ReturnType<typeof setTimeout> | null = null;
   const closeResources = async () => {
     if (resourcesClosed) return;
+    if (mediaRetryTimer != null) clearTimeout(mediaRetryTimer);
+    mediaStartupAbort.abort();
     try {
       await directTorrentRegistry?.close();
     } finally {
@@ -6706,45 +6724,54 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
           .run(nowISO(), sessionId);
       });
 
-  // Transcoding (Phase 3b): probe ffmpeg ONLY when the operator opted in (zero
-  // boot cost otherwise). transcodeReady gates the routes + the bootstrap
-  // capability; the registry owns ffmpeg processes + temp dirs.
   const transcoder = options.transcoder ?? realTranscoder;
-  const ffmpegPresent = config.enableTranscode ? await transcoder.detect() : false;
-  const transcodeCapabilities =
-    config.enableTranscode && ffmpegPresent && transcoder.capabilities != null
-      ? await transcoder.capabilities().catch(() => ({
-          toneMapping: false,
-          videoEncoders: [],
-          subtitleSidecar: false,
-          audioTrackSelection: false,
-        }))
-      : { toneMapping: false, subtitleSidecar: false, audioTrackSelection: false };
-  const availableVideoEncoders =
-    transcodeCapabilities.videoEncoders ??
-    (ffmpegPresent ? [config.transcodeVideoEncoder] : []);
-  const effectiveVideoEncoder = availableVideoEncoders.includes(
-    config.transcodeVideoEncoder,
-  )
-    ? config.transcodeVideoEncoder
-    : availableVideoEncoders.includes("libx264")
-      ? "libx264"
-      : null;
-  const transcodeReady =
-    config.enableTranscode &&
-    ffmpegPresent &&
-    effectiveVideoEncoder != null;
-  if (
-    effectiveVideoEncoder != null &&
-    effectiveVideoEncoder !== config.transcodeVideoEncoder
-  ) {
-    config = {
-      ...config,
-      transcodeVideoEncoder: effectiveVideoEncoder,
-    };
+  const transcode: TranscodeRuntime = {
+    ready: false,
+    retryPending: false,
+    activeEncoder: null,
+    toneMappingAvailable: false,
+    subtitleSidecarAvailable: false,
+    audioTrackSelectionAvailable: false,
+    availableVideoEncoders: [],
+    get registry() {
+      if (transcodeRegistry == null) throw httpError(503, "Transcoding is not available.");
+      return transcodeRegistry;
+    },
+  };
+  const inspect = async (): Promise<TranscoderStartupInspection> => {
+    if (transcoder.inspectStartup != null) return transcoder.inspectStartup(mediaStartupAbort.signal);
+    // Legacy test/adapter contract: a boolean cannot distinguish a timeout.
+    if (!await transcoder.detect()) return { state: "unavailable" };
+    const capabilities = await transcoder.capabilities?.().catch(() => ({
+      toneMapping: false, videoEncoders: [],
+    }));
+    return { state: "ready", capabilities: capabilities ?? { toneMapping: false } };
+  };
+  const activateTranscoding = (capabilities: TranscoderCapabilities) => {
+    if (mediaStartupAbort.signal.aborted || transcode.ready) return;
+    const available = capabilities.videoEncoders ?? [config.transcodeVideoEncoder];
+    const encoder = available.includes(config.transcodeVideoEncoder)
+      ? config.transcodeVideoEncoder
+      : available.includes("libx264") ? "libx264" : null;
+    if (encoder == null) return;
+    const registryConfig = encoder === config.transcodeVideoEncoder ? config : { ...config, transcodeVideoEncoder: encoder };
+    transcodeRegistry = new TranscodeRegistry(db, registryConfig, transcoder);
+    transcodeRegistry.start();
+    transcode.activeEncoder = encoder;
+    transcode.availableVideoEncoders = available;
+    transcode.toneMappingAvailable = capabilities.toneMapping;
+    transcode.subtitleSidecarAvailable = capabilities.subtitleSidecar === true;
+    transcode.audioTrackSelectionAvailable = capabilities.audioTrackSelection === true;
+    transcode.ready = true;
+  };
+
+  // Do not probe at all when the operator disabled transcoding. Only a timed
+  // out, reaped required probe may schedule one retry after startup.
+  if (config.enableTranscode) {
+    const initial = await inspect();
+    if (initial.state === "ready") activateTranscoding(initial.capabilities);
+    else if (initial.state === "retryable-timeout") transcode.retryPending = true;
   }
-  transcodeRegistry = new TranscodeRegistry(db, config, transcoder);
-  if (transcodeReady) transcodeRegistry.start();
 
   app = Fastify({
     logger: config.logger,
@@ -6845,17 +6872,20 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<FastifyIn
     });
   });
 
-  registerRoutes(app, db, config, {
-    ready: transcodeReady,
-    toneMappingAvailable: transcodeCapabilities.toneMapping,
-    subtitleSidecarAvailable:
-      transcodeCapabilities.subtitleSidecar === true,
-    audioTrackSelectionAvailable:
-      transcodeCapabilities.audioTrackSelection === true,
-    availableVideoEncoders,
-    registry: transcodeRegistry,
-  }, directTorrentRegistry, transfers);
+  registerRoutes(app, db, config, transcode, directTorrentRegistry, transfers);
   registerStaticApp(app, config);
+  if (transcode.retryPending) {
+    app.log.warn("FFmpeg startup timed out. One delayed transcoding check is scheduled.");
+    mediaRetryTimer = setTimeout(() => {
+      mediaRetryTimer = null;
+      void inspect().then((result) => {
+        if (result.state === "ready") activateTranscoding(result.capabilities);
+      }).catch(() => {
+        if (!mediaStartupAbort.signal.aborted) app?.log.warn("The delayed FFmpeg startup check did not complete.");
+      }).finally(() => { transcode.retryPending = false; });
+    }, TRANSCODE_STARTUP_RETRY_DELAY_MS);
+    mediaRetryTimer.unref?.();
+  }
   return app;
   } catch (error) {
     try {

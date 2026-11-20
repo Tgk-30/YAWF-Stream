@@ -5,11 +5,13 @@ import { isAbsolute, normalize, parse, join, dirname, basename } from "node:path
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export const KOTLIN_ASSET_API = "https://api.github.com/repos/JetBrains/kotlin/releases/assets/598615460";
+export const KOTLIN_JAR_URL = "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-compiler-embeddable/2.3.21/kotlin-compiler-embeddable-2.3.21.jar";
+export const KOTLIN_JAR_RELEASE_URL = "https://github.com/JetBrains/kotlin/releases/download/v2.3.21/kotlin-compiler-embeddable-2.3.21.jar";
 export const KOTLIN_JAR_BYTES = 59720376;
 export const KOTLIN_JAR_SHA256 = "d3e70fb011675e77ef00f1a68918d3cd91eed26058977d1e3ea2a37a293233af";
 export const KOTLIN_JAR_SHA1 = "c4b47f8e33cdbeedd8c1415ab9f9ade870388162";
 export const KOTLIN_POM_URL = "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-compiler-embeddable/2.3.21/kotlin-compiler-embeddable-2.3.21.pom";
+export const KOTLIN_POM_MIRROR_URL = "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-compiler-embeddable/2.3.21/kotlin-compiler-embeddable-2.3.21.pom";
 export const KOTLIN_POM_BYTES = 2451;
 export const KOTLIN_POM_SHA256 = "9523c8feadcb17f42d04ffa97fe2a9c08e5db18f090f6db903dca5c36c7ae5c4";
 const POM_NAME = "kotlin-compiler-embeddable-2.3.21.pom";
@@ -108,24 +110,36 @@ export function stageVerifiedKotlinCompilerPom(source, root) {
   } finally { rmSync(stage, { recursive: true, force: true }); }
 }
 export function kotlinPomDownloadInvocation(output) {
-  const args = kotlinDownloadInvocation(output);
-  args[args.indexOf(String(KOTLIN_JAR_BYTES))] = String(KOTLIN_POM_BYTES);
-  args[args.indexOf(KOTLIN_ASSET_API)] = KOTLIN_POM_URL;
-  return args;
+  return downloadInvocation(output, KOTLIN_POM_URL, KOTLIN_POM_BYTES);
+}
+export function kotlinPomMirrorDownloadInvocation(output) {
+  return downloadInvocation(output, KOTLIN_POM_MIRROR_URL, KOTLIN_POM_BYTES);
 }
 export function kotlinDownloadInvocation(output) {
+  return downloadInvocation(output, KOTLIN_JAR_URL, KOTLIN_JAR_BYTES);
+}
+export function kotlinReleaseDownloadInvocation(output) {
+  return downloadInvocation(output, KOTLIN_JAR_RELEASE_URL, KOTLIN_JAR_BYTES);
+}
+function downloadInvocation(output, source, bytes) {
   return ["--disable", "--fail", "--silent", "--show-error", "--location", "--max-redirs", "3",
     "--config", "-", "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "15",
     "--max-time", "60", "--retry", "2", "--retry-all-errors", "--retry-max-time", "180",
-    "--max-filesize", String(KOTLIN_JAR_BYTES), "--header", "Accept: application/octet-stream",
-    "--write-out", "%{http_code}", KOTLIN_ASSET_API, "--output", output];
+    "--max-filesize", String(bytes), "--header", "Accept: application/octet-stream",
+    "--write-out", "%{http_code}", source, "--output", output];
 }
 export function kotlinTransferStatus(result) {
   const exit = Number.isInteger(result.status) && result.status >= 0 && result.status <= 255 ? result.status : "unavailable";
   const http = typeof result.stdout === "string" && /^\d{3}$/.test(result.stdout) ? result.stdout : "unavailable";
   return `curl=${exit}, HTTP=${http}`;
 }
-function fetchArtifact(root, name, verify, invocation) {
+export function retryWithKotlinAlternateSource({ status, stdout }) {
+  // The fixed artifact can exist at the other official source even if one
+  // CDN reports missing. A successful response with bad bytes is never retried.
+  return (status === 22 && /^(?:404|408|429|500|502|503|504)$/.test(stdout)) ||
+    ([6, 7, 18, 28, 52, 56].includes(status) && /^(?:000|200)$/.test(stdout));
+}
+function fetchArtifact(root, name, verify, invocation, fallback) {
   prepare(root);
   const artifact = join(root, ...PARTS, name);
   if (exists(artifact) != null) return root;
@@ -133,16 +147,24 @@ function fetchArtifact(root, name, verify, invocation) {
   try {
     const staged = join(stage, name), env = { ...process.env };
     delete env.GH_TOKEN; delete env.GITHUB_TOKEN; delete env.YAWF_GRADLE_API_TOKEN;
-    const result = spawnSync("/usr/bin/curl", invocation(staged), {
+    const transfer = (command) => spawnSync("/usr/bin/curl", command(staged), {
       input: "", env, encoding: "utf8", timeout: 190_000, maxBuffer: 64 * 1024,
     });
-    if (result.status !== 0 || result.stdout !== "200") throw new Error(`Official Kotlin transfer failed (${kotlinTransferStatus(result)}).`);
+    let result = transfer(invocation);
+    const primary = kotlinTransferStatus(result);
+    if (fallback && retryWithKotlinAlternateSource(result)) {
+      rmSync(staged, { force: true });
+      result = transfer(fallback);
+      if (result.status !== 0 || result.stdout !== "200")
+        throw new Error(`Official Kotlin transfer failed for ${name} (primary: ${primary}; alternate: ${kotlinTransferStatus(result)}).`);
+    }
+    if (result.status !== 0 || result.stdout !== "200") throw new Error(`Official Kotlin transfer failed for ${name} (${primary}).`);
     return publish(staged, root, stage, name, verify);
   } finally { rmSync(stage, { recursive: true, force: true }); }
 }
 export function fetchAndroidKotlinCompiler(root) {
-  fetchArtifact(root, NAME, verifyKotlinCompilerJar, kotlinDownloadInvocation);
-  fetchArtifact(root, POM_NAME, verifyKotlinCompilerPom, kotlinPomDownloadInvocation);
+  fetchArtifact(root, NAME, verifyKotlinCompilerJar, kotlinDownloadInvocation, kotlinReleaseDownloadInvocation);
+  fetchArtifact(root, POM_NAME, verifyKotlinCompilerPom, kotlinPomDownloadInvocation, kotlinPomMirrorDownloadInvocation);
   return verifyKotlinCompilerRepository(root);
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

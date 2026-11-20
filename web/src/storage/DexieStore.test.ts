@@ -39,6 +39,20 @@ afterEach(async () => {
   await db.delete();
 });
 
+it("keeps a continuation search hint out of watchlist and resume records", async () => {
+  const parent = { id: "tmdb-30984", type: "series", title: "Bleach", tmdbId: 30984 } as const;
+  const shortcut = { ...parent, searchContinuationSeason: 17 };
+  await db.addToWatchlist(shortcut);
+  await db.recordHistory({
+    mediaId: parent.id, episodeId: "17:1", progressSeconds: 120, preview: shortcut,
+  });
+  expect((await db.listWatchlist())[0]?.preview).toEqual(parent);
+  expect(await db.getResume(parent.id, "17:1")).toMatchObject({
+    episodeId: "17:1", progressSeconds: 120,
+  });
+  expect((await db.getResume(parent.id, "17:1"))?.preview).toEqual(parent);
+});
+
 // ---- Settings ---------------------------------------------------------------
 
 describe("settings", () => {

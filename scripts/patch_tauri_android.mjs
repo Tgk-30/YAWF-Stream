@@ -1165,6 +1165,11 @@ function patchedMainActivity(packageName) {
     ['  override fun onPause() {\n', '  override fun onPause() {\n    dismissRemoteRecoveryDialog()\n'],
     ['  override fun onDestroy() {\n', '  override fun onDestroy() {\n    remoteRecoveryBack.remove()\n    dismissRemoteRecoveryDialog()\n'],
     ['  private fun inspectWebViewCompatibility()', methods + '  private fun inspectWebViewCompatibility()'],
+    [`      setDataAndType(Uri.parse(pending.url), "video/*")\n`, `      setDataAndType(Uri.parse(pending.url), "video/*")
+      // Some players otherwise show the capability as the title and wait at
+      // a saved position instead of starting on a new handoff.
+      putExtra("title", "YAWF Stream")
+`],
   ];
   for (const [before, after] of replacements) {
     if (activity.split(before).length !== 2) throw new Error("Unsupported Android remote-root recovery template.");

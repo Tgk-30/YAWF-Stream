@@ -168,11 +168,10 @@ function extract(archive, platform) {
 
   if (platform.startsWith("win-")) {
     if (process.platform === "win32") {
-      execFileSync("powershell", [
-        "-NoProfile",
-        "-Command",
-        `Expand-Archive -LiteralPath ${JSON.stringify(archive)} -DestinationPath ${JSON.stringify(extractDir)} -Force`,
-      ]);
+      // The inbox libarchive tool handles the checksum-verified ZIP without
+      // loading the runner's PowerShell compression assemblies.
+      const tar = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+      execFileSync(tar, ["-xf", archive, "-C", extractDir]);
     } else {
       execFileSync("unzip", ["-q", archive, "-d", extractDir]);
     }

@@ -9,6 +9,7 @@ import { memo, useCallback, useState } from "react";
 import { MediaPreview as MediaPreviewNS } from "../models/media";
 import type { MediaPreview } from "../models/media";
 import { Icon } from "./Icon";
+import { continuationForSearchPreview } from "../data/episodeSource";
 import "./MediaCard.css";
 
 interface MediaCardProps {
@@ -65,7 +66,10 @@ export const MediaCard = memo(function MediaCard({
   // designed fallback tile instead of leaving the browser's broken-image glyph.
   const [failed, setFailed] = useState(false);
   const showFallback = poster == null || failed;
-  const initial = item.title.trim().charAt(0).toUpperCase() || "?";
+  const continuation = continuationForSearchPreview(item);
+  const title = continuation?.childTitle ?? item.title;
+  const year = continuation?.childYear ?? item.year;
+  const initial = title.trim().charAt(0).toUpperCase() || "?";
 
   // Stable handlers so the memo above isn't defeated by a fresh closure each render.
   const handleSelect = useCallback(() => onSelect?.(item), [onSelect, item]);
@@ -82,8 +86,8 @@ export const MediaCard = memo(function MediaCard({
       type="button"
       className={rank != null ? "media-card is-ranked" : "media-card"}
       onClick={handleSelect}
-      title={item.title}
-      aria-label={rank != null ? `#${rank}: ${item.title}` : item.title}
+      title={title}
+      aria-label={rank != null ? `#${rank}: ${title}` : title}
     >
       {rank != null && (
         <span className="media-card-rank" aria-hidden="true">
@@ -94,7 +98,7 @@ export const MediaCard = memo(function MediaCard({
         {showFallback ? (
           <div
             className="media-card-fallback"
-            style={{ "--fallback-hue": String(hueFor(item.title)) } as React.CSSProperties}
+            style={{ "--fallback-hue": String(hueFor(title)) } as React.CSSProperties}
             aria-hidden="true"
           >
             <span className="media-card-fallback-initial">{initial}</span>
@@ -110,7 +114,7 @@ export const MediaCard = memo(function MediaCard({
               if (el?.complete && el.naturalWidth > 0) setLoaded(true);
             }}
             src={poster}
-            alt={item.title}
+            alt={title}
             loading="lazy"
             decoding="async"
             draggable={false}
@@ -155,9 +159,9 @@ export const MediaCard = memo(function MediaCard({
         {/* Cinematic reveal layer - fades/slides in on hover. */}
         <div className="media-card-reveal">
           <div className="media-card-reveal-inner">
-            <div className="media-card-reveal-title">{item.title}</div>
+            <div className="media-card-reveal-title">{title}</div>
             <div className="media-card-reveal-meta">
-              {item.year != null && <span>{item.year}</span>}
+              {year != null && <span>{year}</span>}
               {rating !== "" && (
                 <span className="media-card-reveal-rating">
                   <Icon name="star" size={10} className="t-warning" />
@@ -190,9 +194,9 @@ export const MediaCard = memo(function MediaCard({
         )}
       </div>
 
-      <div className="media-card-title">{item.title}</div>
+      <div className="media-card-title">{title}</div>
       <div className="media-card-meta">
-        <span className="media-card-year">{item.year ?? ""}</span>
+        <span className="media-card-year">{year ?? ""}</span>
         {rating !== "" && (
           <span className="media-card-rating">
             <Icon name="star" size={11} className="t-warning" />

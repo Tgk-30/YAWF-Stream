@@ -145,6 +145,20 @@
   display: block;
 }
 
+/* Above the inline video only. Controls and status stay interactive. */
+.player-quality-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  pointer-events: none;
+  object-fit: contain;
+}
+.player-quality-frame[hidden] {
+  display: none;
+}
+
 /* Subtitle appearance - driven by the --sub-* CSS vars set in useTheme from the
  * persisted subtitle settings (font scale, text color, caption bg opacity). */
 .player-video::cue {
@@ -390,6 +404,35 @@
   margin: calc(-1 * var(--sp-md)) calc(-1 * var(--sp-md)) var(--sp-md);
   padding: var(--sp-md);
   background: rgba(10, 12, 20, 0.98);
+}
+.player-options-disclosure-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-xs);
+  width: 100%;
+  min-height: 44px;
+  padding: 0 calc(6px * var(--density-scale));
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.player-options-disclosure-toggle::after {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-inline: 6px;
+  border: solid currentColor;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.player-options-disclosure-toggle[aria-expanded="true"]::after {
+  transform: rotate(225deg);
 }
 .player-options-section {
   display: grid;
@@ -1213,6 +1256,13 @@
   opacity: 1;
 }
 
+/* Show touch targets as soon as they can be tapped. Keep the fade on hide. */
+.player.is-touch-player > .player-bar.is-visible,
+.player-touch-osd.is-visible,
+.player-touch-transport.is-visible {
+  transition-duration: 0s;
+}
+
 .player-touch-transport.is-visible > button {
   pointer-events: auto;
 }
@@ -1229,6 +1279,7 @@
 
 .player-touch-transport .chip,
 .player-touch-actions .chip,
+.player-touch-display,
 .player-touch-more {
   border: 1px solid rgba(255, 255, 255, 0.15);
   background: linear-gradient(145deg, rgba(18, 21, 33, 0.88), rgba(7, 9, 17, 0.76));
@@ -1305,6 +1356,7 @@
   display: none;
 }
 
+.player-touch-display,
 .player-touch-actions .player-touch-action,
 .player-touch-more {
   flex: 0 0 auto;
@@ -1318,6 +1370,12 @@
   border-radius: calc(14px * var(--radius-scale));
   cursor: pointer;
   white-space: nowrap;
+}
+
+.player-touch-osd .chip.player-touch-display,
+.player-touch-osd .chip.player-touch-more {
+  touch-action: manipulation;
+  transition: none;
 }
 
 .player-touch-actions .player-mobile-optional {
@@ -1561,9 +1619,18 @@
   }
 
   .player-touch-actions .player-touch-action,
+  .player-touch-display,
   .player-touch-more {
     min-width: 54px;
     padding-inline: calc(8px * var(--density-scale));
+  }
+
+  .player-touch-display {
+    min-width: 44px;
+  }
+
+  .player-touch-display .player-touch-action-label {
+    display: none;
   }
 }
 
@@ -1600,6 +1667,7 @@
   }
 
   .player-touch-actions .player-touch-action,
+  .player-touch-display,
   .player-touch-more {
     min-height: 44px;
   }
@@ -1611,4 +1679,28 @@
     transition: none;
     animation: none;
   }
+}
+
+/* Keep the title and Close outside the iPad Web App's rubber-banding surface.
+ * Modern WebKit supplies native momentum on the inner scrollport. */
+.player.is-touch-player .player-options-menu.has-bounded-settings-scroll {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+  -webkit-overflow-scrolling: auto;
+}
+.player-options-menu.has-bounded-settings-scroll > .player-options-head {
+  position: relative;
+  top: auto;
+  flex: none;
+  margin: 0;
+}
+.player-options-scrollbody {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain none;
+  touch-action: pan-y;
+  padding: 0 var(--sp-md) var(--sp-md);
 }

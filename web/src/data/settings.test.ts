@@ -229,7 +229,7 @@ describe("defaultSettings", () => {
     expect(d.defaultPlaybackSpeed).toBe(1);
     expect(d.defaultVolume).toBe(100);
     expect(d.rememberPerTitleTrackChoices).toBe(true);
-    expect(d.iosHlsPlaybackMode).toBe("native");
+    expect(d.iosHlsPlaybackMode).toBe("automatic");
     expect(d.simpleMode).toBe(true);
     expect(d.autoUpdateChecks).toBe(true);
     expect(d.autoInstallUpdates).toBe(false);
@@ -731,10 +731,24 @@ describe("loadSettingsFromStore - established store", () => {
     expect(s.defaultPlaybackSpeed).toBe(1);
     expect(s.defaultVolume).toBe(100);
     expect(s.rememberPerTitleTrackChoices).toBe(true);
-    expect(s.iosHlsPlaybackMode).toBe("native");
+    expect(s.iosHlsPlaybackMode).toBe("automatic");
     expect(s.debridTokens).toEqual([]);
     expect(s.sources).toEqual([]);
   });
+
+  it.each(["automatic", "native", "compatibility"] as const)(
+    "round trips %s as an explicit playback choice",
+    async (mode) => {
+      const previous = await loadSettingsFromStore();
+      const initial = mode === "automatic" ? "native" : "automatic";
+      const before = { ...previous, iosHlsPlaybackMode: initial } as const;
+      settingsMap.set("ios_hls_playback_mode", initial);
+      expect((await loadSettingsFromStore()).iosHlsPlaybackMode).toBe(initial);
+      await saveSettingsToStore({ ...before, iosHlsPlaybackMode: mode }, { previous: before });
+      expect(settingsMap.get("ios_hls_playback_mode")).toBe(mode);
+      expect((await loadSettingsFromStore()).iosHlsPlaybackMode).toBe(mode);
+    },
+  );
 
   it("resolves secret-marked values from the SecretStore", async () => {
     settingsMap.set("tmdb_api_key", "secret:tmdb_api_key");

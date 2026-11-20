@@ -113,6 +113,7 @@ interface BootstrapResponse {
   profiles?: ProfileState | null;
   csrfToken?: string | null;
   transcodeAvailable?: boolean;
+  transcodeRetryPending?: boolean;
   transcodeCapabilities?: ServerTranscodeCapabilities;
   directTorrentAvailable?: boolean;
   omdbProxy?: boolean;
@@ -205,10 +206,12 @@ function jsonFetch<T>(
   baseURL: string,
   path: string,
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   return fetch(`${baseURL}${path}`, {
     method: body === undefined ? "GET" : "POST",
     credentials: "include",
+    ...(signal ? { signal, cache: "no-store" } : {}),
     headers: body === undefined ? undefined : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   }).then(async (response) => {
@@ -241,6 +244,7 @@ export function ServerModeGate({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<ServerSession | null>(null);
   const [profiles, setProfiles] = useState<ServerProfileSummary[]>([]);
   const [transcodeAvailable, setTranscodeAvailable] = useState(false);
+  const [transcodeRetryPending, setTranscodeRetryPending] = useState(false);
   const [directTorrentAvailable, setDirectTorrentAvailable] = useState(false);
   const [transcodeCapabilities, setTranscodeCapabilities] =
     useState<ServerTranscodeCapabilities>({
@@ -302,6 +306,7 @@ export function ServerModeGate({ children }: { children: ReactNode }) {
         // document.cookie can't see ds_csrf).
         setCsrfToken(bootstrap.csrfToken);
         setTranscodeAvailable(bootstrap.transcodeAvailable ?? false);
+        setTranscodeRetryPending(bootstrap.transcodeRetryPending === true && bootstrap.transcodeAvailable !== true);
         setDirectTorrentAvailable(bootstrap.directTorrentAvailable ?? false);
         setTranscodeCapabilities(normalizedTranscodeCapabilities(bootstrap.transcodeCapabilities));
         setOmdbProxy(bootstrap.omdbProxy ?? false);
@@ -338,6 +343,55 @@ export function ServerModeGate({ children }: { children: ReactNode }) {
       cancelled = true;
     };
   }, [baseURL, inviteToken, setupToken, attempt]);
+
+  const serverSessionReady = state.kind === "ready";
+  useEffect(() => {
+    if (!serverSessionReady || !transcodeRetryPending || baseURL == null) return;
+    let stopped = false;
+    let next: number | undefined;
+    let deadline: number | undefined;
+    let request: AbortController | undefined;
+    let attempts = 0;
+    const schedule = () => {
+      if (!stopped && attempts < 14) next = window.setTimeout(() => { void refresh(); }, 3_000);
+    };
+    const refresh = async () => {
+      attempts++;
+      const controller = new AbortController();
+      request = controller;
+      deadline = window.setTimeout(() => controller.abort(), 4_000);
+      try {
+        const bootstrap = await jsonFetch<BootstrapResponse>(baseURL, "/api/bootstrap", undefined, controller.signal);
+        if (stopped) return;
+        if (!controller.signal.aborted) {
+          if (bootstrap.transcodeAvailable === true) {
+            // Capability-only refresh. Never replace this mounted app's
+            // auth/CSRF/profile state with the result of a background request.
+            setTranscodeAvailable(true);
+            setTranscodeCapabilities(normalizedTranscodeCapabilities(bootstrap.transcodeCapabilities));
+          }
+          if (typeof bootstrap.transcodeAvailable === "boolean" &&
+              (bootstrap.transcodeAvailable || bootstrap.transcodeRetryPending !== true)) {
+            setTranscodeRetryPending(false);
+            return;
+          }
+        }
+      } catch {
+        // A transient failure here is not a sign-in failure. Leave the UI up.
+      } finally {
+        window.clearTimeout(deadline);
+        request = undefined;
+      }
+      schedule();
+    };
+    schedule();
+    return () => {
+      stopped = true;
+      window.clearTimeout(next);
+      window.clearTimeout(deadline);
+      request?.abort();
+    };
+  }, [baseURL, serverSessionReady, transcodeRetryPending]);
 
   if (state.kind === "local" || state.kind === "ready") {
     return (

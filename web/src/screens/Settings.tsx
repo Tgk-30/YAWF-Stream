@@ -76,6 +76,7 @@ import type {
 } from "../data/settings";
 import { PLAYBACK_LANGUAGE_OPTIONS } from "../lib/languagePreference";
 import { supportsStandardIosHlsMse } from "../lib/iosHlsPlayback";
+import { supportsManagedIosHlsMse } from "../lib/iosManagedHlsPlayback";
 import {
   INTERFACE_LANGUAGE_OPTIONS,
   METADATA_LANGUAGE_OPTIONS,
@@ -2326,6 +2327,8 @@ function PlaybackTab({ draft, patch }: TabProps) {
   const iosPlaybackSettings = deviceKind() === "ios";
   const compatibilityAvailable =
     iosPlaybackSettings && supportsStandardIosHlsMse();
+  const automaticWebEngineAvailable =
+    compatibilityAvailable || (iosPlaybackSettings && supportsManagedIosHlsMse());
 
   return (
     <div className="settings-fields">
@@ -2385,17 +2388,20 @@ function PlaybackTab({ draft, patch }: TabProps) {
       {iosPlaybackSettings && (
         <Field
           label="iPhone and iPad HLS playback"
-          hint={compatibilityAvailable
-            ? "Compatibility mode uses the web streaming engine. It applies to the next player you open. AirPlay requires Native mode."
+          hint={automaticWebEngineAvailable
+            ? "Automatic uses the web streaming engine for eligible Server Optimized streams. Changes apply to the next player you open. For AirPlay on those streams, choose Native mode."
             : "Compatibility mode is unavailable in this browser. New players use Native mode, which supports AirPlay."}
         >
           <select
             aria-label="iPhone and iPad HLS playback"
-            value={compatibilityAvailable ? draft.iosHlsPlaybackMode : "native"}
+            value={!compatibilityAvailable && draft.iosHlsPlaybackMode === "compatibility"
+              ? "native"
+              : draft.iosHlsPlaybackMode}
             onChange={(event) => patch({
               iosHlsPlaybackMode: event.target.value as AppSettings["iosHlsPlaybackMode"],
             })}
           >
+            <option value="automatic">Automatic (recommended)</option>
             <option value="native">Native, with AirPlay</option>
             <option value="compatibility" disabled={!compatibilityAvailable}>
               Compatibility mode

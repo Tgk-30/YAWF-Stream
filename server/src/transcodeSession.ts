@@ -15,7 +15,7 @@ import { basename, join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 import type { AppDatabase } from "./db.js";
 import type { ServerConfig } from "./types.js";
-import { TRANSCODE_SUBTITLE_PLAYLIST_PATTERN } from "./transcodeHls.js";
+import { TRANSCODE_SEGMENT_SECONDS, TRANSCODE_SUBTITLE_PLAYLIST_PATTERN } from "./transcodeHls.js";
 import type {
   Transcoder,
   TranscoderAudioTrack,
@@ -163,7 +163,13 @@ function toneMapPrefix(policy: TranscodeHdrPolicy): string {
 
 // Optimized playback trades high-frame-rate output for producer headroom. Keep
 // known lower rates intact; unknown nominal rates still need a valid fps value.
-const OPTIMIZED_FRAME_RATE_FILTER = "fps=fps='if(gt(source_fps,0),min(source_fps,30),30)'";
+const OPTIMIZED_MAX_FRAME_RATE = 30;
+const OPTIMIZED_FRAME_RATE_FILTER = `fps=fps='if(gt(source_fps,0),min(source_fps,${OPTIMIZED_MAX_FRAME_RATE}),${OPTIMIZED_MAX_FRAME_RATE})'`;
+// At 30 fps, a 144-frame GOP inserts a keyframe at 4.8 seconds. After a
+// nonzero seek with preserved subtitle timestamps, the HLS muxer can split
+// there and again 1.2 seconds later. Keep the encoder's cap at the full HLS
+// cadence; time-based keyframes still control segmenting at lower rates.
+const OPTIMIZED_MAX_GOP = String(OPTIMIZED_MAX_FRAME_RATE * TRANSCODE_SEGMENT_SECONDS);
 
 function optimizedScaleFlags(height: number): string {
   // Low-resolution optimized playback favors producer headroom. Keep higher
@@ -252,13 +258,13 @@ function buildHlsArgs(
         : []),
       ...(includeSubtitle ? ["-c:s", "webvtt"] : []),
       "-g",
-      "144",
+      OPTIMIZED_MAX_GOP,
       "-keyint_min",
-      "144",
+      OPTIMIZED_MAX_GOP,
       "-sc_threshold",
       "0",
       "-force_key_frames",
-      "expr:gte(t,n_forced*6)",
+      `expr:gte(t,n_forced*${TRANSCODE_SEGMENT_SECONDS})`,
       ...(includeSubtitle ? [] : ["-sn"]),
       "-dn",
       "-max_muxing_queue_size",
@@ -271,7 +277,7 @@ function buildHlsArgs(
       "-f",
       "hls",
       "-hls_time",
-      "6",
+      String(TRANSCODE_SEGMENT_SECONDS),
       "-hls_playlist_type",
       "event",
       "-hls_list_size",
@@ -316,13 +322,13 @@ function buildHlsArgs(
         : []),
       ...(includeSubtitle ? ["-c:s", "webvtt"] : []),
       "-g",
-      "144",
+      OPTIMIZED_MAX_GOP,
       "-keyint_min",
-      "144",
+      OPTIMIZED_MAX_GOP,
       "-sc_threshold",
       "0",
       "-force_key_frames",
-      "expr:gte(t,n_forced*6)",
+      `expr:gte(t,n_forced*${TRANSCODE_SEGMENT_SECONDS})`,
       ...(includeSubtitle ? [] : ["-sn"]),
       "-dn",
       "-max_muxing_queue_size",
@@ -334,7 +340,7 @@ function buildHlsArgs(
       "-f",
       "hls",
       "-hls_time",
-      "6",
+      String(TRANSCODE_SEGMENT_SECONDS),
       "-hls_playlist_type",
       "event",
       "-hls_list_size",

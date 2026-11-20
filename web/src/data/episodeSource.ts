@@ -1,3 +1,5 @@
+import type { MediaPreview } from "../models/media";
+
 export const EPISODE_GUIDE_VERSION = "2";
 
 export interface EpisodeSourceCoordinates {
@@ -21,6 +23,7 @@ export interface EpisodeContinuation {
   childSeasonStart: number;
   childTitle: string;
   childYear: number;
+  searchAliases: readonly string[];
 }
 
 /** Explicit, verified identity relationships only. Never infer continuations
@@ -36,8 +39,39 @@ export const EPISODE_CONTINUATIONS: readonly EpisodeContinuation[] = [
     childSeasonStart: 1,
     childTitle: "Bleach: Thousand-Year Blood War",
     childYear: 2022,
+    searchAliases: [
+      "thousand year blood war",
+      "bleach tybw",
+      "tybw",
+      "bleach sennen kessen hen",
+      "bleach 千年血戦篇",
+    ],
   },
 ];
+
+function normalizeContinuationQuery(value: string): string {
+  return value.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+export function findContinuationByTitle(query: string): EpisodeContinuation | undefined {
+  const normalized = normalizeContinuationQuery(query);
+  return EPISODE_CONTINUATIONS.find(
+    (relation) => normalized === normalizeContinuationQuery(relation.childTitle) ||
+      relation.searchAliases.includes(normalized),
+  );
+}
+
+/** Search hints can only select a registered arc on its exact parent card. */
+export function continuationForSearchPreview(
+  preview: MediaPreview | null,
+): EpisodeContinuation | undefined {
+  if (preview?.type !== "series" || preview.searchContinuationSeason == null) return undefined;
+  return EPISODE_CONTINUATIONS.find(
+    (relation) => preview.searchContinuationSeason === relation.displaySeasonStart &&
+      preview.tmdbId === relation.parentTmdbId &&
+      preview.id === `tmdb-${relation.parentTmdbId}`,
+  );
+}
 
 export function continuationForParent(
   imdbId: string,
