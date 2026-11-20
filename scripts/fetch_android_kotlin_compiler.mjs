@@ -10,11 +10,10 @@ export const KOTLIN_JAR_RELEASE_URL = "https://github.com/JetBrains/kotlin/relea
 export const KOTLIN_JAR_BYTES = 59720376;
 export const KOTLIN_JAR_SHA256 = "d3e70fb011675e77ef00f1a68918d3cd91eed26058977d1e3ea2a37a293233af";
 export const KOTLIN_JAR_SHA1 = "c4b47f8e33cdbeedd8c1415ab9f9ade870388162";
-export const KOTLIN_POM_URL = "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-compiler-embeddable/2.3.21/kotlin-compiler-embeddable-2.3.21.pom";
-export const KOTLIN_POM_MIRROR_URL = "https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-compiler-embeddable/2.3.21/kotlin-compiler-embeddable-2.3.21.pom";
 export const KOTLIN_POM_BYTES = 2451;
 export const KOTLIN_POM_SHA256 = "9523c8feadcb17f42d04ffa97fe2a9c08e5db18f090f6db903dca5c36c7ae5c4";
 const POM_NAME = "kotlin-compiler-embeddable-2.3.21.pom";
+export const KOTLIN_POM_SOURCE_PATH = fileURLToPath(new URL(`./android/pinned-kotlin/${POM_NAME}`, import.meta.url));
 const PARTS = ["org", "jetbrains", "kotlin", "kotlin-compiler-embeddable", "2.3.21"];
 const NAME = "kotlin-compiler-embeddable-2.3.21.jar";
 const exists = path => { try { return lstatSync(path); } catch (error) { if (error.code === "ENOENT") return null; throw error; } };
@@ -109,12 +108,6 @@ export function stageVerifiedKotlinCompilerPom(source, root) {
     return publish(staged, root, stage, POM_NAME, verifyKotlinCompilerPom);
   } finally { rmSync(stage, { recursive: true, force: true }); }
 }
-export function kotlinPomDownloadInvocation(output) {
-  return downloadInvocation(output, KOTLIN_POM_URL, KOTLIN_POM_BYTES);
-}
-export function kotlinPomMirrorDownloadInvocation(output) {
-  return downloadInvocation(output, KOTLIN_POM_MIRROR_URL, KOTLIN_POM_BYTES);
-}
 export function kotlinDownloadInvocation(output) {
   return downloadInvocation(output, KOTLIN_JAR_URL, KOTLIN_JAR_BYTES);
 }
@@ -163,8 +156,11 @@ function fetchArtifact(root, name, verify, invocation, fallback) {
   } finally { rmSync(stage, { recursive: true, force: true }); }
 }
 export function fetchAndroidKotlinCompiler(root) {
+  // The tiny official POM is byte-pinned in the checkout, so a repository
+  // outage cannot block an already verified compiler JAR.
+  verifyKotlinCompilerPom(KOTLIN_POM_SOURCE_PATH);
   fetchArtifact(root, NAME, verifyKotlinCompilerJar, kotlinDownloadInvocation, kotlinReleaseDownloadInvocation);
-  fetchArtifact(root, POM_NAME, verifyKotlinCompilerPom, kotlinPomDownloadInvocation, kotlinPomMirrorDownloadInvocation);
+  stageVerifiedKotlinCompilerPom(KOTLIN_POM_SOURCE_PATH, root);
   return verifyKotlinCompilerRepository(root);
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
