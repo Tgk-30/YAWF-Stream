@@ -6,7 +6,8 @@ const INTERACTIVE = "button, input, select, textarea, a[href], label, summary, [
 /**
  * WebKit can deliver an entire quick vertical swipe to the page without
  * moving a nested scrollport. Keep native panning and momentum in charge.
- * Only recover a finished, unclaimed swipe on plain settings content.
+ * Only recover a finished, unclaimed swipe on plain settings content or a
+ * tap-only fit choice. Never take over sliders, links or other controls.
  */
 export function attachQuickSettingsSwipe(body: HTMLDivElement): () => void {
   const doc = body.ownerDocument;
@@ -28,7 +29,9 @@ export function attachQuickSettingsSwipe(body: HTMLDivElement): () => void {
     reset(); // A new contact, even outside the sheet, invalidates the old swipe.
     const target = event.target;
     if (!event.isPrimary || !(target instanceof Element) || !body.contains(target) ||
-        target.closest(INTERACTIVE)) return;
+        target.closest("[inert]")) return;
+    const control = target.closest(INTERACTIVE);
+    if (control != null && !control.matches("button[data-player-fit-choice]:enabled")) return;
     const top = body.scrollTop;
     if (top < 0) return;
     gesture = { id: event.pointerId, x: event.clientX, y: event.clientY, top, at: event.timeStamp, moved: false };
