@@ -3,3 +3,4 @@ Vendor/VLCKit.xcframework/** filter=lfs diff=lfs merge=lfs -text
 
 # Preserve the checksum-bound upstream license bytes.
 /scripts/foreground-playback/LICENSE.playwright binary
+/scripts/android/pinned-kotlin/kotlin-compiler-embeddable-2.3.21.pom -text
