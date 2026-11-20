@@ -10263,6 +10263,80 @@ describe("WebviewPlayer", () => {
     } finally { restoreOrientation(); fullscreen.restore(); }
   });
 
+  it("issues one system fullscreen transition when button and keyboard overlap", async () => {
+    const fullscreen = mockPlayerFullscreen();
+    const enter = deferred<void>();
+    const leave = deferred<void>();
+    fullscreen.request.mockReturnValue(enter.promise);
+    fullscreen.exit.mockReturnValue(leave.promise);
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="System fullscreen" onClose={() => {}} />);
+      const pane = screen.getByRole("dialog", { name: "Playing System fullscreen" });
+      const video = pane.querySelector("video")!;
+      await waitFor(() => expect(video.src).toBe("https://x/test.mp4"));
+      video.currentTime = 42;
+      const open = screen.getByRole("button", { name: "Enter fullscreen" });
+      fireEvent.click(open);
+      fireEvent.keyDown(window, { key: "f" });
+      fireEvent.click(open);
+      expect(fullscreen.request).toHaveBeenCalledTimes(1);
+
+      Object.defineProperty(document, "fullscreenElement", { configurable: true, value: pane });
+      fireEvent(document, new Event("fullscreenchange"));
+      fireEvent.keyDown(window, { key: "f", repeat: true });
+      expect(fullscreen.exit).not.toHaveBeenCalled();
+      const close = screen.getByRole("button", { name: "Exit fullscreen" });
+      fireEvent.click(close);
+      await act(async () => { enter.reject(new Error("Late native rejection")); });
+      fireEvent.click(close);
+      expect(fullscreen.exit).toHaveBeenCalledTimes(1);
+
+      await act(async () => { leave.reject(new Error("Denied")); });
+      fireEvent.click(close);
+      expect(fullscreen.exit).toHaveBeenCalledTimes(2);
+      expect(pane.querySelector("video")).toBe(video);
+      expect(video.currentTime).toBe(42);
+    } finally { fullscreen.restore(); }
+  });
+
+  it("allows a later WebKit system fullscreen retry without reopening on rapid taps", () => {
+    deviceKindMock.mockReturnValue("ios");
+    const now = vi.spyOn(performance, "now").mockReturnValue(100);
+    const enter = vi.fn();
+    const exit = vi.fn();
+    const restores = [
+      replaceProperty(HTMLElement.prototype, "requestFullscreen", undefined),
+      replaceProperty(HTMLElement.prototype, "webkitRequestFullscreen", undefined),
+      replaceProperty(HTMLVideoElement.prototype, "webkitSupportsFullscreen", true),
+      replaceProperty(HTMLVideoElement.prototype, "webkitEnterFullscreen", enter),
+      replaceProperty(HTMLVideoElement.prototype, "webkitExitFullscreen", exit),
+    ];
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="WebKit system fullscreen" onClose={() => {}} />);
+      const video = document.querySelector("video")!;
+      const open = screen.getByRole("button", { name: "Enter system fullscreen" });
+      fireEvent.click(open);
+      fireEvent.click(open);
+      expect(enter).toHaveBeenCalledTimes(1);
+      // Legacy WebKit methods return void and can refuse without reporting it.
+      now.mockReturnValue(3_100);
+      fireEvent.click(open);
+      expect(enter).toHaveBeenCalledTimes(2);
+      const restoreDisplaying = replaceProperty(video, "webkitDisplayingFullscreen", true);
+      try {
+        fireEvent(video, new Event("webkitbeginfullscreen"));
+        const close = screen.getByRole("button", { name: "Exit system fullscreen" });
+        fireEvent.click(close);
+        fireEvent.click(close);
+        expect(exit).toHaveBeenCalledTimes(1);
+        expect(enter).toHaveBeenCalledTimes(2);
+      } finally { restoreDisplaying(); }
+    } finally {
+      now.mockRestore();
+      restores.reverse().forEach((restore) => restore());
+    }
+  });
+
   it.each(["installed iPad", "Android app"] as const)("fills the inline video without changing modes on %s", async (platform) => {
     deviceKindMock.mockReturnValue(platform === "installed iPad" ? "ios" : "android");
     const restorePlatform = platform === "installed iPad"
