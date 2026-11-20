@@ -64,7 +64,7 @@ import {
   type IosHlsSourceMode,
 } from "../lib/iosHlsPlayback";
 import { supportsManagedIosHlsMse } from "../lib/iosManagedHlsPlayback";
-import { containerFullscreenExit, containerFullscreenRequest, ipadSafariPageUrl } from "../lib/playerFullscreen";
+import { containerFullscreenRequest, ipadSafariPageUrl, observePlayerFullscreen, togglePlayerFullscreen as toggleSystemFullscreen } from "../lib/playerFullscreen";
 import {
   isAndroidAppUiContext,
   isAndroidExternalPlayerEligible,
@@ -612,43 +612,6 @@ function VideoFitOptions({ presentation }: { presentation: VideoPresentationStor
       </div>
     </div>
   );
-}
-
-/** Prefer complete-player fullscreen; keep genuine video-only WebKit fallback. */
-function toggleFullscreen(el: HTMLElement, video?: HTMLVideoElement): void {
-  const d = document as WebKitDocument;
-  const active = document.fullscreenElement ?? d.webkitFullscreenElement ?? null;
-  if (active != null) {
-    try {
-      const exit = containerFullscreenExit(d)?.();
-      if (exit != null) void exit.catch(() => {});
-    } catch {
-      // Browser rejected the gesture or exposes a partial fullscreen API.
-    }
-    return;
-  }
-  const request = containerFullscreenRequest(el);
-  if (request != null) {
-    try {
-      const result = request();
-      if (result != null) void result.catch(() => {});
-    } catch {
-      // Do not switch APIs after a rejected request or leave this user gesture.
-    }
-    return;
-  }
-  const webkitVideo = video as WebKitVideoElement | undefined;
-  if (
-    webkitVideo?.webkitSupportsFullscreen === true &&
-    typeof webkitVideo.webkitEnterFullscreen === "function"
-  ) {
-    // Must remain in this gesture-triggered path: iPhone rejects delayed calls.
-    try {
-      webkitVideo.webkitEnterFullscreen();
-    } catch {
-      // WebKit can reject this when the media is not ready for native fullscreen.
-    }
-  }
 }
 
 /** True when a keystroke should be left to the focused control: a text field, or
@@ -5617,11 +5580,18 @@ function WebviewPlayer({
     };
     const syncFullscreenState = () => {
       const doc = document as WebKitDocument;
-      const fullscreenElement = document.fullscreenElement ?? doc.webkitFullscreenElement;
+      const fullscreenElement = document.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
+      observePlayerFullscreen(container, fullscreenElement);
       setFullscreenState(fullscreenElement === container || fullscreenElement === video);
     };
-    const onWebKitBeginFullscreen = () => setFullscreenState(true);
-    const onWebKitEndFullscreen = () => setFullscreenState(false);
+    const onWebKitBeginFullscreen = () => {
+      observePlayerFullscreen(container, video);
+      setFullscreenState(true);
+    };
+    const onWebKitEndFullscreen = () => {
+      observePlayerFullscreen(container, null);
+      setFullscreenState(false);
+    };
 
     document.addEventListener("fullscreenchange", syncFullscreenState);
     document.addEventListener("webkitfullscreenchange", syncFullscreenState);
@@ -7736,7 +7706,7 @@ function WebviewPlayer({
     const video = videoRef.current;
     if (video == null) return;
     const container = playerFullscreenContainer(video);
-    if (container != null) toggleFullscreen(container, video);
+    if (container != null) toggleSystemFullscreen(container, video);
   };
 
   const enterFullscreenFromSettings = () => {
@@ -7929,8 +7899,9 @@ function WebviewPlayer({
         case "f":
         case "F": {
           e.preventDefault();
+          if (e.repeat) break;
           const container = playerFullscreenContainer(video);
-          if (container != null) toggleFullscreen(container, video);
+          if (container != null) toggleSystemFullscreen(container, video);
           break;
         }
         case "Home":
