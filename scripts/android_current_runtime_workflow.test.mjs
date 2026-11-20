@@ -65,9 +65,9 @@ test("is manual branch-only read-only supplementary coverage", () => {
 });
 
 test("pins one exact signed candidate without changing the public channel", () => {
-  assert.match(workflow, /CANDIDATE_RUN_ID: "44788719546"/);
-  assert.match(workflow, /CANDIDATE_SOURCE_SHA: 1682df46286ecbc6c9c74eb881769ad2aae3a90c/);
-  assert.match(workflow, /CANDIDATE_APK_SHA256: e77522f759e8051fb20d4bddfb20a1ac3d2755a8ac1caf97ef87db531c95bfcf/);
+  assert.match(workflow, /CANDIDATE_RUN_ID: "44803824188"/);
+  assert.match(workflow, /CANDIDATE_SOURCE_SHA: 524ddeafbf33f54d20f4af35e4da125b3977d84c/);
+  assert.match(workflow, /CANDIDATE_APK_SHA256: 88d3277d1acb771e9c1663a7345ddcaba1cf1c7d630c901a9867a96ce6d0d6e8/);
   assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.116/);
   assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003116"/);
   assert.match(workflow, /PUBLISHED_ANDROID_VERSION: 2\.3\.105/);
