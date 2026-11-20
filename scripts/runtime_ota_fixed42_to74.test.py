@@ -270,5 +270,146 @@ class Fixed42To74ActualHelperTests(unittest.TestCase):
                 receipts.append({'mutant':name,'killed':True,'exit':result.returncode})
         print(json.dumps({'actualAdmissionCases':24,'actualCancellationCases':12,'individualMutants':receipts}))
 
+BOUNDS_HARNESS = r'''
+import java.util.*;
+public final class Fixed42RoundedBoundsHarness {
+    static final String PRODUCT="com.tgk30.debridstreamer";
+    static final String FIXED42_TO74_AUTOMATIC_OTA_PROFILE="public-fixed42-to74-initial-cancel-due-resume-v1";
+    String otaMode=FIXED42_TO74_AUTOMATIC_OTA_PROFILE;
+    static final class OtaFlowPolicy { static final String PRODUCT_PACKAGE=PRODUCT; }
+    static void assertTrue(String m,boolean b){if(!b)throw new AssertionError(m);}
+    static final class Rect {
+        int left,top,right,bottom;
+        Rect(){}
+        Rect(int l,int t,int r,int b){left=l;top=t;right=r;bottom=b;}
+        boolean contains(Rect r){return left<=r.left&&top<=r.top&&right>=r.right&&bottom>=r.bottom;}
+        public boolean equals(Object o){if(!(o instanceof Rect))return false;Rect r=(Rect)o;return left==r.left&&top==r.top&&right==r.right&&bottom==r.bottom;}
+    }
+    static final class AccessibilityNodeInfo {
+        String pkg=PRODUCT,clazz="android.view.View",resource="",text="",description="";
+        boolean visible=true,scrollable=false,clickable=false,enabled=true;
+        Rect bounds=new Rect(0,0,1080,1920);
+        CharSequence getText(){return text;}
+        CharSequence getContentDescription(){return description;}
+        CharSequence getPackageName(){return pkg;}
+        CharSequence getClassName(){return clazz;}
+        String getViewIdResourceName(){return resource;}
+        boolean isVisibleToUser(){return visible;}
+        boolean isScrollable(){return scrollable;}
+        boolean isClickable(){return clickable;}
+        boolean isEnabled(){return enabled;}
+        void getBoundsInScreen(Rect out){out.left=bounds.left;out.top=bounds.top;out.right=bounds.right;out.bottom=bounds.bottom;}
+    }
+    // AX_NODE
+    // METHODS
+    public static void main(String[] args){
+        String test=args[0];Fixed42RoundedBoundsHarness h=new Fixed42RoundedBoundsHarness();
+        List<AccessibilityNodeInfo> info=new ArrayList<>();
+        for(int i=0;i<5;i++)info.add(new AccessibilityNodeInfo());
+        info.get(0).clazz="android.widget.FrameLayout";
+        info.get(1).clazz="android.webkit.WebView";info.get(2).clazz="android.webkit.WebView";
+        info.get(2).text="Discover | YAWF Stream";
+        info.get(4).resource="main-content";info.get(4).scrollable=true;
+        info.get(4).bounds=new Rect(0,0,1082,1922);
+        int[] parent={-1,0,1,2,3};int mainIndex=4;float density=2.625f;
+        switch(test){
+            case "observed":break;
+            case "onePhysicalPixel":info.get(4).bounds=new Rect(0,0,1081,1921);break;
+            case "exact":info.get(4).bounds=new Rect(0,0,1080,1920);break;
+            case "wrongOwner":info.get(2).pkg="wrong.owner";break;
+            case "wrongRootOwner":info.get(0).pkg="wrong.owner";break;
+            case "wrongOwnerClass":info.get(2).clazz="android.view.View";break;
+            case "cropped":info.get(2).bounds.right=1079;break;
+            case "croppedAncestor":info.get(3).bounds.bottom=1919;break;
+            case "translated":info.get(4).bounds.left=1;break;
+            case "translatedTop":info.get(4).bounds.top=1;break;
+            case "negativeOrigin":info.get(4).bounds.left=-1;break;
+            case "underfill":info.get(4).bounds.right=1079;break;
+            case "underfillBottom":info.get(4).bounds.bottom=1919;break;
+            case "overhang":info.get(4).bounds.right=1083;break;
+            case "bottomOverhang":info.get(4).bounds.bottom=1923;break;
+            case "ownerOverhang":info.get(2).bounds.right=1082;break;
+            case "ancestorOverhang":info.get(3).bounds.right=1200;break;
+            case "duplicateOwner":info.add(new AccessibilityNodeInfo());info.get(5).clazz="android.webkit.WebView";break;
+            case "duplicateMain":info.add(new AccessibilityNodeInfo());info.get(5).resource="main-content";break;
+            case "notAnAncestor":parent[4]=0;break;
+            case "cycle":parent[3]=4;break;
+            case "negativeParent":parent[0]=-2;break;
+            case "wrongIndex":mainIndex=3;break;
+            case "wrongMainPackage":info.get(4).pkg="wrong.owner";break;
+            case "wrongMainClass":info.get(4).clazz="android.widget.TextView";break;
+            case "invisible":info.get(4).visible=false;break;
+            case "notScrollable":info.get(4).scrollable=false;break;
+            case "clickable":info.get(4).clickable=true;break;
+            case "disabled":info.get(4).enabled=false;break;
+            case "hiddenOwner":info.get(2).visible=false;break;
+            case "disabledOwner":info.get(2).enabled=false;break;
+            case "old61":h.otaMode="public-fixed42-to61-initial-cancel-due-resume-v1";break;
+            case "old59":h.otaMode="public-fixed42-to59-initial-cancel-due-resume-v1";break;
+            case "old27":h.otaMode="automatic-initial-cancel-due-resume";break;
+            case "densityOne":density=1.0f;break;
+            case "densityNaN":density=Float.NaN;break;
+            case "densityHuge":density=1000f;break;
+            default:throw new AssertionError(test);
+        }
+        List<Fixed42AxNode> nodes=new ArrayList<>();
+        for(int i=0;i<info.size();i++)nodes.add(new Fixed42AxNode(info.get(i),i<parent.length?parent[i]:0));
+        boolean admitted=false;
+        try{admitted=h.fixed42To74RoundedMainBoundsMatch(nodes,mainIndex,1080,1920,density);}catch(AssertionError rejected){}
+        boolean expected=Arrays.asList("observed","onePhysicalPixel","exact").contains(test);
+        assertTrue("Rounded bounds admission mismatch: "+test,admitted==expected);
+    }
+}
+'''
+
+
+def compile_bounds_helper(source: str, destination: Path) -> Path:
+    names=('fixed42To74RoundedMainBoundsMatch','isFixed42To74AutomaticMode','fixed42UniqueResource','fixed42SemanticEquals','fixed42NodeString')
+    code=BOUNDS_HARNESS.replace('// AX_NODE',nested_class(source,'Fixed42AxNode')).replace('// METHODS','\n'.join(TOOLS.extract_method(source,n) for n in names))
+    destination.mkdir();path=destination/'Fixed42RoundedBoundsHarness.java';path.write_text(code)
+    p=subprocess.run([TOOLS.java_tool('javac'),'-d',str(destination),str(path)],capture_output=True,text=True,timeout=30)
+    if p.returncode:raise AssertionError(p.stderr[-4000:])
+    return destination
+
+
+def run_bounds_case(classes: Path, scenario: str):
+    return subprocess.run([TOOLS.java_tool('java'),'-cp',str(classes),'Fixed42RoundedBoundsHarness',scenario],capture_output=True,text=True,timeout=10)
+
+
+class RoundedMainBoundsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temp=tempfile.TemporaryDirectory(prefix='yawf74-rounded-bounds-');cls.root=Path(cls.temp.name);cls.source=SOURCE.read_text()
+        cls.classes=compile_bounds_helper(cls.source,cls.root/'baseline')
+    @classmethod
+    def tearDownClass(cls):cls.temp.cleanup()
+    def test_actual_raw_bounds_and_ownership_admission(self):
+        cases=('observed','onePhysicalPixel','exact','wrongOwner','wrongRootOwner','wrongOwnerClass','cropped','croppedAncestor','translated','translatedTop','negativeOrigin','underfill','underfillBottom','overhang','bottomOverhang','ownerOverhang','ancestorOverhang','duplicateOwner','duplicateMain','notAnAncestor','cycle','negativeParent','wrongIndex','wrongMainPackage','wrongMainClass','invisible','notScrollable','clickable','disabled','hiddenOwner','disabledOwner','old61','old59','old27','densityOne','densityNaN','densityHuge')
+        for scenario in cases:
+            with self.subTest(scenario=scenario):
+                p=run_bounds_case(self.classes,scenario);self.assertEqual(p.returncode,0,p.stdout+p.stderr)
+    def test_rounding_is_additive_new74_only_at_the_real_snapshot_callsite(self):
+        observer=TOOLS.extract_method(self.source,'observeFixed42SeedSnapshot')
+        self.assertIn('boolean boundsMatch = main.bounds.equals(expectedMainBounds);',observer)
+        self.assertRegex(observer,r'if \(!boundsMatch && isFixed42To74AutomaticMode\(\)\) \{\s*float density = instrumentation.getTargetContext\(\)\s*\.getResources\(\).getDisplayMetrics\(\).density;\s*boundsMatch = fixed42To74RoundedMainBoundsMatch\(')
+        self.assertIn('mainIdentityMatches && boundsMatch',observer)
+    def test_individual_bounds_causal_controls(self):
+        helper=TOOLS.extract_method(self.source,'fixed42To74RoundedMainBoundsMatch')
+        mutants=(
+            ('strictOriginal','observed','return totalWebViews == owningWebViews;','return main.bounds.equals(display);'),
+            ('profileFence','old61','!isFixed42To74AutomaticMode() || width <= 0','false || width <= 0'),
+            ('origin','translated','main.bounds.left != 0 || main.bounds.top != 0','false'),
+            ('overhang','overhang','(long) main.bounds.right - width > maximumOutwardPixels','false'),
+            ('ownerPackage','wrongRootOwner','!product.equals(ancestor.packageName)','false'),
+            ('webviewBounds','ownerOverhang','!display.equals(ancestor.bounds)','false'),
+            ('uniqueOwner','duplicateOwner','return totalWebViews == owningWebViews;','return true;'),
+        )
+        for name,scenario,before,after in mutants:
+            with self.subTest(mutant=name):
+                self.assertEqual(helper.count(before),1)
+                changed=self.source.replace(helper,helper.replace(before,after,1),1)
+                classes=compile_bounds_helper(changed,self.root/name);p=run_bounds_case(classes,scenario)
+                self.assertNotEqual(p.returncode,0,'Survived '+name)
+
 
 if __name__=='__main__':unittest.main(verbosity=2)

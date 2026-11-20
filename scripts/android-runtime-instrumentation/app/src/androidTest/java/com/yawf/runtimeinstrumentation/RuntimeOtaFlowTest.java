@@ -1305,6 +1305,12 @@ public final class RuntimeOtaFlowTest {
             boolean enabled = main.enabled;
             Rect expectedMainBounds = new Rect(0, 0, width, height);
             boolean boundsMatch = main.bounds.equals(expectedMainBounds);
+            if (!boundsMatch && isFixed42To74AutomaticMode()) {
+                float density = instrumentation.getTargetContext()
+                        .getResources().getDisplayMetrics().density;
+                boundsMatch = fixed42To74RoundedMainBoundsMatch(
+                        nodes, mainIndex, width, height, density);
+            }
             boolean mainIdentityMatches = packageMatch
                     && classMatch
                     && visible
@@ -1558,6 +1564,49 @@ public final class RuntimeOtaFlowTest {
             }
         }
         return candidates;
+    }
+
+    private boolean fixed42To74RoundedMainBoundsMatch(
+            List<Fixed42AxNode> nodes, int mainIndex, int width, int height, float density) {
+        if (!isFixed42To74AutomaticMode() || width <= 0 || height <= 0
+                || !(density > 0.0f && density <= 4.0f)
+                || mainIndex < 0 || mainIndex >= nodes.size()) return false;
+        if (fixed42UniqueResource(nodes, "main-content") != mainIndex) return false;
+        String product = OtaFlowPolicy.PRODUCT_PACKAGE;
+        Fixed42AxNode main = nodes.get(mainIndex);
+        if (!main.matches(product, "android.view.View", true, false)) return false;
+        // Raw WebView AX bounds can round outward; hierarchy XML already clips them.
+        int maximumOutwardPixels = (int) Math.floor(density);
+        if (main.bounds.left != 0 || main.bounds.top != 0
+                || main.bounds.right < width || main.bounds.bottom < height
+                || (long) main.bounds.right - width > maximumOutwardPixels
+                || (long) main.bounds.bottom - height > maximumOutwardPixels) return false;
+
+        Rect display = new Rect(0, 0, width, height);
+        int cursor = main.parentIndex;
+        int owningWebViews = 0;
+        int depth = 0;
+        while (cursor >= 0 && depth++ < nodes.size()) {
+            if (cursor >= nodes.size()) return false;
+            Fixed42AxNode ancestor = nodes.get(cursor);
+            if (!product.equals(ancestor.packageName) || !ancestor.visible || !ancestor.enabled
+                    || !ancestor.bounds.contains(display)
+                    || ancestor.bounds.left != 0 || ancestor.bounds.top != 0
+                    || (long) ancestor.bounds.right - width > maximumOutwardPixels
+                    || (long) ancestor.bounds.bottom - height > maximumOutwardPixels) return false;
+            if ("android.webkit.WebView".equals(ancestor.className)) {
+                if (!ancestor.matches(product, "android.webkit.WebView", false, false)
+                        || !display.equals(ancestor.bounds)) return false;
+                owningWebViews++;
+            }
+            cursor = ancestor.parentIndex;
+        }
+        if (cursor != -1 || owningWebViews != 2) return false;
+        int totalWebViews = 0;
+        for (Fixed42AxNode node : nodes) {
+            if ("android.webkit.WebView".equals(node.className)) totalWebViews++;
+        }
+        return totalWebViews == owningWebViews;
     }
 
     private static int fixed42UniqueResource(List<Fixed42AxNode> nodes, String resourceName) {
