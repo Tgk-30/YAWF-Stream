@@ -10475,6 +10475,45 @@ describe("WebviewPlayer", () => {
     } finally { restorePlatform(); }
   });
 
+  it("updates display adjustments without rerendering the playback controller or scrubber", async () => {
+    deviceKindMock.mockReturnValue("ios");
+    const restorePlatform = replaceProperty(navigator, "standalone", true);
+    const defaultQuality = vi.fn(() => undefined);
+    const onProgress = vi.fn();
+    try {
+      render(<VideoPlayer url="https://x/test.mp4" title="Quick adjustments" onClose={() => {}} onProgress={onProgress}
+        serverOptimized={{
+          qualities: [],
+          get defaultQuality() { return defaultQuality(); },
+          request: vi.fn(async () => { throw new Error("No quality change expected"); }),
+        }} />);
+      const video = document.querySelector("video")!;
+      await waitFor(() => expect(video.src).toBe("https://x/test.mp4"));
+      fireEvent.click(screen.getByRole("button", { name: "Playback settings" }));
+      const settings = within(screen.getByRole("dialog", { name: "Playback settings" }));
+      expect(defaultQuality).toHaveBeenCalled();
+      defaultQuality.mockClear();
+      scrubBarMock.mockClear();
+
+      for (const value of ["1.25", "1.5", "1.75"]) {
+        fireEvent.change(settings.getByRole("slider", { name: /^Zoom/ }), { target: { value } });
+        expect(video.style.transform).toBe(`translate(0%, 0%) scale(${value})`);
+      }
+      fireEvent.change(settings.getByRole("slider", { name: /Pan horizontally/ }), { target: { value: "12" } });
+      fireEvent.change(settings.getByRole("slider", { name: /Pan vertically/ }), { target: { value: "-8" } });
+      fireEvent.change(settings.getByRole("slider", { name: /Subtitle position/ }), { target: { value: "78" } });
+      expect(settings.getByRole("slider", { name: /Subtitle position/ })).toHaveValue("78");
+      expect(video.style.transform).toBe("translate(12%, -8%) scale(1.75)");
+      expect(document.querySelector("video")).toBe(video);
+      expect(defaultQuality).not.toHaveBeenCalled();
+      expect(scrubBarMock).not.toHaveBeenCalled();
+      Object.defineProperty(video, "readyState", { configurable: true, value: 4 });
+      video.currentTime = 23;
+      fireEvent.timeUpdate(video);
+      expect(onProgress).toHaveBeenLastCalledWith(23, null, expect.objectContaining({ subtitlePosition: 78 }));
+    } finally { restorePlatform(); }
+  });
+
   it("applies all three fit choices from touch browser chrome and keeps settings in sync", () => {
     deviceKindMock.mockReturnValue("ios");
     const standalone = replaceProperty(navigator, "standalone", false);
