@@ -51,25 +51,28 @@ final class MacOTARuntimeTests: XCTestCase {
             "GITHUB_ACTIONS": environment["GITHUB_ACTIONS"] == "true",
             "RUNNER_ENVIRONMENT": environment["RUNNER_ENVIRONMENT"] == "github-hosted",
             "RUNNER_OS": environment["RUNNER_OS"] == "macOS",
-            "RUNNER_ARCH": environment["RUNNER_ARCH"] == "ARM64",
+            "RUNNER_ARCH": environment["RUNNER_ARCH"] == "X64",
             "RUNNER_TEMP": environment["RUNNER_TEMP"] == "/Users/runner/work/_temp",
         ]
         let failedEnvironmentChecks = environmentChecks.filter { !$0.value }.map { "\($0.key)=false" }.sorted()
         guard failedEnvironmentChecks.isEmpty else {
             return "GitHub-hosted runner environment admission failed: \(failedEnvironmentChecks.joined(separator: ", "))."
         }
-#if os(macOS) && arch(arm64)
+#if os(macOS) && arch(x86_64)
         let version = ProcessInfo.processInfo.operatingSystemVersion
         guard version.majorVersion == 15, kernelRelease()?.hasPrefix("24.") == true else {
             return "Actual macOS 15 and Darwin 24 are required."
         }
-        var arm64 = Int32(0)
-        var arm64Size = MemoryLayout.size(ofValue: arm64)
-        let arm64Status = "hw.optional.arm64".withCString {
-            sysctlbyname($0, &arm64, &arm64Size, nil, 0)
+        var vendor = [CChar](repeating: 0, count: 64)
+        var vendorSize = vendor.count
+        let vendorStatus = vendor.withUnsafeMutableBytes { bytes in
+            "machdep.cpu.vendor".withCString {
+                sysctlbyname($0, bytes.baseAddress, &vendorSize, nil, 0)
+            }
         }
-        guard arm64Status == 0, arm64 == 1 else {
-            return "Actual Apple arm64 hardware is required."
+        let vendorName = String(decoding: vendor.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        guard vendorStatus == 0, vendorSize > 0, vendorSize <= vendor.count, vendorName == "GenuineIntel" else {
+            return "Actual Intel hardware is required; this test must not run in translation."
         }
         let uid = getuid()
         guard uid == geteuid(), let account = getpwuid(uid) else {
@@ -83,7 +86,7 @@ final class MacOTARuntimeTests: XCTestCase {
         }
         return nil
 #else
-        return "The UI test binary must execute as macOS arm64."
+        return "The UI test binary must execute as native macOS x86_64."
 #endif
     }
 

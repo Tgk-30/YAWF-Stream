@@ -1,4 +1,4 @@
-name: macOS public 96 to 103 updater lifecycle
+name: macOS Intel public 96 to 103 updater lifecycle
 
 on:
   workflow_dispatch:
@@ -7,13 +7,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: macos-public-ota103
+  group: macos-intel-public-ota103
   cancel-in-progress: false
 
 jobs:
   native-ota:
-    name: Public signed arm64 macOS updater lifecycle
-    runs-on: macos-15
+    if: github.repository == 'Tgk-30/YAWF-Stream' && github.actor == 'Tgk-30' && github.ref == 'refs/heads/codex/mac103-intel-certificate-proof'
+    name: Public signed Intel macOS updater lifecycle
+    runs-on: macos-15-intel
     timeout-minutes: 30
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
@@ -28,10 +29,11 @@ jobs:
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$RUNNER_OS" = macOS
-          test "$RUNNER_ARCH" = ARM64
+          test "$RUNNER_ARCH" = X64
           test "$HOME" = /Users/runner
           test "$RUNNER_TEMP" = /Users/runner/work/_temp
-          test "$(uname -m)" = arm64
+          test "$(uname -m)" = x86_64
+          test "$(sysctl -n machdep.cpu.vendor)" = GenuineIntel
           test -d "$DEVELOPER_DIR"
           mkdir -p "$RUNNER_TEMP/downloads" "$RUNNER_TEMP/reference103"
           sw_vers
@@ -45,22 +47,22 @@ jobs:
         run: |
           set -euo pipefail
           curl --fail --location --retry 2 --max-time 180 \
-            https://github.com/Tgk-30/YAWF-Stream/releases/download/v2.3.96-web/YAWF.Stream_aarch64.app.tar.gz \
-            --output "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.96_aarch64.app.tar.gz"
+            https://github.com/Tgk-30/YAWF-Stream/releases/download/v2.3.96-web/YAWF.Stream_x64.app.tar.gz \
+            --output "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.96_x64.app.tar.gz"
           curl --fail --location --retry 2 --max-time 180 \
-            https://github.com/Tgk-30/YAWF-Stream/releases/download/v2.3.103-web/YAWF.Stream_aarch64.app.tar.gz \
-            --output "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.103_aarch64.app.tar.gz"
+            https://github.com/Tgk-30/YAWF-Stream/releases/download/v2.3.103-web/YAWF.Stream_x64.app.tar.gz \
+            --output "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.103_x64.app.tar.gz"
           cd "$RUNNER_TEMP/downloads"
           printf '%s\n' \
-            '32d1b9041c0ddc5ef9201edc9420028bb764be5aa6046071164d6b646ca89901  YAWF.Stream_2.3.96_aarch64.app.tar.gz' \
-            '14b2d959277782f7defb3d934e7dc9e4f82b6b60fbe6951ca9625c840b5c9ec2  YAWF.Stream_2.3.103_aarch64.app.tar.gz' \
+            'd2a55e1102bb2b48246acdb2afcbf020286725b8435856ba6dcc5e410ca82231  YAWF.Stream_2.3.96_x64.app.tar.gz' \
+            'edf7296b3566d5ad5920d6b7934e0368aabfe8229660c11e729b7b102e322a35  YAWF.Stream_2.3.103_x64.app.tar.gz' \
             | shasum --algorithm 256 --check
-          test "$(stat -f %z YAWF.Stream_2.3.96_aarch64.app.tar.gz)" = 95584873
-          test "$(stat -f %z YAWF.Stream_2.3.103_aarch64.app.tar.gz)" = 95577725
-          gh attestation verify YAWF.Stream_2.3.96_aarch64.app.tar.gz \
+          test "$(stat -f %z YAWF.Stream_2.3.96_x64.app.tar.gz)" = 100517568
+          test "$(stat -f %z YAWF.Stream_2.3.103_x64.app.tar.gz)" = 100514951
+          gh attestation verify YAWF.Stream_2.3.96_x64.app.tar.gz \
             --repo Tgk-30/YAWF-Stream --format json > "$RUNNER_TEMP/downloads/attestation96.json"
           gh --version
-          gh attestation verify YAWF.Stream_2.3.103_aarch64.app.tar.gz \
+          gh attestation verify YAWF.Stream_2.3.103_x64.app.tar.gz \
             --repo Tgk-30/YAWF-Stream \
             --signer-workflow Tgk-30/YAWF-Stream/.github/workflows/web-release.yml \
             --signer-digest 6463c35757b69a4143386497c755648259d25e7f \
@@ -69,9 +71,9 @@ jobs:
             --source-ref refs/tags/v2.3.103-web \
             --format json > "$RUNNER_TEMP/downloads/attestation103.json"
           node "$GITHUB_WORKSPACE/scripts/mac-ota-runtime/controller.mjs" verify-target \
-            --targetArchive "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.103_aarch64.app.tar.gz" \
+            --targetArchive "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.103_x64.app.tar.gz" \
             --targetAttestation "$RUNNER_TEMP/downloads/attestation103.json"
-          tar -xzf YAWF.Stream_2.3.103_aarch64.app.tar.gz -C "$RUNNER_TEMP/reference103"
+          tar -xzf YAWF.Stream_2.3.103_x64.app.tar.gz -C "$RUNNER_TEMP/reference103"
           codesign --verify --deep --strict --verbose=2 "$RUNNER_TEMP/reference103/YAWF Stream.app"
           spctl -a -vv -t exec "$RUNNER_TEMP/reference103/YAWF Stream.app"
 
@@ -80,7 +82,7 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/mac-ota-runtime/controller.mjs prepare \
-            --archive96 "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.96_aarch64.app.tar.gz" \
+            --archive96 "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.96_x64.app.tar.gz" \
             --runRoot "$RUNNER_TEMP/mac-ota103"
 
       - name: Build only the independent UI test runner
@@ -92,7 +94,7 @@ jobs:
             -scheme MacOTARuntime \
             -configuration Release \
             -derivedDataPath "$RUNNER_TEMP/mac-ota-derived" \
-            -destination 'platform=macOS,arch=arm64'
+            -destination 'platform=macOS,arch=x86_64'
 
       - name: Exercise ordinary public updater and verify persisted state
         shell: bash
@@ -104,7 +106,7 @@ jobs:
           node scripts/mac-ota-runtime/controller.mjs execute \
             --runRoot "$RUNNER_TEMP/mac-ota103" \
             --xctestrun "$xctestrun" \
-            --targetArchive "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.103_aarch64.app.tar.gz" \
+            --targetArchive "$RUNNER_TEMP/downloads/YAWF.Stream_2.3.103_x64.app.tar.gz" \
             --targetAttestation "$RUNNER_TEMP/downloads/attestation103.json" \
             --expected103App "$RUNNER_TEMP/reference103/YAWF Stream.app"
 
@@ -112,7 +114,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: macos-public96-to103-native-ota-${{ github.run_id }}-${{ github.run_attempt }}
+          name: macos-intel-public96-to103-native-ota-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: warn
           retention-days: 14
           path: |

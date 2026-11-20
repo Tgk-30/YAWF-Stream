@@ -1,5 +1,11 @@
 # macOS public updater lifecycle qualification
 
+> **Intel follow-up branch:** This branch runs only on a fresh GitHub-hosted
+> `macos-15-intel` runner. It uses the exact public x64 archives for 2.3.96
+> and 2.3.103, binds the target attestation, and checks the downloaded executable
+> and actual Intel CPU identity. The notes below record the historical Apple
+> Silicon lane. That result is not Intel runtime evidence.
+
 This is a narrow, destructive XCUITest for a disposable GitHub-hosted `macos-15` arm64 runner. It launches an exact private copy of the signed public 2.3.96 app, uses only its visible UI and embedded public updater feed, installs 2.3.103, observes the updater-owned relaunch at the same private path, verifies ordinary user state survived, then quits through Command-Q.
 
 Never execute the UI test on a real user's login or on a self-hosted runner. Local use is limited to host unit tests, project parsing, and `build-for-testing`. The controller and XCTest independently require the GitHub markers plus actual Darwin arm64, macOS 15, Darwin 24, the `runner` account returned by the operating system, its physical `/Users/runner` home, and the fixed physical `$RUNNER_TEMP`. Environment variables alone cannot admit execution. XCTest may replace its sandboxed `HOME`, so Swift verifies the current account with `getpwuid(getuid())` and does not trust or require the `HOME` environment value.

@@ -9,16 +9,16 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 export const BASELINE = Object.freeze({
-  archiveSha256: "32d1b9041c0ddc5ef9201edc9420028bb764be5aa6046071164d6b646ca89901",
-  archiveSize: 95584873,
+  archiveSha256: "d2a55e1102bb2b48246acdb2afcbf020286725b8435856ba6dcc5e410ca82231",
+  archiveSize: 100517568,
   bundleIdentifier: "com.tgk30.debridstreamer",
   version: "2.3.96",
   targetVersion: "2.3.103",
 });
 export const TARGET = Object.freeze({
-  archiveSha256: "14b2d959277782f7defb3d934e7dc9e4f82b6b60fbe6951ca9625c840b5c9ec2",
-  archiveSize: 95577725,
-  subjectName: "YAWF.Stream_aarch64.app.tar.gz",
+  archiveSha256: "edf7296b3566d5ad5920d6b7934e0368aabfe8229660c11e729b7b102e322a35",
+  archiveSize: 100514951,
+  subjectName: "YAWF.Stream_x64.app.tar.gz",
   source: "6463c35757b69a4143386497c755648259d25e7f",
   repository: "https://github.com/Tgk-30/YAWF-Stream",
   workflow: ".github/workflows/web-release.yml",
@@ -84,6 +84,8 @@ export function readRuntimeFacts() {
     platform: process.platform,
     arch: process.arch,
     machine: os.machine(),
+    cpuVendor: process.platform === "darwin" && process.arch === "x64"
+      ? run("/usr/sbin/sysctl", ["-n", "machdep.cpu.vendor"], { capture: true }) : null,
     type: os.type(),
     kernelRelease: os.release(),
     macOSVersion: run("/usr/bin/sw_vers", ["-productVersion"], { capture: true }),
@@ -97,10 +99,10 @@ export function readRuntimeFacts() {
 
 export function admitHostedRunner(env, facts = readRuntimeFacts()) {
   if (env.CI !== "true" || env.GITHUB_ACTIONS !== "true" || env.RUNNER_ENVIRONMENT !== "github-hosted") fail("fresh GitHub-hosted runner required");
-  if (env.RUNNER_OS !== "macOS" || env.RUNNER_ARCH !== "ARM64") fail("macOS 15 arm64 runner required");
+  if (env.RUNNER_OS !== "macOS" || env.RUNNER_ARCH !== "X64") fail("macOS 15 Intel runner required");
   if (env.RUNNER_TEMP !== "/Users/runner/work/_temp") fail("GitHub-hosted RUNNER_TEMP required");
   if (env.HOME !== "/Users/runner") fail("GitHub-hosted runner HOME required");
-  if (facts.platform !== "darwin" || facts.type !== "Darwin" || facts.arch !== "arm64" || facts.machine !== "arm64") fail("actual Darwin arm64 runtime required");
+  if (facts.platform !== "darwin" || facts.type !== "Darwin" || facts.arch !== "x64" || facts.machine !== "x86_64" || facts.cpuVendor !== "GenuineIntel") fail("actual native Intel Darwin runtime required");
   if (!facts.macOSVersion?.startsWith("15.") || !facts.kernelRelease?.startsWith("24.")) fail("actual macOS 15 and Darwin 24 required");
   if (facts.username !== "runner" || facts.homedir !== "/Users/runner" || facts.homedirRealpath !== "/Users/runner") fail("actual GitHub-hosted runner account required");
   if (!Number.isInteger(facts.uid) || facts.uid <= 0 || facts.uid !== facts.processUid) fail("actual runner uid mismatch");
@@ -265,6 +267,11 @@ async function admitBundle(appPath, version) {
   if ((await lstat(appPath)).isSymbolicLink()) fail("app path must not be a symlink");
   if (await plistValue(appPath, "CFBundleIdentifier") !== BASELINE.bundleIdentifier) fail("bundle identifier mismatch");
   if (await plistValue(appPath, "CFBundleShortVersionString") !== version) fail("bundle version mismatch");
+  const executable = await plistValue(appPath, "CFBundleExecutable");
+  if (executable !== "debridstreamer") fail("bundle executable identity mismatch");
+  if (run("/usr/bin/lipo", ["-archs", path.join(appPath, "Contents", "MacOS", executable)], { capture: true }) !== "x86_64") {
+    fail("expected the native Intel app binary, not arm64 or universal output");
+  }
   run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath]);
   run("/usr/sbin/spctl", ["-a", "-vv", "-t", "exec", appPath]);
 }
@@ -336,7 +343,7 @@ async function execute(options) {
   run("/usr/bin/xcodebuild", [
     "test-without-building",
     "-xctestrun", patchedPath,
-    "-destination", "platform=macOS,arch=arm64",
+    "-destination", "platform=macOS,arch=x86_64",
     "-parallel-testing-enabled", "NO",
     "-only-testing:MacOTARuntimeTests/MacOTARuntimeTests/testPublic96To103ThroughNormalUpdaterUI",
     "-resultBundlePath", resultBundlePath,

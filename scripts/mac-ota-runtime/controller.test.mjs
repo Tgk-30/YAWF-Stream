@@ -7,8 +7,8 @@ import path from "node:path";
 import test from "node:test";
 import { BASELINE, TARGET, validateTargetAttestation, admitHostedRunner, admitOwnedPath, bundleManifest, loadReceiptAttachment, patchXCTestRun, pathsOverlap, validateReceipt } from "./controller.mjs";
 
-const admitted = { CI: "true", GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted", RUNNER_OS: "macOS", RUNNER_ARCH: "ARM64", RUNNER_TEMP: "/Users/runner/work/_temp", HOME: "/Users/runner" };
-const runtime = { platform: "darwin", arch: "arm64", machine: "arm64", type: "Darwin", kernelRelease: "24.6.0", macOSVersion: "15.7.1", username: "runner", homedir: "/Users/runner", homedirRealpath: "/Users/runner", uid: 501, processUid: 501 };
+const admitted = { CI: "true", GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "github-hosted", RUNNER_OS: "macOS", RUNNER_ARCH: "X64", RUNNER_TEMP: "/Users/runner/work/_temp", HOME: "/Users/runner" };
+const runtime = { platform: "darwin", arch: "x64", machine: "x86_64", cpuVendor: "GenuineIntel", type: "Darwin", kernelRelease: "24.6.0", macOSVersion: "15.7.1", username: "runner", homedir: "/Users/runner", homedirRealpath: "/Users/runner", uid: 501, processUid: 501 };
 const receiptFileName = "12345678-1234-1234-1234-1234567890AB.json";
 const testIdentifier = "MacOTARuntimeTests/testPublic96To103ThroughNormalUpdaterUI()";
 const testIdentifierURL = "test://com.apple.xcode/MacOTARuntime/MacOTARuntimeTests/MacOTARuntimeTests/testPublic96To103ThroughNormalUpdaterUI";
@@ -32,17 +32,17 @@ async function makeAttachmentFixture() {
   return { runnerTemp, exportRoot, receipt, attachment, manifest };
 }
 
-test("runner admission accepts only the intended hosted arm runner", () => {
+test("runner admission accepts only the intended hosted Intel runner", () => {
   assert.doesNotThrow(() => admitHostedRunner(admitted, runtime));
 });
 
 for (const [name, mutation] of Object.entries({
   ci: { CI: "false" }, actions: { GITHUB_ACTIONS: "false" }, environment: { RUNNER_ENVIRONMENT: "self-hosted" },
-  declaredOS: { RUNNER_OS: "Linux" }, declaredArch: { RUNNER_ARCH: "X64" }, temp: { RUNNER_TEMP: "/tmp" }, home: { HOME: "/Users/local-user" },
+  declaredOS: { RUNNER_OS: "Linux" }, declaredArch: { RUNNER_ARCH: "ARM64" }, temp: { RUNNER_TEMP: "/tmp" }, home: { HOME: "/Users/local-user" },
 })) test(`runner admission rejects fake environment: ${name}`, () => assert.throws(() => admitHostedRunner({ ...admitted, ...mutation }, runtime)));
 
 for (const [name, mutation] of Object.entries({
-  platform: { platform: "linux" }, osType: { type: "Linux" }, processArch: { arch: "x64" }, machine: { machine: "x86_64" },
+  platform: { platform: "linux" }, osType: { type: "Linux" }, processArch: { arch: "arm64" }, machine: { machine: "arm64" }, cpuVendor: { cpuVendor: "Apple" }, missingVendor: { cpuVendor: null },
   macOS: { macOSVersion: "26.1" }, kernel: { kernelRelease: "25.1.0" }, username: { username: "local-user" },
   accountHome: { homedir: "/Users/local-user" }, accountHomeLink: { homedirRealpath: "/private/Users/runner" }, uid: { uid: 502 }, processUid: { processUid: 502 },
 })) test(`runner admission rejects actual runtime mismatch despite matching environment: ${name}`, () => assert.throws(() => admitHostedRunner(admitted, { ...runtime, ...mutation })));
@@ -633,7 +633,7 @@ function targetProof() {
     } },
     statement: {
       _type: "https://in-toto.io/Statement/v1",
-      subject: [{ name: "YAWF.Stream_aarch64.app.tar.gz", digest: { sha256: "14b2d959277782f7defb3d934e7dc9e4f82b6b60fbe6951ca9625c840b5c9ec2" } }],
+      subject: [{ name: "YAWF.Stream_x64.app.tar.gz", digest: { sha256: "edf7296b3566d5ad5920d6b7934e0368aabfe8229660c11e729b7b102e322a35" } }],
       predicateType: "https://slsa.dev/provenance/v1",
       predicate: {
         buildDefinition: {
@@ -650,11 +650,11 @@ function targetProof() {
 
 test("public103 qualification pins exact shipping bytes and preserves public96 baseline", () => {
   assert.equal(BASELINE.version, "2.3.96");
-  assert.equal(BASELINE.archiveSha256, "32d1b9041c0ddc5ef9201edc9420028bb764be5aa6046071164d6b646ca89901");
-  assert.equal(BASELINE.archiveSize, 95584873);
+  assert.equal(BASELINE.archiveSha256, "d2a55e1102bb2b48246acdb2afcbf020286725b8435856ba6dcc5e410ca82231");
+  assert.equal(BASELINE.archiveSize, 100517568);
   assert.equal(BASELINE.targetVersion, "2.3.103");
-  assert.equal(TARGET.archiveSha256, "14b2d959277782f7defb3d934e7dc9e4f82b6b60fbe6951ca9625c840b5c9ec2");
-  assert.equal(TARGET.archiveSize, 95577725);
+  assert.equal(TARGET.archiveSha256, "edf7296b3566d5ad5920d6b7934e0368aabfe8229660c11e729b7b102e322a35");
+  assert.equal(TARGET.archiveSize, 100514951);
   assert.equal(TARGET.source, "6463c35757b69a4143386497c755648259d25e7f");
   assert.doesNotThrow(() => validateTargetAttestation(targetProof()));
 });
@@ -675,7 +675,7 @@ const proofMutations = {
   emptySubject: proof => { proof[0].verificationResult.statement.subject = []; return proof; },
   missingSubject: proof => { delete proof[0].verificationResult.statement.subject; return proof; },
   duplicateSubject: proof => { proof[0].verificationResult.statement.subject.push(structuredClone(proof[0].verificationResult.statement.subject[0])); return proof; },
-  subjectName: proof => { proof[0].verificationResult.statement.subject[0].name = "YAWF.Stream_x64.app.tar.gz"; return proof; },
+  subjectName: proof => { proof[0].verificationResult.statement.subject[0].name = "YAWF.Stream_aarch64.app.tar.gz"; return proof; },
   digest: proof => { proof[0].verificationResult.statement.subject[0].digest.sha256 = "0".repeat(64); return proof; },
 };
 for (const [name, mutate] of Object.entries(proofMutations)) {
@@ -685,9 +685,16 @@ for (const [name, mutate] of Object.entries(proofMutations)) {
 }
 
 function assertPublic103Workflow(workflow, controller, swift) {
-  assert.match(workflow, /releases\/download\/v2\.3\.103-web\/YAWF\.Stream_aarch64\.app\.tar\.gz/);
-  assert.match(workflow, /14b2d959277782f7defb3d934e7dc9e4f82b6b60fbe6951ca9625c840b5c9ec2/);
-  assert.match(workflow, /= 95577725/);
+  assert.match(workflow, /runs-on: macos-15-intel/);
+  assert.ok(workflow.includes('test "$(sysctl -n machdep.cpu.vendor)" = GenuineIntel'));
+  assert.match(workflow, /platform=macOS,arch=x86_64/);
+  assert.ok(controller.includes('facts.cpuVendor !== "GenuineIntel"'));
+  assert.ok(controller.includes('run("/usr/bin/lipo", ["-archs"'));
+  assert.match(swift, /arch\(x86_64\)/);
+  assert.ok(swift.includes('vendorName == "GenuineIntel"'));
+  assert.match(workflow, /releases\/download\/v2\.3\.103-web\/YAWF\.Stream_x64\.app\.tar\.gz/);
+  assert.match(workflow, /edf7296b3566d5ad5920d6b7934e0368aabfe8229660c11e729b7b102e322a35/);
+  assert.match(workflow, /= 100514951/);
   assert.match(workflow, /--signer-workflow Tgk-30\/YAWF-Stream\/\.github\/workflows\/web-release\.yml/);
   assert.match(workflow, /--signer-digest 6463c35757b69a4143386497c755648259d25e7f/);
   assert.match(workflow, /gh --version/);
@@ -717,7 +724,7 @@ test("public103 workflow binds verified shipping source before extraction and UI
     ["--source-digest 6463c35757b69a4143386497c755648259d25e7f", "--source-digest wrong"],
     ["--source-ref refs/tags/v2.3.103-web", "--source-ref refs/heads/main"],
     ['controller.mjs" verify-target', 'controller.mjs" prepare'],
-    ["= 95577725", "= 95584951"],
+    ["= 100514951", "= 95584951"],
   ]) {
     assert.ok(workflow.includes(before));
     assert.throws(() => assertPublic103Workflow(workflow.replace(before, after), controller, swift), before);
