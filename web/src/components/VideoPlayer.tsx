@@ -592,22 +592,41 @@ function TouchVideoFit({ presentation, inline, visible }: {
   );
 }
 
-function VideoFitOptions({ presentation }: { presentation: VideoPresentationStore }) {
+function VideoFitChoice({ fit, selected, touch, changeFit }: {
+  fit: keyof typeof VIDEO_FIT_LABELS;
+  selected: boolean;
+  touch: boolean;
+  changeFit: () => void;
+}) {
+  const button = useRef<HTMLButtonElement | null>(null);
+  usePlayerTouchAction(button, touch, changeFit);
+  return (
+    <button
+      ref={button}
+      type="button"
+      className={`chip${selected ? " is-active" : ""}`}
+      aria-pressed={selected}
+      onClick={changeFit}
+    >
+      {fit === "cover" ? "Fill screen" : VIDEO_FIT_LABELS[fit]}
+    </button>
+  );
+}
+
+function VideoFitOptions({ presentation, touch }: { presentation: VideoPresentationStore; touch: boolean }) {
   const current = useVideoFit(presentation);
   return (
     <div className="player-options-section player-fit-options-section">
       <span className="t-secondary">Video fit</span>
       <div className="player-options-choice-row">
         {(["contain", "cover", "fill"] as const).map((fit) => (
-          <button
-            type="button"
-            className={`chip${current === fit ? " is-active" : ""}`}
-            aria-pressed={current === fit}
-            onClick={() => presentation.update({ fit })}
+          <VideoFitChoice
             key={fit}
-          >
-            {fit === "cover" ? "Fill screen" : VIDEO_FIT_LABELS[fit]}
-          </button>
+            fit={fit}
+            selected={current === fit}
+            touch={touch}
+            changeFit={() => presentation.update({ fit })}
+          />
         ))}
       </div>
     </div>
@@ -8806,12 +8825,15 @@ function WebviewPlayer({
   usePlayerTouchAction(skipForwardRef, touchActionsActive, touchForward);
   const fullscreenRef = useRef<HTMLButtonElement | null>(null);
   const settingsFullscreenRef = useRef<HTMLButtonElement | null>(null);
+  const closeOptionsRef = useRef<HTMLButtonElement | null>(null);
+  const closeOptions = () => setOptionsOpen(false);
   const touchCaptionsRef = useRef<HTMLButtonElement | null>(null);
   const showTouchFullscreen = fullscreenSupported && (!inlineScreenFill || isFullscreen);
   const showSettingsFullscreen = inlineScreenFill && fullscreenSupported && !touchAudioSheet && !isFullscreen;
   const fullscreenAction = `${isFullscreen ? "Exit" : "Enter"} ${systemFullscreen ? "system fullscreen" : "fullscreen"}`;
   usePlayerTouchAction(fullscreenRef, touchActionsActive && showTouchFullscreen, togglePlayerFullscreen, true);
   usePlayerTouchAction(settingsFullscreenRef, optionsOpen && showSettingsFullscreen, enterFullscreenFromSettings, true);
+  usePlayerTouchAction(closeOptionsRef, touchPlayer && optionsOpen, closeOptions);
   usePlayerTouchAction(optionsTriggerRef, touchActionsActive, toggleOptions);
   usePlayerTouchAction(audioShortcutRef, touchActionsActive && audioShortcutAvailable, openAudioOptions);
   usePlayerTouchAction(touchCaptionsRef, touchActionsActive, toggleTouchCaptions);
@@ -9423,7 +9445,8 @@ function WebviewPlayer({
             <button
               type="button"
               className="player-close"
-              onClick={() => setOptionsOpen(false)}
+              ref={closeOptionsRef}
+              onClick={closeOptions}
               aria-label={touchAudioSheet ? "Close audio tracks" : "Close playback settings"}
             >
               <Icon name="xmark" size={15} />
@@ -9566,7 +9589,7 @@ function WebviewPlayer({
                 </a>
               )}
             </div>
-            <VideoFitOptions presentation={presentation} />
+            <VideoFitOptions presentation={presentation} touch={touchPlayer && !touchAudioSheet} />
             {serverOptimized != null && (
               <div className="player-options-section">
                 <span className="t-secondary">Streaming mode</span>
