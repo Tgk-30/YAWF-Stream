@@ -39,6 +39,7 @@ const MAX_VERIFICATION_BYTES = 256 * 1024;
 const MAX_PACKAGE_BYTES = 128 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
 const FIRST_BOUND_UPDATER_RELEASE = "2.3.115";
+const DEBIAN_WORKFLOW_ID = 305501296;
 const ACTUAL_UPDATER_STEP = "Verify actual published image upgrade and rollback";
 const UPDATER_RUNNERS = ["ubuntu-22.04", "ubuntu-24.04"];
 
@@ -236,7 +237,7 @@ function validateVerificationRecord(record, { version, tag, sourceRevision, imag
   return { amd64, arm64, containerRun, debianRun };
 }
 
-function validateWorkflowRun(run, { id, kind, sourceRevision, tag }) {
+function validateWorkflowRun(run, { id, kind, sourceRevision, tag, boundTitle = null }) {
   if (!isRecord(run)) reject(`${kind} workflow run metadata is invalid`);
   exact(run.id, id, `${kind} workflow run id`);
   exact(run.repository?.full_name, CANONICAL_REPOSITORY, `${kind} workflow repository`);
@@ -255,8 +256,15 @@ function validateWorkflowRun(run, { id, kind, sourceRevision, tag }) {
     exact(run.event, "push", "container workflow event");
     exact(run.head_branch, tag, "container workflow tag");
   } else {
-    exact(run.name, "deb-release", "Debian workflow name");
     exact(run.path, DEBIAN_WORKFLOW, "Debian workflow path");
+    // GitHub's run endpoint can put the evaluated run-name in both title
+    // fields. Only the canonical workflow may use the exact bound title.
+    if (boundTitle !== null) {
+      exact(run.workflow_id, DEBIAN_WORKFLOW_ID, "Debian workflow ID");
+      if (run.name !== "deb-release") exact(run.name, boundTitle, "Debian workflow name");
+    } else {
+      exact(run.name, "deb-release", "Debian workflow name");
+    }
     if (run.event !== "push" && run.event !== "workflow_dispatch") {
       reject("Debian workflow event is invalid");
     }
@@ -274,13 +282,17 @@ function needsActualUpdaterEvidence(version) {
   return compareVersions(version, FIRST_BOUND_UPDATER_RELEASE) >= 0;
 }
 
+function actualUpdaterTitle(imageDigest, sourceRevision) {
+  return `Verify server ${imageDigest} ${sourceRevision}`;
+}
+
 function validateActualUpdaterEvidence(run, jobs, { sourceRevision, imageDigest }) {
   // A successful generic Debian run can skip the registry transaction. The
   // dispatch title binds the tested inputs; the current attempt's jobs prove
   // that both runners actually ran the non-optional-for-promotion step.
   const label = "actual-image updater";
   exact(run.event, "workflow_dispatch", `${label} event`);
-  exact(run.display_title, `Verify server ${imageDigest} ${sourceRevision}`, `${label} inputs`);
+  exact(run.display_title, actualUpdaterTitle(imageDigest, sourceRevision), `${label} inputs`);
   if (!isRecord(jobs) || !Array.isArray(jobs.jobs) || jobs.jobs.length > 100 ||
       jobs.total_count !== jobs.jobs.length) {
     reject(`${label} attempt jobs are missing or incomplete`);
@@ -366,13 +378,17 @@ export function qualifyReleaseEvidence(input) {
     sourceRevision: manifest.sourceRevision,
     tag: release.tag,
   });
+  const boundTitle = needsActualUpdaterEvidence(requestedVersion)
+    ? actualUpdaterTitle(manifest.image.digest, manifest.sourceRevision)
+    : null;
   const debianRun = validateWorkflowRun(input.runs?.debian, {
     id: verified.debianRun,
     kind: "debian",
     sourceRevision: manifest.sourceRevision,
     tag: release.tag,
+    boundTitle,
   });
-  if (needsActualUpdaterEvidence(requestedVersion)) {
+  if (boundTitle !== null) {
     validateActualUpdaterEvidence(input.runs.debian, input.debianAttemptJobs, {
       sourceRevision: manifest.sourceRevision,
       imageDigest: manifest.image.digest,
