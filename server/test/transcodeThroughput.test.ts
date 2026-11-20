@@ -107,9 +107,24 @@ describe.skipIf(process.env.DS_TRANSCODE_FFMPEG_COMPAT !== "1")("actual FFmpeg o
       "-c:a", "flac", "-c:s", "srt", "-output_ts_offset", String(offset), path]);
     sources.set(key, path); return path;
   }
-  function transcode(rate: string, options: HlsTranscodeOptions, mutate?: (args: string[]) => string[], offset = 0) {
+  function sourceWithCueAcrossSeek() {
+    const key = "crossing-mov-text-seek";
+    if (sources.has(key)) return sources.get(key)!;
+    const path = join(work, "crossing-source.mp4");
+    const cues = join(work, "crossing-cue.srt");
+    writeFileSync(cues, "1\n00:00:02,000 --> 00:01:30,000\nCROSSES SEEK\n");
+    run(ffmpeg, ["-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+      "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=96",
+      "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=96",
+      "-i", cues, "-map", "0:v:0", "-map", "1:a:0", "-map", "2:s:0",
+      "-c:v", "libx264", "-preset", "ultrafast", "-threads:v", "1", "-g", "90", "-pix_fmt", "yuv420p",
+      "-c:a", "aac", "-c:s", "mov_text", "-movflags", "+faststart", path]);
+    sources.set(key, path); return path;
+  }
+  function transcode(rate: string, options: HlsTranscodeOptions, mutate?: (args: string[]) => string[], offset = 0,
+    input = source(rate, offset)) {
     const dir = join(work, `output-${++sequence}`); mkdirSync(dir);
-    const generated = hlsArgs(source(rate, offset), dir, options);
+    const generated = hlsArgs(input, dir, options);
     const args = mutate ? mutate(generated) : generated;
     run(ffmpeg, args);
     const names = readdirSync(dir).filter(name => /^\d+p\.m3u8$/.test(name));
@@ -202,6 +217,22 @@ describe.skipIf(process.env.DS_TRANSCODE_FFMPEG_COMPAT !== "1")("actual FFmpeg o
     receipts.push({ subtitleClockComparison: { baselineVideoPts: baselineClock, cappedVideoPts: clock,
       baselineFirstFramePts: baseline.results[0]!.firstFramePts, cappedFirstFramePts: results[0]!.firstFramePts,
       rawWebVttByteEqual: true, timestampMap: "LOCAL:00:00.000,MPEGTS:0" } });
+  });
+  it.each(["480p", "auto"] as const)("keeps %s interior segments near six seconds after a seek with subtitles", (quality) => {
+    const options = { quality, sourceVideoHeight: 480, startSeconds: 75,
+      includeSubtitle: true, preserveSubtitles: true } as const;
+    const { dir, results } = transcode("30", options, undefined, 0, sourceWithCueAcrossSeek());
+    expectRate(results, 30, 21);
+    expect(results).toHaveLength(quality === "auto" ? 2 : 1);
+    for (const { name, firstFramePts } of results) {
+      expect(firstFramePts).toBeCloseTo(75, 2);
+      const playlist = readFileSync(join(dir, name), "utf8");
+      const durations = [...playlist.matchAll(/^#EXTINF:([\d.]+),$/gm)].map(match => Number(match[1]));
+      expect(durations).toHaveLength(4);
+      for (const [index, duration] of durations.entries()) {
+        expect(duration).toBeCloseTo(index === 3 ? 3 : 6, 1);
+      }
+    }
   });
   it("individual original-filter revert fails the actual fixed60fps cap regression", () => {
     const { results } = transcode("60", { quality: "480p" }, args => args.map(value => value.replace(cap + ",", "")));

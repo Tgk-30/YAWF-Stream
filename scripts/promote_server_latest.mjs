@@ -38,6 +38,9 @@ const MAX_MANIFEST_BYTES = 64 * 1024;
 const MAX_VERIFICATION_BYTES = 256 * 1024;
 const MAX_PACKAGE_BYTES = 128 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
+const FIRST_BOUND_UPDATER_RELEASE = "2.3.115";
+const ACTUAL_UPDATER_STEP = "Verify actual published image upgrade and rollback";
+const UPDATER_RUNNERS = ["ubuntu-22.04", "ubuntu-24.04"];
 
 export class ServerLatestPromotionError extends Error {}
 
@@ -267,6 +270,40 @@ function validateWorkflowRun(run, { id, kind, sourceRevision, tag }) {
   };
 }
 
+function needsActualUpdaterEvidence(version) {
+  return compareVersions(version, FIRST_BOUND_UPDATER_RELEASE) >= 0;
+}
+
+function validateActualUpdaterEvidence(run, jobs, { sourceRevision, imageDigest }) {
+  // A successful generic Debian run can skip the registry transaction. The
+  // dispatch title binds the tested inputs; the current attempt's jobs prove
+  // that both runners actually ran the non-optional-for-promotion step.
+  const label = "actual-image updater";
+  exact(run.event, "workflow_dispatch", `${label} event`);
+  exact(run.display_title, `Verify server ${imageDigest} ${sourceRevision}`, `${label} inputs`);
+  if (!isRecord(jobs) || !Array.isArray(jobs.jobs) || jobs.jobs.length > 100 ||
+      jobs.total_count !== jobs.jobs.length) {
+    reject(`${label} attempt jobs are missing or incomplete`);
+  }
+  for (const runner of UPDATER_RUNNERS) {
+    const matches = jobs.jobs.filter((job) => job?.name === `Docker Compose updater transaction (${runner})`);
+    if (matches.length !== 1) reject(`${label} job for ${runner} is missing or duplicated`);
+    const [job] = matches;
+    exact(job.run_id, run.id, `${label} run id on ${runner}`);
+    exact(job.run_attempt, run.run_attempt, `${label} run attempt on ${runner}`);
+    exact(job.head_sha, sourceRevision, `${label} revision on ${runner}`);
+    exact(job.status, "completed", `${label} job state on ${runner}`);
+    exact(job.conclusion, "success", `${label} job result on ${runner}`);
+    if (!Array.isArray(job.steps) || job.steps.length > 100) {
+      reject(`${label} steps for ${runner} are invalid`);
+    }
+    const steps = job.steps.filter((step) => step?.name === ACTUAL_UPDATER_STEP);
+    if (steps.length !== 1) reject(`${label} step for ${runner} is missing or duplicated`);
+    exact(steps[0].status, "completed", `${label} step state on ${runner}`);
+    exact(steps[0].conclusion, "success", `${label} step result on ${runner}`);
+  }
+}
+
 /**
  * Qualify caller-supplied public GitHub evidence. Network collection is separate so
  * every trust decision can be executed in unit tests without package credentials.
@@ -335,6 +372,12 @@ export function qualifyReleaseEvidence(input) {
     sourceRevision: manifest.sourceRevision,
     tag: release.tag,
   });
+  if (needsActualUpdaterEvidence(requestedVersion)) {
+    validateActualUpdaterEvidence(input.runs.debian, input.debianAttemptJobs, {
+      sourceRevision: manifest.sourceRevision,
+      imageDigest: manifest.image.digest,
+    });
+  }
   if (release.automatedAuthor) {
     if (expectedSourceRevision == null || expectedImageDigest == null) {
       reject("CI-authored releases require explicit source and image guards");
@@ -820,6 +863,12 @@ export async function collectReleaseEvidence({
     apiJson(`/actions/runs/${containerRunId}`, { fetchImpl, token, label: "container workflow run" }),
     apiJson(`/actions/runs/${debianRunId}`, { fetchImpl, token, label: "Debian workflow run" }),
   ]);
+  const debianAttemptJobs = needsActualUpdaterEvidence(version)
+    ? await apiJson(
+        `/actions/runs/${debianRunId}/attempts/${positiveInteger(debianRun?.run_attempt, "Debian workflow attempt")}/jobs?per_page=100`,
+        { fetchImpl, token, label: "actual-image updater attempt jobs" },
+      )
+    : undefined;
   return qualifyReleaseEvidence({
     requestedVersion: version,
     expectedSourceRevision,
@@ -830,6 +879,7 @@ export async function collectReleaseEvidence({
     resolvedTagCommit,
     packageBytes,
     runs: { container: containerRun, debian: debianRun },
+    debianAttemptJobs,
   });
 }
 

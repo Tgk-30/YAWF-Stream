@@ -104,9 +104,52 @@ try {
     const originalEnvironmentHash = fileHash(environment);
 
     run("/usr/local/sbin/yawf-server-update", ["register", compose]);
+    // Reproduce the deployed hotfix shape: the fixed updater override contains
+    // the immutable image plus separate read-only backend and web mounts.
+    const registeredOverride = "/var/lib/yawf-server-updater/compose.override.yaml";
+    const stockOverride = readFileSync(registeredOverride);
+    const mountedEntry = join(root, "hotfix.cjs");
+    const mountedWeb = join(root, "hotfix-web");
+    const mountedIndex = join(mountedWeb, "index.html");
+    const mountedLazy = join(mountedWeb, "assets", "qa-overlay-only.js");
+    docker("cp", `${container("debridstreamer")}:/app/server/dist/index.cjs`, mountedEntry);
+    mkdirSync(mountedWeb, { mode: 0o755 }); chmodSync(mountedWeb, 0o755);
+    docker("cp", `${container("debridstreamer")}:/app/web-dist/.`, mountedWeb);
+    writeFileSync(mountedEntry, "\n/* QA mounted server entry */\n", { flag: "a" }); chmodSync(mountedEntry, 0o644);
+    writeFileSync(mountedIndex, "\n<!-- QA mounted web index -->\n", { flag: "a" });
+    writeFileSync(mountedLazy, "// QA mounted lazy asset\n"); chmodSync(mountedLazy, 0o644);
+    const mountedOverride = Buffer.concat([stockOverride, Buffer.from(`    volumes:
+      - type: bind
+        source: ${mountedEntry}
+        target: /app/server/dist/index.cjs
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${mountedWeb}
+        target: /app/web-dist
+        read_only: true
+        bind:
+          create_host_path: false
+`)]);
+    writeFileSync(registeredOverride, mountedOverride);
+    const registeredRun = (...args) => docker("compose", "--project-name", project, "--project-directory", root,
+      "--file", compose, "--file", registeredOverride, ...args);
+    registeredRun("up", "--detach", "--no-deps", "debridstreamer"); await waitHealth();
+    const containerHash = (file) => docker("exec", container("debridstreamer"), "sha256sum", file).split(" ", 1)[0];
+    const servedHashes = () => ["/app/server/dist/index.cjs", "/app/web-dist/index.html", "/app/web-dist/assets/qa-overlay-only.js"].map(containerHash);
+    const mountedHashes = [mountedEntry, mountedIndex, mountedLazy].map(fileHash);
+    assert.deepEqual(servedHashes(), mountedHashes);
     productionTransaction(actualCandidateDigest, actualSourceRevision, "after-health");
     await waitHealth();
     assert.equal(docker("inspect", "--format", "{{.Config.Image}}", container("debridstreamer")), baseline);
+    assert.deepEqual(readFileSync(registeredOverride), mountedOverride, "the byte-exact prior Compose override must survive rollback");
+    assert.deepEqual(servedHashes(), mountedHashes, "backend, web index and lazy asset must all be restored");
+    const recoveredMounts = JSON.parse(docker("inspect", "--format", "{{json .Mounts}}", container("debridstreamer")));
+    for (const [source, target] of [[mountedEntry, "/app/server/dist/index.cjs"], [mountedWeb, "/app/web-dist"]]) {
+      assert.equal(recoveredMounts.filter((mount) => mount.Type === "bind" && mount.Source === source &&
+        mount.Destination === target && mount.RW === false).length, 1);
+    }
     assert.match(docker("exec", container("debridstreamer"), "cat", "/data/updater-account-settings-marker"), /owner:midnight/);
     assert.equal(docker("exec", container("debridstreamer"), "node", "-e", "let s=require('fs').statSync('/data/updater-private-fixture');process.stdout.write(`${s.uid}:${s.gid}:${(s.mode&0o777).toString(8)}`)"), `${originalOwner}:600`);
     assert.equal(docker("exec", container("debridstreamer"), "node", "-e", "const f=require('fs'),c=require('crypto'),p='/data/updater-readonly-fixture',s=f.statSync(p);process.stdout.write(`${s.uid}:${s.gid}:${(s.mode&0o777).toString(8)}:${c.createHash('sha256').update(f.readFileSync(p)).digest('hex')}`)"), originalReadonly);
@@ -126,6 +169,11 @@ try {
     docker("exec", container("debridstreamer"), "node", "-e", "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite');d.exec('CREATE TABLE updater_rollback_probe(value TEXT)');d.prepare('INSERT INTO updater_rollback_probe VALUES (?)').run('writable');d.close()");
     composeRun("restart", "debridstreamer"); await waitHealth();
     assert.equal(docker("exec", container("debridstreamer"), "node", "-e", "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite',{readOnly:true});process.stdout.write(d.prepare('SELECT value FROM updater_rollback_probe').get().value);d.close()"), "writable");
+
+    // Restore the stock fixture for the existing pre-snapshot and successful
+    // update checks. This explicit replacement is confined to the test stack.
+    writeFileSync(registeredOverride, stockOverride);
+    registeredRun("up", "--detach", "--no-deps", "debridstreamer"); await waitHealth();
 
     // An unexpired, non-revoked fixture stream must defer before image pull or
     // service stop even if its HTTP transfer completed. It uses the isolated profile.
@@ -185,6 +233,13 @@ try {
     assert.equal(interruptedRunning, "false", "interrupted fixture retained a running service container");
     assert.equal(interruptedStatus, "exited", "interrupted fixture did not retain an exited service container");
     assert.equal(interruptedJournal.phase, "snapshotted", "interrupted fixture did not retain a snapshotted journal");
+    assert.equal(interruptedJournal.schemaVersion, 2);
+    assert.match(interruptedJournal.oldWebHash, /^[a-f0-9]{64}$/);
+    const savedOverride = join(interruptedJournal.backup, "compose.override.yaml");
+    const savedStat = lstatSync(savedOverride);
+    assert.ok(savedStat.isFile() && savedStat.uid === 0 && (savedStat.mode & 0o777) === 0o600);
+    assert.equal(fileHash(savedOverride), interruptedJournal.oldOverrideHash);
+    assert.deepEqual(readFileSync(savedOverride), stockOverride);
     assert.deepEqual(interruptedJournal.registration, expectedRegistration, "interrupted journal was not bound to the current registration");
     assert.throws(() => run("/usr/local/sbin/yawf-server-update", ["register", compose]), /pending update journal/);
     productionTransaction(actualCandidateDigest, actualSourceRevision, "recover");
@@ -253,7 +308,7 @@ try {
     process.stdout.write(JSON.stringify({ ok: true, mode: "actual-published-images", version: candidateVersion, digest: actualCandidateDigest,
       source: actualSourceRevision, baselineDigest, candidateDigest: actualCandidateDigest,
       sourceRevision: actualSourceRevision, digestVerified: true, sourceVerified: true,
-      candidateHealthVerified: true, injectedRollbackVerified: true,
+      candidateHealthVerified: true, injectedRollbackVerified: true, mountedOverlayRollbackVerified: true,
       activePlaybackDeferred: true, successfulUpdateVerified: true, stopFailureVerified: true,
       snapshotFailureVerified: true, interruptedRecoveryVerified: true,
       registrationDriftPreserved: true, ownershipAndDatabaseWriteVerified: true, otherServicePreserved: true,

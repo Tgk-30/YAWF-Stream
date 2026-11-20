@@ -56,6 +56,17 @@ describe("MediaCard a11y", () => {
     ).toBeInTheDocument();
   });
 
+  it("announces the continuation but opens the unchanged parent identity", async () => {
+    const onSelect = vi.fn();
+    const continuation = {
+      id: "tmdb-30984", type: "series", title: "Bleach", tmdbId: 30984, year: 2004,
+      searchContinuationSeason: 17,
+    } as const;
+    render(<MediaCard item={continuation} onSelect={onSelect} showPosterRatings={false} />);
+    await userEvent.click(screen.getByRole("button", { name: "Bleach: Thousand-Year Blood War" }));
+    expect(onSelect).toHaveBeenCalledWith(continuation);
+  });
+
   it("marks the decorative hover actions aria-hidden", () => {
     const { container } = render(
       <MediaCard item={item} onSelect={() => {}} showPosterRatings={false} />,

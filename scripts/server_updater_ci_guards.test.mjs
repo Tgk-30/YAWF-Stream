@@ -22,6 +22,15 @@ const installerStep = workflow.match(/- name: Test updater policy and release gu
 const syntheticStep = workflow.match(/- name: Verify isolated Compose upgrade and rollback[\s\S]*?(?=\n\s+- name: Validate optional)/)?.[0] ?? "";
 const actualStep = workflow.match(/- name: Verify actual published image upgrade and rollback[\s\S]*?(?=\n\s+- name: Retain updater)/)?.[0] ?? "";
 
+test("actual updater dispatch titles bind both inputs used by the registry transaction", () => {
+  const title = workflow.slice(workflow.indexOf("run-name:"), workflow.indexOf("\non:"));
+  assert.match(title, /github\.event_name == 'workflow_dispatch'/);
+  assert.match(title, /inputs\.updater_candidate_digest != '' && inputs\.updater_source_revision != ''/);
+  assert.match(title, /format\('Verify server \{0\} \{1\}', inputs\.updater_candidate_digest, inputs\.updater_source_revision\)/);
+  assert.match(actualStep, /--candidate-digest "\$CANDIDATE_DIGEST"/);
+  assert.match(actualStep, /--source-revision "\$SOURCE_REVISION"/);
+});
+
 function uniqueSlice(source, startMarker, endMarker, label) {
   const start = source.indexOf(startMarker);
   assert.notEqual(start, -1, label + " start missing");
@@ -392,7 +401,7 @@ test("separate receipt validators require identity and every transaction claim",
   for (const field of ["result.ok", "result.mode", "result.version", "result.digest", "result.source"]) {
     assert.match(actualStep, new RegExp(`assert\\.equal\\(${field.replace(".", "\\.")}`), `actual receipt does not validate ${field}`);
   }
-  for (const claim of ["digestVerified", "sourceVerified", "candidateHealthVerified", "injectedRollbackVerified",
+  for (const claim of ["digestVerified", "sourceVerified", "candidateHealthVerified", "injectedRollbackVerified", "mountedOverlayRollbackVerified",
     "activePlaybackDeferred", "successfulUpdateVerified", "stopFailureVerified", "snapshotFailureVerified",
     "interruptedRecoveryVerified", "registrationDriftPreserved", "ownershipAndDatabaseWriteVerified", "otherServicePreserved",
     "protectedFilesPreserved", "umask077PublicStatusVerified", "nonRootReadOnlyStatusVerified"]) {
@@ -438,6 +447,7 @@ test("integration emits structured synthetic and actual receipts", () => {
   assert.match(integration, /mode: "actual-published-images", version: candidateVersion, digest: actualCandidateDigest/);
   assert.match(integration, /source: actualSourceRevision/);
   assert.match(integration, /digestVerified: true, sourceVerified: true/);
+  assert.match(integration, /mountedOverlayRollbackVerified: true/);
   assert.match(integration, /umask077PublicStatusVerified: true, nonRootReadOnlyStatusVerified: true/);
   assert.match(integration, /mode: "transaction-primitive", version: candidateVersion, digest: newImage/);
   assert.match(integration, /source: "generated-user-node-fixtures"/);

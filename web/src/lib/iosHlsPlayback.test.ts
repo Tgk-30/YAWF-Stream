@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   IOS_HLS_COMPATIBILITY_MIME,
+  iosHlsModeForSource,
   iosHlsPlaybackRoute,
   normalizeIosHlsPlaybackMode,
   supportsStandardIosHlsMse,
@@ -21,9 +22,12 @@ function scope(overrides: Partial<IosHlsCapabilityScope> = {}): IosHlsCapability
 }
 
 describe("iPad HLS playback policy", () => {
-  it("normalizes every absent, stale, or poisoned value to native", () => {
+  it("defaults missing values to Automatic without changing saved Native and Compatibility choices", () => {
+    for (const value of [undefined, null, "automatic"]) {
+      expect(normalizeIosHlsPlaybackMode(value)).toBe("automatic");
+    }
     expect(normalizeIosHlsPlaybackMode("compatibility")).toBe("compatibility");
-    for (const value of [undefined, null, "managed", "mse", true, 1]) {
+    for (const value of ["native", "managed", "mse", true, 1]) {
       expect(normalizeIosHlsPlaybackMode(value)).toBe("native");
     }
   });
@@ -42,7 +46,14 @@ describe("iPad HLS playback policy", () => {
     expect(supportsStandardIosHlsMse({ ...admitted, MediaSource: ThrowingMediaSource as never })).toBe(false);
   });
 
-  it("keeps native as default and falls back to it when standard MSE is unavailable", () => {
+  it("automatically chooses compatibility only for fixed server renditions", () => {
+    expect(iosHlsModeForSource("automatic", true)).toBe("compatibility");
+    expect(iosHlsModeForSource("automatic", false)).toBe("native");
+    expect(iosHlsModeForSource("native", true)).toBe("native");
+    expect(iosHlsModeForSource("compatibility", false)).toBe("compatibility");
+  });
+
+  it("falls back to native when standard MSE is unavailable", () => {
     expect(iosHlsPlaybackRoute({ mode: "native", nativePlayable: true, scope: scope() })).toBe("native");
     expect(iosHlsPlaybackRoute({ mode: "compatibility", nativePlayable: true, scope: scope() })).toBe("compatibility");
     expect(iosHlsPlaybackRoute({ mode: "compatibility", nativePlayable: true, scope: {} })).toBe("native");

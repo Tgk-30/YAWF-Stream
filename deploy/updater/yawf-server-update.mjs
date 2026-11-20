@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { constants, closeSync, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { constants, closeSync, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
@@ -18,6 +18,8 @@ const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const TAG = /^v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))(-web)?$/;
 const SHA = /^[a-f0-9]{40}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
+const HASH = /^[a-f0-9]{64}$/;
+const OVERRIDE_MAX_BYTES = 1024 * 1024;
 const STATE_ROOT = "/var/lib/yawf-server-updater";
 const PATHS = Object.freeze({
   policy: "/etc/yawf-server-updater/config.json",
@@ -219,8 +221,12 @@ function copyPrivateFile(source, destination, exclusive) {
   }
 }
 
-const DEFAULT_STATE_FS = Object.freeze({ closeSync, existsSync, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync,
+const DEFAULT_STATE_FS = Object.freeze({ closeSync, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync,
   readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync });
+function syncDirectory(directory, fsOps = DEFAULT_STATE_FS) {
+  const fd = fsOps.openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try { fsOps.fsyncSync(fd); } finally { fsOps.closeSync(fd); }
+}
 function ensurePublicStatusDirectory(fsOps = DEFAULT_STATE_FS) {
   fsOps.mkdirSync(PATHS.root, { recursive: true, mode: 0o700 });
   assertProtectedRootPath(PATHS.root, "directory", fsOps);
@@ -253,8 +259,10 @@ function atomicJson(path, value, fsOps = DEFAULT_STATE_FS) {
     fsOps.fchmodSync(fd, mode);
     const written = fsOps.fstatSync(fd);
     if (!written.isFile() || written.uid !== 0 || (written.mode & 0o777) !== mode) throw new Error("Updater state file permissions could not be established.");
+    if (path === PATHS.journal) fsOps.fsyncSync(fd);
     fsOps.closeSync(fd); fd = null;
     fsOps.renameSync(temporary, path); renamed = true;
+    if (path === PATHS.journal) syncDirectory(directory, fsOps);
   } finally {
     if (fd != null) fsOps.closeSync(fd);
     if (!renamed) { try { fsOps.unlinkSync(temporary); } catch {} }
@@ -286,11 +294,55 @@ function composeArgs(policy, command) {
   return ["compose", "--project-name", policy.projectName, "--project-directory", policy.projectDir, "--file", policy.composeFile, "--file", PATHS.override, ...command];
 }
 function imageRef(digest) { if (!DIGEST.test(digest)) throw new Error("Invalid image digest."); return `${REPOSITORY}@${digest}`; }
-function writeOverride(digest) {
-  const text = `services:\n  debridstreamer:\n    image: ${imageRef(digest)}\n`;
+function overrideForImage(digest) {
+  return Buffer.from(`services:\n  debridstreamer:\n    image: ${imageRef(digest)}\n`);
+}
+function readProtectedOverride(path) {
+  assertProtectedRootPath(path, "file");
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.uid !== 0 || (stat.mode & 0o022) !== 0 ||
+        stat.size < 1 || stat.size > OVERRIDE_MAX_BYTES) throw new Error("The Compose override is not a bounded root-owned file.");
+    const bytes = readFileSync(fd);
+    if (bytes.length !== stat.size) throw new Error("The Compose override changed while it was being read.");
+    return bytes;
+  } finally { closeSync(fd); }
+}
+function writePrivateOverrideFile(path, bytes) {
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  let complete = false;
+  try {
+    writeFileSync(fd, bytes);
+    fchmodSync(fd, 0o600);
+    fsyncSync(fd);
+    complete = true;
+  } finally {
+    closeSync(fd);
+    if (!complete) unlinkSync(path);
+  }
+}
+function writeOverride(bytes) {
   mkdirSync(PATHS.root, { recursive: true, mode: 0o700 });
+  assertProtectedRootPath(PATHS.root, "directory");
   const tmp = `${PATHS.override}.tmp-${process.pid}`;
-  writeFileSync(tmp, text, { mode: 0o600, flag: "wx" }); renameSync(tmp, PATHS.override);
+  writePrivateOverrideFile(tmp, bytes);
+  try { renameSync(tmp, PATHS.override); }
+  catch (error) { unlinkSync(tmp); throw error; }
+  syncDirectory(PATHS.root);
+}
+function snapshotOverride(backup, bytes) {
+  assertProtectedRootPath(backup, "directory");
+  writePrivateOverrideFile(join(backup, "compose.override.yaml"), bytes);
+  syncDirectory(backup);
+  syncDirectory(dirname(backup));
+  return sha256(bytes);
+}
+function previousOverride(journal) {
+  if (journal.schemaVersion === 1) return overrideForImage(journal.oldDigest);
+  const bytes = readProtectedOverride(join(journal.backup, "compose.override.yaml"));
+  if (sha256(bytes) !== journal.oldOverrideHash) throw new Error("The saved Compose override does not match the update journal.");
+  return bytes;
 }
 async function containerId(policy) {
   const value = await run("docker", composeArgs(policy, ["ps", "--quiet", "debridstreamer"]));
@@ -316,6 +368,27 @@ async function health(id) {
 async function bundleHash(id) {
   return run("docker", ["exec", id, "node", "-e", "const f=require('fs'),c=require('crypto');process.stdout.write(c.createHash('sha256').update(f.readFileSync('/app/server/dist/index.cjs')).digest('hex'))"]);
 }
+async function webBundleHash(id) {
+  // Include lazy chunks and other public assets as well as index.html. Keep the
+  // scan bounded and never follow symlinks out of the served web directory.
+  const script = `const f=require('fs'),p=require('path'),c=require('crypto');
+const root='/app/web-dist',h=c.createHash('sha256');let count=0,total=0,index=false;
+function walk(dir){for(const name of f.readdirSync(dir).sort()){
+  if(++count>4096)throw Error('Too many web entries');
+  const file=p.join(dir,name),s=f.lstatSync(file);
+  if(s.isDirectory()){walk(file);continue}
+  if(!s.isFile()||(total+=s.size)>128*1024*1024)throw Error('Invalid web entry');
+  const rel=p.relative(root,file),bytes=f.readFileSync(file);
+  if(bytes.length!==s.size)throw Error('Web entry changed during verification');
+  if(rel==='index.html'&&s.size>0)index=true;
+  h.update(JSON.stringify([rel,c.createHash('sha256').update(bytes).digest('hex')]));
+}}
+if(!f.lstatSync(root).isDirectory())throw Error('Invalid web directory');
+walk(root);if(!index)throw Error('Missing web index');process.stdout.write(h.digest('hex'));`;
+  const hash = await run("docker", ["exec", id, "node", "-e", script]);
+  if (!HASH.test(hash)) throw new Error("Could not fingerprint the served web bundle.");
+  return hash;
+}
 async function activeStreams(id) {
   // HTTP transfer completion can precede HLS playback. Retain every valid grant.
   const script = "const{DatabaseSync}=require('node:sqlite');let d=new DatabaseSync('/data/debridstreamer.sqlite',{readOnly:true});let r=d.prepare(`SELECT COUNT(*) count FROM stream_sessions WHERE revoked_at IS NULL AND expires_at > ?`).get(new Date().toISOString());process.stdout.write(String(r.count));d.close()";
@@ -323,9 +396,10 @@ async function activeStreams(id) {
   if (!/^\d+$/.test(value)) throw new Error("Could not verify active playback.");
   return Number(value);
 }
-async function verifyBaselineAfterPull(policy, expectedId, expectedImageId, expectedBundleHash) {
+async function verifyBaselineAfterPull(policy, expectedId, expectedImageId, expectedBundleHash, expectedWebHash, expectedOverrideHash) {
   const id = await containerId(policy);
-  if (id !== expectedId || await inspectFormat(id, "{{.Image}}") !== expectedImageId || await bundleHash(id) !== expectedBundleHash) {
+  if (id !== expectedId || await inspectFormat(id, "{{.Image}}") !== expectedImageId || await bundleHash(id) !== expectedBundleHash ||
+      await webBundleHash(id) !== expectedWebHash || sha256(readProtectedOverride(PATHS.override)) !== expectedOverrideHash) {
     throw new Error("The registered server changed while the candidate image was downloading.");
   }
   const mounts = JSON.parse(await inspectFormat(id, "{{json .Mounts}}"));
@@ -366,23 +440,23 @@ async function register(composeFile) {
   const currentVersion = typeof currentHealth.version === "string" && VERSION.test(currentHealth.version) ? currentHealth.version : null;
   const policy = { schemaVersion: 1, installType: "docker-compose", enabled: false, composeFile, projectDir, envPath, projectName,
     volumeName: data[0].Name, currentDigest: currentRef.slice(REPOSITORY.length + 1), currentVersion, inhibitedVersion: null, maintenanceUtcStart: 3, maintenanceMinutes: 120 };
-  writeOverride(policy.currentDigest); atomicJson(PATHS.policy, policy); writeStatus(policy, "disabled", "Registered. Automatic server updates are off.");
+  writeOverride(overrideForImage(policy.currentDigest)); atomicJson(PATHS.policy, policy); writeStatus(policy, "disabled", "Registered. Automatic server updates are off.");
   return policy;
 }
 
 async function rollback(policy, journal) {
   assertJournalIdentity(policy, journal);
+  const override = previousOverride(journal);
   const oldRef = imageRef(journal.oldDigest);
   await stopAndConfirm(policy);
-  writeOverride(journal.oldDigest);
+  writeOverride(override);
   await snapshotVolume(policy, oldRef, journal.backup, "restore");
   copyPrivateFile(join(journal.backup, "environment"), policy.envPath, false);
   await run("docker", composeArgs(policy, ["up", "--detach", "--no-deps", "debridstreamer"]));
   let id; let result;
   for (let attempt = 0; attempt < 40; attempt += 1) { try { id = await containerId(policy); result = await health(id); if (result.ok) break; } catch {} await new Promise((r) => setTimeout(r, 500)); }
   if (id == null || result?.ok !== true) throw new Error("Rollback health verification failed.");
-  const hash = await bundleHash(id);
-  if (result.ok !== true || hash !== journal.oldBundleHash || await inspectFormat(id, "{{.Config.Image}}") !== oldRef) throw new Error("Rollback verification failed.");
+  if (!await matchesPreviousServer(id, journal, oldRef)) throw new Error("Rollback verification failed.");
   policy.currentDigest = journal.oldDigest; policy.currentVersion = journal.oldVersion; policy.inhibitedVersion = journal.candidateVersion;
   atomicJson(PATHS.policy, policy); rmSync(PATHS.journal, { force: true });
   writeStatus(policy, "rolled_back", `Update ${journal.candidateVersion} failed and the previous server was restored.`, { candidateVersion: journal.candidateVersion });
@@ -396,15 +470,30 @@ function assertJournalIdentity(policy, journal) {
       JSON.stringify(journal.registration) !== JSON.stringify(registrationIdentity(policy))) {
     throw new Error("The pending update journal does not match the registered Compose service.");
   }
+  if (journal.schemaVersion === 1 && !Object.hasOwn(journal, "oldOverrideHash") && !Object.hasOwn(journal, "oldWebHash")) return;
+  const backupName = typeof journal.backup === "string" ? basename(journal.backup) : "";
+  const timestamp = backupName.slice(0, backupName.indexOf("-"));
+  if (journal.schemaVersion !== 2 || !DIGEST.test(journal.oldDigest) || !HASH.test(journal.oldBundleHash) ||
+      !HASH.test(journal.oldOverrideHash) || !HASH.test(journal.oldWebHash) || !VERSION.test(journal.candidateVersion) ||
+      !/^[1-9]\d{0,15}$/.test(timestamp) || backupName !== `${timestamp}-${journal.candidateVersion}` ||
+      journal.backup !== join(PATHS.root, "backups", backupName) ||
+      !["prepared", "stopped", "snapshotted", "switched"].includes(journal.phase)) {
+    throw new Error("The pending update journal has invalid rollback state.");
+  }
+}
+async function matchesPreviousServer(id, journal, oldRef) {
+  return await inspectFormat(id, "{{.Config.Image}}") === oldRef &&
+    await bundleHash(id) === journal.oldBundleHash &&
+    (journal.schemaVersion === 1 || await webBundleHash(id) === journal.oldWebHash);
 }
 async function restartOldWithoutRestore(policy, journal) {
   assertJournalIdentity(policy, journal);
   const oldRef = imageRef(journal.oldDigest);
-  writeOverride(journal.oldDigest);
+  writeOverride(previousOverride(journal));
   await run("docker", composeArgs(policy, ["up", "--detach", "--no-deps", "debridstreamer"]));
   let id; let result;
   for (let attempt = 0; attempt < 40; attempt += 1) { try { id = await containerId(policy); result = await health(id); if (result.ok) break; } catch {} await new Promise((r) => setTimeout(r, 500)); }
-  if (id == null || result?.ok !== true || await bundleHash(id) !== journal.oldBundleHash || await inspectFormat(id, "{{.Config.Image}}") !== oldRef) {
+  if (id == null || result?.ok !== true || !await matchesPreviousServer(id, journal, oldRef)) {
     throw new Error("Pre-install recovery verification failed.");
   }
   policy.inhibitedVersion = journal.candidateVersion;
@@ -429,7 +518,17 @@ async function performUpdate(policy, candidate, testFaults = null) {
   try { active = await activeStreams(oldId); }
   catch { writeStatus(policy, "deferred", "Playback activity could not be verified safely; the update was deferred.", { candidateVersion: candidate.version, lastCheckedAt: now.toISOString() }); return; }
   if (active > 0) { writeStatus(policy, "deferred", "Active playback is in progress; the update was deferred.", { candidateVersion: candidate.version, lastCheckedAt: now.toISOString() }); return; }
-  const oldBundleHash = await bundleHash(oldId); const oldDigest = policy.currentDigest; const oldVersion = policy.currentVersion;
+  const oldDigest = policy.currentDigest; const oldVersion = policy.currentVersion;
+  let oldBundleHash, oldWebHash, overrideBytes;
+  try {
+    oldBundleHash = await bundleHash(oldId);
+    oldWebHash = await webBundleHash(oldId);
+    overrideBytes = readProtectedOverride(PATHS.override);
+  } catch {
+    writeStatus(policy, "deferred", "The previous server and Compose override could not be verified safely; the update was deferred.", { candidateVersion: candidate.version, lastCheckedAt: now.toISOString() });
+    return;
+  }
+  const oldOverrideHash = sha256(overrideBytes);
   const oldImageId = await inspectFormat(oldId, "{{.Image}}");
   let registeredImageId;
   try { registeredImageId = await run("docker", ["image", "inspect", "--format", "{{.Id}}", imageRef(oldDigest)]); }
@@ -447,11 +546,13 @@ async function performUpdate(policy, candidate, testFaults = null) {
     writeStatus(policy, "failed", "Candidate image download or provenance verification failed.", { candidateVersion: candidate.version, lastCheckedAt: now.toISOString() });
     throw error;
   }
-  try { active = await verifyBaselineAfterPull(policy, oldId, oldImageId, oldBundleHash); }
+  try { active = await verifyBaselineAfterPull(policy, oldId, oldImageId, oldBundleHash, oldWebHash, oldOverrideHash); }
   catch { writeStatus(policy, "deferred", "The running server changed or playback activity could not be rechecked safely; the update was deferred.", { candidateVersion: candidate.version, lastCheckedAt: now.toISOString() }); return; }
   if (active > 0) { writeStatus(policy, "deferred", "Active playback began while the candidate downloaded; the update was deferred.", { candidateVersion: candidate.version, lastCheckedAt: now.toISOString() }); return; }
   const backup = join(PATHS.root, "backups", `${Date.now()}-${candidate.version}`); mkdirSync(backup, { recursive: true, mode: 0o700 });
-  const journal = { schemaVersion: 1, phase: "prepared", backup, oldDigest, oldVersion, oldBundleHash, candidateVersion: candidate.version, candidateDigest: candidate.image.digest, registration: registrationIdentity(policy) };
+  const journal = { schemaVersion: 2, phase: "prepared", backup, oldDigest, oldVersion, oldBundleHash,
+    oldOverrideHash: snapshotOverride(backup, overrideBytes), oldWebHash, candidateVersion: candidate.version,
+    candidateDigest: candidate.image.digest, registration: registrationIdentity(policy) };
   atomicJson(PATHS.journal, journal); writeStatus(policy, "updating", `Installing server ${candidate.version}.`, { candidateVersion: candidate.version, lastCheckedAt: now.toISOString() });
   try {
     if (testFaults?.stop === true) throw new Error("Injected stop failure.");
@@ -464,7 +565,7 @@ async function performUpdate(policy, candidate, testFaults = null) {
     catch { await restartOldWithoutRestore(policy, journal); return; }
     journal.phase = "snapshotted"; atomicJson(PATHS.journal, journal);
     if (testFaults?.interruptAfterSnapshot === true) return;
-    writeOverride(candidate.image.digest); journal.phase = "switched"; atomicJson(PATHS.journal, journal);
+    writeOverride(overrideForImage(candidate.image.digest)); journal.phase = "switched"; atomicJson(PATHS.journal, journal);
     await run("docker", composeArgs(policy, ["up", "--detach", "--no-deps", "debridstreamer"]));
     let id; let result;
     for (let attempt = 0; attempt < 40; attempt += 1) { try { id = await containerId(policy); result = await health(id); if (result.ok) break; } catch {} await new Promise((r) => setTimeout(r, 500)); }

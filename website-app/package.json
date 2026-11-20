@@ -1,7 +1,7 @@
 {
   "name": "yawf-stream-site",
   "private": true,
-  "version": "2.3.114",
+  "version": "2.3.115",
   "type": "module",
   "scripts": {
     "dev": "vite",

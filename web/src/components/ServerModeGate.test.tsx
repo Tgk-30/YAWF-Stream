@@ -11,7 +11,7 @@
 // is stubbed per-test.
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // --- Mocks ------------------------------------------------------------------
@@ -188,6 +188,69 @@ describe("ServerModeGate", () => {
     );
     // The 401 handler is armed in Server Mode.
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
+  });
+
+  it("adopts recovered transcode capabilities without reloading the mounted session", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      setupRequired: false, session: { profileId: "p1" }, csrfToken: "keep-this",
+      transcodeAvailable: false, transcodeRetryPending: true,
+    })).mockResolvedValueOnce(jsonResponse({
+      session: null, csrfToken: null, transcodeAvailable: true,
+      transcodeCapabilities: { adaptive: true, qualities: ["480p"], seekOffset: true },
+    }));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const view = render(<ServerModeGate>{CHILD}</ServerModeGate>);
+    try {
+      await act(async () => {});
+      const app = screen.getByTestId("app");
+      const provider = screen.getByTestId("session-provider");
+      expect(provider.dataset.transcode).toBe("false");
+      await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+      expect(provider.dataset.transcode).toBe("true");
+      expect(JSON.parse(provider.dataset.transcodeCapabilities!)).toMatchObject({ qualities: ["480p"], seekOffset: true });
+      expect(screen.getByTestId("app")).toBe(app);
+      expect(JSON.parse(provider.dataset.session!)).toEqual({ profileId: "p1" });
+      expect(setCsrfToken.mock.calls).toEqual([["keep-this"]]);
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally { view.unmount(); vi.useRealTimers(); }
+  });
+
+  it("cancels a pending capability refresh when the session gate unmounts", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      setupRequired: false, session: { profileId: "p1" }, transcodeAvailable: false, transcodeRetryPending: true,
+    })).mockImplementationOnce(() => new Promise(() => {}));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const view = render(<ServerModeGate>{CHILD}</ServerModeGate>);
+    try {
+      await act(async () => {});
+      await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const signal = fetchMock.mock.calls[1]?.[1]?.signal as AbortSignal;
+      expect(signal.aborted).toBe(false);
+      view.unmount();
+      expect(signal.aborted).toBe(true);
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally { view.unmount(); vi.useRealTimers(); }
+  });
+
+  it("limits checks when the server stays pending or a proxy returns an empty response", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      setupRequired: false, session: { profileId: "p1" }, transcodeAvailable: false, transcodeRetryPending: true,
+    })).mockResolvedValueOnce(jsonResponse({})).mockResolvedValue(jsonResponse({
+      transcodeAvailable: false, transcodeRetryPending: true,
+    }));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const view = render(<ServerModeGate>{CHILD}</ServerModeGate>);
+    try {
+      await act(async () => {});
+      await act(async () => { await vi.advanceTimersByTimeAsync(42_000); });
+      expect(fetchMock).toHaveBeenCalledTimes(15);
+      await act(async () => { await vi.advanceTimersByTimeAsync(120_000); });
+      expect(fetchMock).toHaveBeenCalledTimes(15);
+      expect(screen.getByTestId("app")).toBeInTheDocument();
+    } finally { view.unmount(); vi.useRealTimers(); }
   });
 
   it("normalizes malformed transcode qualities from a server bootstrap", async () => {

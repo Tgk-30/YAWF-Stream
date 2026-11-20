@@ -581,7 +581,7 @@ export function defaultSettings(): AppSettings {
     defaultPlaybackSpeed: 1,
     defaultVolume: 100,
     rememberPerTitleTrackChoices: true,
-    iosHlsPlaybackMode: "native",
+    iosHlsPlaybackMode: "automatic",
     openSubtitlesApiKey: env("VITE_OPENSUBTITLES_KEY"),
     simpleMode: true,
     autoUpdateChecks: true,

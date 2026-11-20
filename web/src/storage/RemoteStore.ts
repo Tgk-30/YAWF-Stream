@@ -1,4 +1,4 @@
-import type { MediaItem, MediaPreview } from "../models/media";
+import { withoutSearchContinuation, type MediaItem, type MediaPreview } from "../models/media";
 import type {
   AIUsageRecord,
   CachedResolutionRecord,
@@ -319,7 +319,7 @@ export class RemoteStore implements Store, SecretStore {
 
   async addToWatchlist(preview: MediaPreview, _folderId?: string | null): Promise<void> {
     await this.api.put(`/api/library/watchlist/${encodeURIComponent(preview.id)}`, {
-      preview,
+      preview: withoutSearchContinuation(preview),
     });
   }
 
@@ -388,7 +388,7 @@ export class RemoteStore implements Store, SecretStore {
       completed,
       queuedNext,
       streamQuality,
-      preview: entry.preview,
+      preview: withoutSearchContinuation(entry.preview),
       lastWatched,
       ...(entry.preferredAudioId === undefined
         ? {} : { preferredAudioId: entry.preferredAudioId }),
@@ -423,7 +423,7 @@ export class RemoteStore implements Store, SecretStore {
       queuedNext,
       lastWatched,
       streamQuality,
-      preview: entry.preview,
+      preview: withoutSearchContinuation(entry.preview),
     };
     if (entry.preferredAudioId !== undefined) {
       record.preferredAudioId = entry.preferredAudioId;
@@ -517,7 +517,7 @@ export class RemoteStore implements Store, SecretStore {
         customListName: entry.customListName ?? null,
         releaseDateHint: entry.releaseDateHint ?? null,
         renewalStatus: entry.renewalStatus ?? null,
-        preview: entry.preview,
+        preview: withoutSearchContinuation(entry.preview),
         addedAt: entry.addedAt,
       },
     );

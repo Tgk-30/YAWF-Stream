@@ -30,6 +30,7 @@ import {
 } from "../data/episodes";
 import {
   EPISODE_GUIDE_VERSION,
+  continuationForSearchPreview,
   hasEpisodeContinuationIdentityConflict,
   recoverContinuationChildSelection,
   requiresCanonicalEpisodeGuide,
@@ -329,6 +330,7 @@ function downloadEstimate(
 export function Detail() {
   const {
     detailItem,
+    detailVisitId,
     closeDetail,
     openDetail,
     detailSourcesOpen,
@@ -394,7 +396,19 @@ export function Detail() {
   const [episodeOverrides, setEpisodeOverrides] = useState<
     Record<string, { season: number; episode: number }>
   >(() => loadEpisodeOverrides());
+  const searchContinuation = continuationForSearchPreview(detailItem);
+  // Browser history restores a structured clone of the preview on Back. Keep
+  // explicit picks for that visit, but start at the arc's first episode when
+  // the result is opened again. Legacy entries without a visit stay instance-scoped.
+  const searchSelectionOwner = detailVisitId ?? detailItem;
+  const [searchSelection, setSearchSelection] = useState<{
+    owner: typeof searchSelectionOwner;
+    episode: { season: number; episode: number };
+  } | null>(null);
   const selectEpisode = (id: string, next: { season: number; episode: number }) => {
+    if (searchContinuation != null && detailItem?.id === id) {
+      setSearchSelection({ owner: searchSelectionOwner, episode: next });
+    }
     setEpisodeOverrides((m) => {
       const merged = { ...m, [id]: next };
       // Bound the map so storage never balloons. String-key insertion order is
@@ -419,10 +433,13 @@ export function Detail() {
   const rawSelected = useMemo(
     () =>
       detailItem?.type === "series"
-        ? episodeOverrides[detailItem.id] ??
-          defaultSelectionFor(detailItem.id, continueWatching)
+        ? searchContinuation != null
+          ? searchSelection?.owner === searchSelectionOwner
+            ? searchSelection.episode
+            : { season: searchContinuation.displaySeasonStart, episode: 1 }
+          : episodeOverrides[detailItem.id] ?? defaultSelectionFor(detailItem.id, continueWatching)
         : null,
-    [detailItem, episodeOverrides, continueWatching],
+    [detailItem, episodeOverrides, continueWatching, searchContinuation, searchSelection, searchSelectionOwner],
   );
   const episodeGuideTmdbId = detail.data.item?.tmdbId ?? detailItem?.tmdbId ?? null;
   const seasonsState = useSeasons(
@@ -481,11 +498,23 @@ export function Detail() {
     detail.data.imdbId,
     episodeGuideTmdbId,
   );
+  // An arc shortcut must never use a similarly numbered TMDB season or a
+  // different show's guide when canonical metadata is missing.
+  const searchContinuationBlocked = searchContinuation != null && (
+    detail.data.imdbId !== searchContinuation.parentImdbId ||
+    episodeGuideTmdbId !== searchContinuation.parentTmdbId ||
+    seasonsState.source !== "live" ||
+    seasonsState.numbering !== "cinemeta" ||
+    seasonsState.guideVersion !== EPISODE_GUIDE_VERSION ||
+    !seasonsState.seasons.some((season) => season.seasonNumber === searchContinuation.displaySeasonStart)
+  );
   const episodeGuideBlocked =
     continuationRecoveryBlocked ||
+    searchContinuationBlocked ||
     (canonicalEpisodeGuideRequired && seasonsState.source !== "live");
   const selectedSeasonInGuide =
     !continuationRecoveryBlocked &&
+    !searchContinuationBlocked &&
     !hasEpisodeContinuationIdentityConflict(detail.data.imdbId, episodeGuideTmdbId) &&
     (selected == null ||
       (seasonsState.source === "live"
@@ -680,7 +709,7 @@ export function Detail() {
   // nextEpisodeFor (harmless: moving to it still requires a cached row).
   const selectedSeasonEpisodes = useEpisodes(
     episodeGuideTmdbId,
-    continuationRecoveryBlocked ? null : selected?.season ?? null,
+    continuationRecoveryBlocked || searchContinuationBlocked ? null : selected?.season ?? null,
     services.tmdb,
     detail.data.imdbId,
   );

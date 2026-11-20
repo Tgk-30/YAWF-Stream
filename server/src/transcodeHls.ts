@@ -1,3 +1,4 @@
+export const TRANSCODE_SEGMENT_SECONDS = 6;
 export const TRANSCODE_SUBTITLE_PLAYLIST_PATTERN = "%v_subtitles.m3u8";
 
 const TRANSCODE_ASSET =
@@ -8,6 +9,17 @@ const TRANSCODE_ASSET_LINE =
 
 export function isTranscodeAssetName(asset: string): boolean {
   return TRANSCODE_ASSET.test(asset);
+}
+
+type TranscodeVideoQuality = "1080p" | "720p" | "480p" | "360p";
+
+export function transcodeVideoRenditionQuality(asset: string): TranscodeVideoQuality | undefined {
+  switch (asset) {
+    case "1080p.m3u8": return "1080p";
+    case "720p.m3u8": return "720p";
+    case "480p.m3u8": return "480p";
+    case "360p.m3u8": return "360p";
+  }
 }
 
 /** Bind every local HLS reference to the exact output generation. FFmpeg's
@@ -119,7 +131,7 @@ export function rewriteGeneratedWebVttForTimeline(
  * published URI follows a closed segment; a trailing EXTINF is not one. */
 export function parsePublishedTranscodeSnapshot(
   manifest: string,
-  quality: "1080p" | "720p" | "480p" | "360p",
+  quality: TranscodeVideoQuality,
 ): { frontier: number; target: number; endlist: boolean; segments: string[] } | null {
   if (Buffer.byteLength(manifest) > 1_048_576 || !manifest.endsWith("\n")) return null;
   const lines = manifest.split(/\r?\n/);
@@ -153,7 +165,8 @@ export function parsePublishedTranscodeSnapshot(
       playlistType = true;
     } else if (/^#EXTINF:(?:\d+)(?:\.\d+)?,[ \t]*$/.test(line) && target != null && sequence && playlistType) {
       pending = Number(line.slice(8).split(",")[0]);
-      if (!Number.isFinite(pending) || pending <= 0 || pending > target + 0.5) return null;
+      if (!Number.isFinite(pending) || pending <= 0 ||
+          Math.round(pending) > Math.min(target, TRANSCODE_SEGMENT_SECONDS)) return null;
     } else if (line === "#EXT-X-ENDLIST" && segments.length > 0) {
       endlist = true;
     } else {
@@ -161,5 +174,21 @@ export function parsePublishedTranscodeSnapshot(
     }
   }
   return pending == null && target != null && sequence && playlistType && segments.length > 0
-    ? { frontier, target, endlist, segments } : null;
+    ? { frontier, target: TRANSCODE_SEGMENT_SECONDS, endlist, segments } : null;
+}
+
+/** FFmpeg derives the initial target from the segments already written.
+ * Publish the configured cadence consistently in the readiness header and
+ * rendition playlist, after validating that every published segment fits. */
+export function rewriteTranscodeVideoRendition(
+  manifest: string,
+  quality: TranscodeVideoQuality,
+  generation?: string,
+): string | null {
+  const snapshot = parsePublishedTranscodeSnapshot(manifest, quality);
+  if (snapshot == null) return null;
+  return rewriteTranscodeManifest(manifest.replace(
+    /^#EXT-X-TARGETDURATION:[1-9]\d*(?=\r?$)/m,
+    `#EXT-X-TARGETDURATION:${snapshot.target}`,
+  ), generation);
 }

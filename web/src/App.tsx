@@ -787,8 +787,12 @@ export function App() {
           overlay. The host owns the app-wide native-mpv mount. */}
       <LocalPlayerHost />
       {isTVMode() && (
-        <Suspense fallback={<Spinner variant="inline" label="Loading phone remote…" />}>
-          <TVPairingDock />
+        <Suspense fallback={null}>
+          <TVPairingDock covered={
+            detailItem != null || browseContext != null || localFilePlayer != null ||
+            welcomeGuideOpen || tierWelcomeOpen || firstRunOpen || shortcutsOpen ||
+            profilePickerOpen || launchPickerOpen || localProfileLocked
+          } />
         </Suspense>
       )}
 

@@ -12,7 +12,7 @@
 // provides a spec-compliant in-memory IndexedDB.
 
 import Dexie, { liveQuery, type Table } from "dexie";
-import type { MediaItem, MediaPreview } from "../models/media";
+import { withoutSearchContinuation, type MediaItem, type MediaPreview } from "../models/media";
 import {
   type AIUsageRecord,
   type CachedResolutionRecord,
@@ -349,7 +349,7 @@ export class DexieStore extends Dexie implements Store, SecretStore {
       // A normal re-add keeps the folder. Imports can intentionally supply a
       // folder id to file existing or newly-added titles together.
       folderId: folderId === undefined ? existing?.folderId ?? null : folderId,
-      preview,
+      preview: withoutSearchContinuation(preview),
     });
   }
 
@@ -468,7 +468,7 @@ export class DexieStore extends Dexie implements Store, SecretStore {
       queuedNext: entry.queuedNext ?? false,
       lastWatched: entry.lastWatched ?? nowISO(),
       streamQuality: entry.streamQuality ?? null,
-      preview: entry.preview,
+      preview: withoutSearchContinuation(entry.preview),
       preferredAudioId: entry.preferredAudioId === undefined
         ? prev?.preferredAudioId ?? null
         : entry.preferredAudioId,
@@ -597,7 +597,7 @@ export class DexieStore extends Dexie implements Store, SecretStore {
         releaseDateHint:
           entry.releaseDateHint ?? existing?.releaseDateHint ?? null,
         renewalStatus: entry.renewalStatus ?? existing?.renewalStatus ?? null,
-        preview: entry.preview,
+        preview: withoutSearchContinuation(entry.preview),
       };
       await this.library.put(record);
       return record;

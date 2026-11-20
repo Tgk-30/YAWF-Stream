@@ -516,6 +516,9 @@ class MainActivity : TauriActivity() {
     clearServerPlayerRequest(pending)
     val viewIntent = Intent(Intent.ACTION_VIEW).apply {
       setDataAndType(Uri.parse(pending.url), "video/*")
+      // Some players otherwise show the capability as the title and wait at
+      // a saved position instead of starting on a new handoff.
+      putExtra("title", "YAWF Stream")
     }
     try {
       startActivity(Intent.createChooser(viewIntent, "Open external player"))

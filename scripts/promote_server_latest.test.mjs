@@ -36,26 +36,26 @@ function jsonBytes(value) {
   return Buffer.from(`${JSON.stringify(value)}\n`);
 }
 
-function manifestValue() {
+function manifestValue(version = VERSION) {
   return {
     schemaVersion: 1,
-    version: VERSION,
+    version,
     sourceRevision: SOURCE,
     image: { repository: IMAGE, digest: IMAGE_DIGEST },
     debian: {
-      name: `debridstreamer-server_${VERSION}_all.deb`,
+      name: `debridstreamer-server_${version}_all.deb`,
       sha256: DEBIAN_SHA,
       size: 4_184_610,
     },
   };
 }
 
-function verificationValue() {
+function verificationValue(version = VERSION) {
   return {
     schemaVersion: 1,
-    version: VERSION,
+    version,
     sourceRevision: SOURCE,
-    releaseTag: TAG,
+    releaseTag: `v${version}`,
     serverBundleSha256: "1".repeat(64),
     image: {
       repository: IMAGE,
@@ -84,7 +84,7 @@ function verificationValue() {
   };
 }
 
-function runValue(kind, id) {
+function runValue(kind, id, tag = TAG) {
   const container = kind === "container";
   return {
     id,
@@ -93,7 +93,7 @@ function runValue(kind, id) {
     event: container ? "push" : "workflow_dispatch",
     status: "completed",
     conclusion: "success",
-    head_branch: container ? TAG : "codex/emergency-server-release",
+    head_branch: container ? tag : "codex/emergency-server-release",
     head_sha: SOURCE,
     run_attempt: 1,
     actor: { login: "Tgk-30" },
@@ -118,31 +118,32 @@ function asset(id, tag, name, bytesOrMetadata, maximumDigest = null) {
   };
 }
 
-function qualificationFixture() {
-  const manifestBytes = jsonBytes(manifestValue());
-  const verificationBytes = jsonBytes(verificationValue());
-  const packageBytes = jsonBytes({ name: "debridstreamer-server", private: true, version: VERSION });
+function qualificationFixture(version = VERSION) {
+  const tag = `v${version}`;
+  const manifestBytes = jsonBytes(manifestValue(version));
+  const verificationBytes = jsonBytes(verificationValue(version));
+  const packageBytes = jsonBytes({ name: "debridstreamer-server", private: true, version });
   const release = {
     id: 421_488_481,
-    tag_name: TAG,
+    tag_name: tag,
     draft: false,
     prerelease: false,
     published_at: "2026-10-23T05:41:59Z",
     author: { login: "Tgk-30" },
     url: `${API}/releases/421488481`,
     assets_url: `${API}/releases/421488481/assets`,
-    html_url: `${WEB}/releases/tag/${TAG}`,
+    html_url: `${WEB}/releases/tag/${tag}`,
     assets: [
-      asset(11, TAG, "server-update.json", manifestBytes),
-      asset(12, TAG, `Server_${VERSION}_verification.json`, verificationBytes),
-      asset(13, TAG, `debridstreamer-server_${VERSION}_all.deb`, {
+      asset(11, tag, "server-update.json", manifestBytes),
+      asset(12, tag, `Server_${version}_verification.json`, verificationBytes),
+      asset(13, tag, `debridstreamer-server_${version}_all.deb`, {
         size: manifestValue().debian.size,
         sha256: DEBIAN_SHA,
       }),
     ],
   };
   return {
-    requestedVersion: VERSION,
+    requestedVersion: version,
     expectedSourceRevision: SOURCE,
     expectedImageDigest: IMAGE_DIGEST,
     release,
@@ -151,8 +152,8 @@ function qualificationFixture() {
     resolvedTagCommit: SOURCE,
     packageBytes,
     runs: {
-      container: runValue("container", verificationValue().workflowRuns.container),
-      debian: runValue("debian", verificationValue().workflowRuns.debian),
+      container: runValue("container", verificationValue().workflowRuns.container, tag),
+      debian: runValue("debian", verificationValue().workflowRuns.debian, tag),
     },
   };
 }
@@ -382,8 +383,9 @@ function responseBytes(bytes, status = 200, headers = {}) {
   });
 }
 
-function collectionMock({ redirectManifestTo = null, mutateFixture = () => {} } = {}) {
-  const fixture = qualificationFixture();
+function collectionMock({ redirectManifestTo = null, version = VERSION, mutateFixture = () => {} } = {}) {
+  const fixture = qualificationFixture(version);
+  const tag = fixture.release.tag_name;
   mutateFixture(fixture);
   const calls = [];
   const packageMetadata = {
@@ -396,23 +398,28 @@ function collectionMock({ redirectManifestTo = null, mutateFixture = () => {} } 
     url: `${API}/contents/server/package.json?ref=${SOURCE}`,
   };
   const routes = new Map([
-    [`${API}/releases/tags/${TAG}`, () => responseJson(fixture.release)],
-    [`${WEB}/releases/download/${TAG}/server-update.json`, () => redirectManifestTo == null
+    [`${API}/releases/tags/${tag}`, () => responseJson(fixture.release)],
+    [`${WEB}/releases/download/${tag}/server-update.json`, () => redirectManifestTo == null
       ? responseBytes(fixture.manifestBytes)
       : new Response(null, { status: 302, headers: { location: redirectManifestTo } })],
-    [`${WEB}/releases/download/${TAG}/Server_${VERSION}_verification.json`, () => responseBytes(fixture.verificationBytes)],
-    [`${API}/git/ref/tags/${TAG}`, () => responseJson({
-      ref: `refs/tags/${TAG}`,
+    [`${WEB}/releases/download/${tag}/Server_${version}_verification.json`, () => responseBytes(fixture.verificationBytes)],
+    [`${API}/git/ref/tags/${tag}`, () => responseJson({
+      ref: `refs/tags/${tag}`,
       object: { type: "tag", sha: TAG_OBJECT, url: `${API}/git/tags/${TAG_OBJECT}` },
     })],
     [`${API}/git/tags/${TAG_OBJECT}`, () => responseJson({
-      tag: TAG,
+      tag,
       object: { type: "commit", sha: SOURCE, url: `${API}/git/commits/${SOURCE}` },
     })],
     [`${API}/contents/server/package.json?ref=${SOURCE}`, () => responseJson(packageMetadata)],
     [`${API}/actions/runs/${verificationValue().workflowRuns.container}`, () => responseJson(fixture.runs.container)],
     [`${API}/actions/runs/${verificationValue().workflowRuns.debian}`, () => responseJson(fixture.runs.debian)],
   ]);
+  const { id, run_attempt: attempt } = fixture.runs.debian;
+  if (fixture.debianAttemptJobs != null) {
+    routes.set(`${API}/actions/runs/${id}/attempts/${attempt}/jobs?per_page=100`,
+      () => responseJson(fixture.debianAttemptJobs));
+  }
   if (redirectManifestTo != null) routes.set(redirectManifestTo, () => responseBytes(fixture.manifestBytes));
   return {
     calls,
@@ -424,6 +431,75 @@ function collectionMock({ redirectManifestTo = null, mutateFixture = () => {} } 
     },
   };
 }
+
+const ACTUAL_UPDATER_VERSION = "2.3.115";
+const ACTUAL_UPDATER_STEP = "Verify actual published image upgrade and rollback";
+
+function addActualUpdaterEvidence(fixture) {
+  const run = fixture.runs.debian;
+  run.run_attempt = 2;
+  run.display_title = `Verify server ${IMAGE_DIGEST} ${SOURCE}`;
+  fixture.debianAttemptJobs = {
+    total_count: 2,
+    jobs: ["ubuntu-22.04", "ubuntu-24.04"].map((runner) => ({
+      run_id: run.id,
+      run_attempt: run.run_attempt,
+      head_sha: SOURCE,
+      status: "completed",
+      conclusion: "success",
+      name: `Docker Compose updater transaction (${runner})`,
+      steps: [
+        { name: "Verify isolated Compose upgrade and rollback", status: "completed", conclusion: "success" },
+        { name: ACTUAL_UPDATER_STEP, status: "completed", conclusion: "success" },
+      ],
+    })),
+  };
+}
+
+test("2.3.115 and newer require both Ubuntu updater jobs to run the actual-image check", () => {
+  for (const version of [ACTUAL_UPDATER_VERSION, "2.4.0"]) {
+    const fixture = qualificationFixture(version);
+    addActualUpdaterEvidence(fixture);
+    assert.equal(qualifyReleaseEvidence(fixture).version, version);
+  }
+});
+
+test("historical 2.3.114 evidence remains readable without a digest-bound run title", () => {
+  assert.equal(qualifyReleaseEvidence(qualificationFixture("2.3.114")).version, "2.3.114");
+});
+
+test("promotion refuses synthetic-only, mismatched, stale, or incomplete actual-image evidence", () => {
+  const cases = [
+    ["missing attempt jobs", (v) => { delete v.debianAttemptJobs; }],
+    ["workflow was not dispatched", (v) => { v.runs.debian.event = "push"; v.runs.debian.head_branch = v.release.tag_name; }],
+    ["wrong image bound to run", (v) => { v.runs.debian.display_title = v.runs.debian.display_title.replace(IMAGE_DIGEST, `sha256:${"0".repeat(64)}`); }],
+    ["wrong source bound to run", (v) => { v.runs.debian.display_title = v.runs.debian.display_title.replace(SOURCE, "0".repeat(40)); }],
+    ["incomplete page", (v) => { v.debianAttemptJobs.total_count += 1; }],
+    ["failed job", (v) => { v.debianAttemptJobs.jobs[0].conclusion = "failure"; }],
+    ["stale job attempt", (v) => { v.debianAttemptJobs.jobs[0].run_attempt -= 1; }],
+    ["wrong job run", (v) => { v.debianAttemptJobs.jobs[0].run_id += 1; }],
+    ["wrong job source", (v) => { v.debianAttemptJobs.jobs[0].head_sha = "0".repeat(40); }],
+    ["missing runner", (v) => { v.debianAttemptJobs.jobs.pop(); v.debianAttemptJobs.total_count -= 1; }],
+    ["duplicated runner", (v) => { v.debianAttemptJobs.jobs[1].name = v.debianAttemptJobs.jobs[0].name; }],
+    ["actual step skipped", (v) => { v.debianAttemptJobs.jobs[1].steps[1].conclusion = "skipped"; }],
+    ["actual step missing", (v) => { v.debianAttemptJobs.jobs[1].steps.pop(); }],
+    ["actual step duplicated", (v) => { v.debianAttemptJobs.jobs[1].steps.push(v.debianAttemptJobs.jobs[1].steps[1]); }],
+  ];
+  for (const [label, mutate] of cases) {
+    const fixture = qualificationFixture(ACTUAL_UPDATER_VERSION);
+    addActualUpdaterEvidence(fixture);
+    mutate(fixture);
+    assert.throws(() => qualifyReleaseEvidence(fixture), /actual-image updater/, label);
+  }
+});
+
+test("collector verifies the exact run attempt, not stale jobs from reruns", async () => {
+  const mock = collectionMock({ version: ACTUAL_UPDATER_VERSION, mutateFixture: addActualUpdaterEvidence });
+  const result = await collectReleaseEvidence({ requestedVersion: ACTUAL_UPDATER_VERSION, fetchImpl: mock.fetchImpl });
+  const id = verificationValue().workflowRuns.debian;
+  assert.ok(mock.calls.some((call) => call.href.endsWith(`/actions/runs/${id}/attempts/2/jobs?per_page=100`)));
+  assert.equal(result.workflowRuns.debian.attempt, 2);
+});
 
 test("collector executes actual annotated-tag and public-byte path without forwarding the API token", async () => {
   const mock = collectionMock();

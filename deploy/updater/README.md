@@ -85,9 +85,16 @@ The helper uses the immutable GHCR index digest, never `latest`. It stops and
 recreates only the registered application service with `--no-deps`. A narrow
 host helper container has only `DAC_OVERRIDE` and `CHOWN`, no network, and only
 the exact named volume, private backup, and fixed copy helper mounted. Before
-the switch it takes a private symlink-free, ownership-preserving copy and an
-opaque copy of `.env`. Failed or interrupted candidates restore the previous
-immutable image, volume, and environment file.
+the switch it takes a private symlink-free, ownership-preserving copy and opaque
+copies of `.env` and the updater's Compose override. Failed or interrupted
+candidates restore the previous immutable image, volume, environment file, and
+the exact previous override, including any existing read-only hotfix mounts.
+Recovery checks the previous backend and served web bundle, including its lazy
+assets, before clearing the journal. Keep the mounted hotfix files available
+and unchanged until the update finishes. New packages replace temporary hotfix
+mounts only for the candidate; the override is restored on rollback. An older
+in-flight journal created before override snapshots are supported can still
+recover the digest, but does not have the override snapshot.
 
 The optional read-only bind
 `/var/lib/yawf-server-updater/public:/run/yawf-server-updater:ro` exposes only a

@@ -1,18 +1,41 @@
 // @vitest-environment jsdom
 import { act, renderHook } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
-import { useVideoPresentation } from "./useVideoPresentation";
+import { describe, expect, it, vi } from "vitest";
+import { useVideoPresentation, useVideoPresentationStore } from "./useVideoPresentation";
+
+const useObservedPresentation = (owner: string) => {
+  const store = useVideoPresentationStore(owner);
+  return [useVideoPresentation(store), store.update] as const;
+};
 
 describe("session-local video presentation ownership", () => {
   it("retains all presentation values while the content/file owner stays the same", () => {
-    const { result, rerender } = renderHook(({ owner }) => useVideoPresentation(owner), { initialProps: { owner: "file-A" } });
+    const { result, rerender } = renderHook(({ owner }) => useObservedPresentation(owner), { initialProps: { owner: "file-A" } });
     act(() => result.current[1]({ fit: "cover", zoom: 1.35, panX: 12, panY: -8 }));
     rerender({ owner: "file-A" });
     expect(result.current[0]).toEqual({ fit: "cover", zoom: 1.35, panX: 12, panY: -8 });
   });
 
+  it("keeps the snapshot for no-op gestures and after a reader unsubscribes", () => {
+    const { result } = renderHook(() => useVideoPresentationStore("file-A"));
+    const store = result.current;
+    const initial = store.getSnapshot();
+    const notify = vi.fn();
+    const unsubscribe = store.subscribe(notify);
+    store.update({ fit: "contain", panX: 0 });
+    expect(store.getSnapshot()).toBe(initial);
+    expect(notify).not.toHaveBeenCalled();
+
+    store.update({ fit: "cover" });
+    expect(notify).toHaveBeenCalledOnce();
+    unsubscribe();
+    store.update({ subtitlePosition: 70 });
+    expect(notify).toHaveBeenCalledOnce();
+    expect(store.getSnapshot()).toMatchObject({ fit: "cover", subtitlePosition: 70 });
+  });
+
   it("resets a genuine owner change and ignores its predecessor callback", () => {
-    const { result, rerender } = renderHook(({ owner }) => useVideoPresentation(owner), { initialProps: { owner: "file-A" } });
+    const { result, rerender } = renderHook(({ owner }) => useObservedPresentation(owner), { initialProps: { owner: "file-A" } });
     const stale = result.current[1];
     act(() => stale({ zoom: 1.5 }));
     rerender({ owner: "file-B" });
@@ -23,7 +46,7 @@ describe("session-local video presentation ownership", () => {
   });
 
   it("rejects stale callbacks even when an earlier owner identity returns", () => {
-    const { result, rerender } = renderHook(({ owner }) => useVideoPresentation(owner), { initialProps: { owner: "file-A" } });
+    const { result, rerender } = renderHook(({ owner }) => useObservedPresentation(owner), { initialProps: { owner: "file-A" } });
     const oldA = result.current[1];
     act(() => oldA({ zoom: 1.5 }));
     rerender({ owner: "file-B" });

@@ -3,7 +3,7 @@
 // A11y regression: the role="slider" scrub bar must support keyboard seeking.
 
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { ScrubBar, formatTime } from "./ScrubBar";
 
@@ -26,6 +26,24 @@ function key(el: Element, k: string) {
   el.dispatchEvent(
     new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }),
   );
+}
+
+function manualFrames() {
+  let frame = 0;
+  const pending = new Map<number, FrameRequestCallback>();
+  const request = vi.spyOn(window, "requestAnimationFrame").mockImplementation(callback => {
+    pending.set(++frame, callback);
+    return frame;
+  });
+  const cancel = vi.spyOn(window, "cancelAnimationFrame").mockImplementation(id => { pending.delete(id); });
+  return {
+    flush: () => act(() => {
+      const active = [...pending.values()];
+      pending.clear();
+      for (const callback of active) callback(16.7);
+    }),
+    restore: () => { request.mockRestore(); cancel.mockRestore(); },
+  };
 }
 
 describe("ScrubBar keyboard seeking", () => {
@@ -273,8 +291,12 @@ describe("ScrubBar pointer flow", () => {
     const { rerender } = render(<ScrubBar {...props} />);
     const slider = screen.getByRole("slider", { name: "Seek" });
     slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
-    fireEvent.pointerDown(slider, { clientX: 20, pointerId: 7 });
-    fireEvent.pointerMove(slider, { clientX: 75, pointerId: 7 });
+    const frames = manualFrames();
+    try {
+      fireEvent.pointerDown(slider, { clientX: 20, pointerId: 7 });
+      fireEvent.pointerMove(slider, { clientX: 75, pointerId: 7 });
+      frames.flush();
+    } finally { frames.restore(); }
     expect(onSeekPreview.mock.calls.map(([time]) => time)).toEqual([120, 450]);
     expect(onSeek).not.toHaveBeenCalled();
     rerender(<ScrubBar {...props} currentTime={60} />);
@@ -290,6 +312,63 @@ describe("ScrubBar pointer flow", () => {
     fireEvent.keyDown(slider, { key: "ArrowRight" });
     expect(onSeek).toHaveBeenLastCalledWith(65);
     expect(onSeekPreview).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces touch previews to one layout read, skips thumbnail fetching, and commits the exact release", () => {
+    const onHover = vi.fn();
+    const onSeek = vi.fn();
+    const onSeekPreview = vi.fn();
+    const frames = manualFrames();
+    try {
+      render(<ScrubBar currentTime={20} duration={100} preview={null} onHover={onHover} onLeave={() => {}}
+        onSeek={onSeek} onSeekPreview={onSeekPreview} touchPresentation />);
+      const slider = screen.getByRole("slider", { name: "Seek" });
+      const measure = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      slider.getBoundingClientRect = measure;
+      const touch = { pointerType: "touch", pointerId: 5, isPrimary: true };
+      fireEvent.pointerDown(slider, { ...touch, clientX: 25 });
+      expect(measure).toHaveBeenCalledOnce();
+      measure.mockClear();
+      for (const clientX of [30, 35, 50, 70]) fireEvent.pointerMove(slider, { ...touch, clientX });
+      fireEvent.pointerMove(slider, { ...touch, pointerId: 6, clientX: 95 });
+      expect(measure).not.toHaveBeenCalled();
+      expect(slider).toHaveAttribute("aria-valuenow", "25");
+      frames.flush();
+      expect(measure).toHaveBeenCalledOnce();
+      expect(slider).toHaveAttribute("aria-valuenow", "70");
+      expect(onSeekPreview.mock.calls).toEqual([[25], [70]]);
+      expect(onHover).not.toHaveBeenCalled();
+      expect(onSeek).not.toHaveBeenCalled();
+
+      fireEvent.pointerMove(slider, { ...touch, clientX: 75 });
+      fireEvent.pointerUp(slider, { ...touch, clientX: 84 });
+      frames.flush();
+      expect(onSeek.mock.calls).toEqual([[84]]);
+      expect(onSeekPreview.mock.calls).toEqual([[25], [70]]);
+      expect(measure).toHaveBeenCalledTimes(2);
+      expect(document.querySelector(".scrub-tooltip")).toBeNull();
+    } finally { frames.restore(); }
+  });
+
+  it("does not render a queued preview or seek after touch cancellation", () => {
+    const onSeekPreview = vi.fn();
+    const onSeek = vi.fn();
+    const frames = manualFrames();
+    try {
+      render(<ScrubBar currentTime={20} duration={100} preview={null} onHover={() => {}} onLeave={() => {}}
+        onSeek={onSeek} onSeekPreview={onSeekPreview} touchPresentation />);
+      const slider = screen.getByRole("slider", { name: "Seek" });
+      slider.getBoundingClientRect = vi.fn(() => ({ left: 0, width: 100 } as DOMRect));
+      const touch = { pointerType: "touch", pointerId: 5, isPrimary: true };
+      fireEvent.pointerDown(slider, { ...touch, clientX: 25 });
+      fireEvent.pointerMove(slider, { ...touch, clientX: 80 });
+      fireEvent.pointerCancel(slider, touch);
+      frames.flush();
+      expect(onSeekPreview.mock.calls).toEqual([[25]]);
+      expect(onSeek).not.toHaveBeenCalled();
+      expect(slider).toHaveAttribute("aria-valuenow", "20");
+      expect(document.querySelector(".scrub-tooltip")).toBeNull();
+    } finally { frames.restore(); }
   });
 
   it("cancels a disabled deferred gesture even when reenabled before pointer release", () => {

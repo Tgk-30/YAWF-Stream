@@ -1,4 +1,5 @@
-export type IosHlsPlaybackMode = "native" | "compatibility";
+export type IosHlsPlaybackMode = "automatic" | "native" | "compatibility";
+export type IosHlsSourceMode = Exclude<IosHlsPlaybackMode, "automatic">;
 
 export const IOS_HLS_COMPATIBILITY_MIME =
   'video/mp4; codecs="avc1.64001e,mp4a.40.2"';
@@ -15,7 +16,16 @@ export type IosHlsCapabilityScope = {
 };
 
 export function normalizeIosHlsPlaybackMode(value: unknown): IosHlsPlaybackMode {
+  if (value == null || value === "automatic") return "automatic";
   return value === "compatibility" ? "compatibility" : "native";
+}
+
+export function iosHlsModeForSource(
+  mode: IosHlsPlaybackMode,
+  fixedServerRendition: boolean,
+): IosHlsSourceMode {
+  if (mode !== "automatic") return mode;
+  return fixedServerRendition ? "compatibility" : "native";
 }
 
 /** Static capability admission only. Actual construction, attachment and decode
@@ -43,7 +53,7 @@ export function supportsStandardIosHlsMse(
 }
 
 export function iosHlsPlaybackRoute(options: {
-  mode: IosHlsPlaybackMode;
+  mode: IosHlsSourceMode;
   nativePlayable: boolean;
   scope?: IosHlsCapabilityScope;
 }): "native" | "compatibility" | "unsupported" {

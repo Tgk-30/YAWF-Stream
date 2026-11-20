@@ -6,6 +6,11 @@
 # code), so a single .deb installs on amd64 and arm64. It Depends on nodejs; see
 # deploy/ubuntu/README.md (Option C) for install steps.
 name: deb-release
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+      && inputs.updater_candidate_digest != '' && inputs.updater_source_revision != ''
+      && format('Verify server {0} {1}', inputs.updater_candidate_digest, inputs.updater_source_revision)
+      || 'Validate Debian server build and installer' }}
 
 on:
   push:
@@ -544,7 +549,7 @@ jobs:
           assert.equal(result.candidateDigest, expectedDigest);
           assert.equal(result.sourceRevision, expectedSource);
           assert.match(result.baselineDigest, /^sha256:[a-f0-9]{64}$/);
-          for (const key of ["digestVerified", "sourceVerified", "candidateHealthVerified", "injectedRollbackVerified",
+          for (const key of ["digestVerified", "sourceVerified", "candidateHealthVerified", "injectedRollbackVerified", "mountedOverlayRollbackVerified",
             "activePlaybackDeferred", "successfulUpdateVerified", "stopFailureVerified", "snapshotFailureVerified",
             "interruptedRecoveryVerified", "registrationDriftPreserved", "ownershipAndDatabaseWriteVerified", "protectedFilesPreserved", "otherServicePreserved",
             "umask077PublicStatusVerified", "nonRootReadOnlyStatusVerified"]) {

@@ -26,6 +26,247 @@ function completeProbe(payload: unknown) {
   return result;
 }
 
+describe("real transcoder boot probes", () => {
+  function bootChild() {
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+      kill: ReturnType<typeof vi.fn>;
+    };
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = vi.fn(() => true);
+    return child;
+  }
+
+  beforeEach(() => spawnMock.mockReset());
+
+  it("allows FFmpeg startup on a cold host to take over two seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      const child = bootChild();
+      spawnMock.mockReturnValueOnce(child);
+      const result = realTranscoder.detect();
+      await vi.advanceTimersByTimeAsync(2_250);
+      child.emit("close", 0);
+
+      await expect(result).resolves.toBe(true);
+      expect(child.kill).not.toHaveBeenCalled();
+      expect(spawnMock).toHaveBeenCalledWith("ffmpeg", ["-version"], { stdio: "ignore" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("accepts slow optional probes without losing supported encoders and audio selection", async () => {
+    vi.useFakeTimers();
+    try {
+      const filters = bootChild();
+      const encoders = bootChild();
+      const ffprobe = bootChild();
+      spawnMock.mockReturnValueOnce(filters).mockReturnValueOnce(encoders).mockReturnValueOnce(ffprobe);
+      const result = realTranscoder.capabilities!();
+      await vi.advanceTimersByTimeAsync(2_250);
+      filters.stdout.emit("data", Buffer.from(" .. zscale V->V Test scale"));
+      encoders.stdout.emit("data", Buffer.from(" V....D libx264 Test video\n S..... webvtt Test captions"));
+      for (const child of [filters, encoders, ffprobe]) child.emit("close", 0);
+
+      await expect(result).resolves.toEqual({
+        toneMapping: true,
+        videoEncoders: ["libx264"],
+        subtitleSidecar: true,
+        audioTrackSelection: true,
+      });
+      for (const child of [filters, encoders, ffprobe]) expect(child.kill).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a timed-out version probe only after the killed child closes", async () => {
+    vi.useFakeTimers();
+    try {
+      const cold = bootChild();
+      const retry = bootChild();
+      spawnMock.mockReturnValueOnce(cold).mockReturnValueOnce(retry);
+      const result = realTranscoder.detect();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(cold.kill).toHaveBeenCalledExactlyOnceWith("SIGKILL");
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      cold.emit("close", null, "SIGKILL");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(5_750);
+      retry.emit("close", 0);
+      await expect(result).resolves.toBe(true);
+      expect(retry.kill).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries only a timed-out capability probe and retains the successful probes", async () => {
+    vi.useFakeTimers();
+    try {
+      const filters = bootChild();
+      const encoders = bootChild();
+      const ffprobe = bootChild();
+      const retry = bootChild();
+      spawnMock.mockReturnValueOnce(filters).mockReturnValueOnce(encoders)
+        .mockReturnValueOnce(ffprobe).mockReturnValueOnce(retry);
+      const result = realTranscoder.capabilities!();
+      filters.stdout.emit("data", Buffer.from(" .. zscale V->V Test scale"));
+      filters.emit("close", 0);
+      ffprobe.emit("close", 0);
+      encoders.stdout.emit("data", Buffer.from(" V....D h264_nvenc Partial output"));
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(encoders.kill).toHaveBeenCalledExactlyOnceWith("SIGKILL");
+      encoders.emit("close", null, "SIGKILL");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(spawnMock).toHaveBeenCalledTimes(4);
+      expect(spawnMock.mock.calls[3]?.slice(0, 2)).toEqual(["ffmpeg", ["-hide_banner", "-encoders"]]);
+      retry.stdout.emit("data", Buffer.from(" V....D libx264 Test video\n S..... webvtt Test captions"));
+      retry.emit("close", 0);
+      await expect(result).resolves.toEqual({
+        toneMapping: true,
+        videoEncoders: ["libx264"],
+        subtitleSidecar: true,
+        audioTrackSelection: true,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not retry ENOENT or a completed unsuccessful invocation", async () => {
+    const missing = bootChild();
+    const nonzero = bootChild();
+    spawnMock.mockReturnValueOnce(missing).mockReturnValueOnce(nonzero);
+    const absent = realTranscoder.detect();
+    missing.emit("error", Object.assign(new Error("not installed"), { code: "ENOENT" }));
+    await expect(absent).resolves.toBe(false);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    const unsuccessful = realTranscoder.detect();
+    nonzero.emit("close", 1);
+    await expect(unsuccessful).resolves.toBe(false);
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears the watchdog after success and still stops a hung boot probe", async () => {
+    vi.useFakeTimers();
+    try {
+      const fast = bootChild();
+      const hung = bootChild();
+      spawnMock.mockReturnValueOnce(fast).mockReturnValueOnce(hung);
+      const success = realTranscoder.detect();
+      fast.emit("close", 0);
+      await expect(success).resolves.toBe(true);
+
+      const result = realTranscoder.detect();
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(fast.kill).not.toHaveBeenCalled();
+      expect(hung.kill).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(hung.kill).toHaveBeenCalledExactlyOnceWith("SIGKILL");
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(result).resolves.toBe(false);
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+      hung.emit("close", null, "SIGKILL");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds a hung retry without a third invocation even when it later closes", async () => {
+    vi.useFakeTimers();
+    try {
+      const cold = bootChild();
+      const retry = bootChild();
+      spawnMock.mockReturnValueOnce(cold).mockReturnValueOnce(retry);
+      const result = realTranscoder.detect();
+      await vi.advanceTimersByTimeAsync(5_000);
+      cold.emit("close", null, "SIGKILL");
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(retry.kill).toHaveBeenCalledExactlyOnceWith("SIGKILL");
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(result).resolves.toBe(false);
+      retry.emit("close", null, "SIGKILL");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("inspects the required encoder before starting optional processes", async () => {
+    const encoder = bootChild();
+    const filter = bootChild();
+    const ffprobe = bootChild();
+    spawnMock.mockReturnValueOnce(encoder).mockReturnValueOnce(filter).mockReturnValueOnce(ffprobe);
+    const result = realTranscoder.inspectStartup!(new AbortController().signal);
+    expect(spawnMock.mock.calls.map(([, args]) => args)).toEqual([["-hide_banner", "-encoders"]]);
+    encoder.stdout.emit("data", Buffer.from(" V....D libx264 Test video\n S..... webvtt Test captions"));
+    encoder.emit("close", 0);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(spawnMock.mock.calls.map(([, args]) => args)).toEqual([
+      ["-hide_banner", "-encoders"], ["-hide_banner", "-filters"], ["-version"],
+    ]);
+    filter.stdout.emit("data", Buffer.from(" .. zscale V->V Test scale"));
+    filter.emit("close", 0);
+    ffprobe.emit("close", 0);
+    await expect(result).resolves.toEqual({ state: "ready", capabilities: {
+      videoEncoders: ["libx264"], toneMapping: true, subtitleSidecar: true, audioTrackSelection: true,
+    } });
+  });
+
+  it.each([true, false])("reports a retryable encoder timeout only after both child closes: %s", async (confirmed) => {
+    vi.useFakeTimers();
+    try {
+      const encoder = bootChild();
+      const second = bootChild();
+      spawnMock.mockReturnValueOnce(encoder).mockReturnValueOnce(second);
+      const result = realTranscoder.inspectStartup!(new AbortController().signal);
+      await vi.advanceTimersByTimeAsync(5_000);
+      encoder.emit("close", null, "SIGKILL");
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(second.kill).toHaveBeenCalledExactlyOnceWith("SIGKILL");
+      if (confirmed) second.emit("close", null, "SIGKILL");
+      else await vi.advanceTimersByTimeAsync(500);
+      await expect(result).resolves.toEqual({ state: confirmed ? "retryable-timeout" : "unavailable" });
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("aborts a running inspection without retrying or starting optional tools", async () => {
+    const child = bootChild();
+    spawnMock.mockReturnValueOnce(child);
+    const controller = new AbortController();
+    const result = realTranscoder.inspectStartup!(controller.signal);
+    controller.abort();
+    expect(child.kill).toHaveBeenCalledExactlyOnceWith("SIGKILL");
+    child.emit("close", null, "SIGKILL");
+    await expect(result).resolves.toEqual({ state: "unavailable" });
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not schedule recovery for a missing encoder or an unsuccessful tool", async () => {
+    const absent = bootChild();
+    const unsupported = bootChild();
+    spawnMock.mockReturnValueOnce(absent).mockReturnValueOnce(unsupported);
+    const first = realTranscoder.inspectStartup!(new AbortController().signal);
+    absent.emit("error", Object.assign(new Error("not installed"), { code: "ENOENT" }));
+    await expect(first).resolves.toEqual({ state: "unavailable" });
+    const second = realTranscoder.inspectStartup!(new AbortController().signal);
+    unsupported.stdout.emit("data", Buffer.from(" V....D libx265 unsupported"));
+    unsupported.emit("close", 0);
+    await expect(second).resolves.toEqual({ state: "unavailable" });
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+  });
+
+});
+
 describe("real transcoder source probe", () => {
   beforeEach(() => spawnMock.mockReset());
 
