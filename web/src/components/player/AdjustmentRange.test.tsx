@@ -145,10 +145,11 @@ describe("AdjustmentRange touch intent", () => {
 
 it("[wiring] retains all four native adjustment ranges and their vertical-pan CSS", () => {
   const source = readFileSync("src/components/VideoPlayer.tsx", "utf8");
-  const sheet = source.slice(source.indexOf('<div className="player-options-section player-options-sliders">'), source.indexOf('{hlsLevels.length > 1 && ('));
+  const start = source.indexOf("function VideoAdjustmentOptions(");
+  const sheet = source.slice(start, source.indexOf("\n}\n", start));
   expect(sheet.match(/<AdjustmentRange\b/g)).toHaveLength(4);
   expect(sheet).not.toContain('type="range"');
-  for (const field of ["zoom", "panX", "panY", "subtitlePosition"]) expect(sheet).toContain(`onValueChange={(value) => onPresentationChange({ ${field}: value })}`);
+  for (const field of ["zoom", "panX", "panY", "subtitlePosition"]) expect(sheet).toContain(`onValueChange={(value) => presentation.update({ ${field}: value })}`);
   const css = readFileSync("src/components/VideoPlayer.css", "utf8");
   expect(css.match(/\.player-options-sliders input\[type="range"\] \{([^}]+)\}/)?.[1]).toContain("touch-action: pan-y");
   expect(css).toContain("padding-inline-end: 44px");

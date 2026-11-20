@@ -634,6 +634,64 @@ function VideoFitOptions({ presentation, touch }: { presentation: VideoPresentat
   );
 }
 
+/** Keep slider updates out of the playback controller and transport. */
+function VideoAdjustmentOptions({ presentation, savedSubtitlePosition }: {
+  presentation: VideoPresentationStore;
+  savedSubtitlePosition: number;
+}) {
+  const { zoom: videoZoom, panX: videoPanX, panY: videoPanY, subtitlePosition: sessionPosition } =
+    useVideoAdjustments(presentation);
+  const subtitlePosition = sessionPosition ?? savedSubtitlePosition;
+  return (
+    <div className="player-options-section player-options-sliders">
+      <label>
+        <span className="t-secondary">Zoom</span>
+        <span className="player-options-output">{Math.round(videoZoom * 100)}%</span>
+        <AdjustmentRange
+          min={1}
+          max={2.5}
+          step={0.05}
+          value={videoZoom}
+          onValueChange={(value) => presentation.update({ zoom: value })}
+        />
+      </label>
+      <label>
+        <span className="t-secondary">Pan horizontally</span>
+        <span className="player-options-output">{videoPanX}%</span>
+        <AdjustmentRange
+          min={-50}
+          max={50}
+          step={1}
+          value={videoPanX}
+          onValueChange={(value) => presentation.update({ panX: value })}
+        />
+      </label>
+      <label>
+        <span className="t-secondary">Pan vertically</span>
+        <span className="player-options-output">{videoPanY}%</span>
+        <AdjustmentRange
+          min={-50}
+          max={50}
+          step={1}
+          value={videoPanY}
+          onValueChange={(value) => presentation.update({ panY: value })}
+        />
+      </label>
+      <label>
+        <span className="t-secondary">Subtitle position</span>
+        <span className="player-options-output">{subtitlePosition}%</span>
+        <AdjustmentRange
+          min={10}
+          max={95}
+          step={1}
+          value={subtitlePosition}
+          onValueChange={(value) => presentation.update({ subtitlePosition: value })}
+        />
+      </label>
+    </div>
+  );
+}
+
 /** True when a keystroke should be left to the focused control: a text field, or
  * the <video> itself whose native controls already handle the key. */
 function shouldIgnoreShortcut(
@@ -4131,12 +4189,8 @@ function WebviewPlayer({
   const nestedDialogOpen = optionsOpen || captionsOpen || detailsOpen;
   const audioOptionsRequestedRef = useRef(false);
   const audioHeadingRef = useRef<HTMLSpanElement | null>(null);
-  const { zoom: videoZoom, panX: videoPanX, panY: videoPanY,
-    subtitlePosition: configuredSubtitlePosition } = useVideoAdjustments(presentation);
-  const onPresentationChange = presentation.update;
-  const subtitlePosition = configuredSubtitlePosition ?? savedPrefs?.subtitlePosition ?? 90;
-  const subtitlePositionRef = useRef(subtitlePosition);
-  subtitlePositionRef.current = subtitlePosition;
+  const savedSubtitlePosition = savedPrefs?.subtitlePosition ?? 90;
+  const subtitlePositionRef = useRef(savedSubtitlePosition);
   const [paused, setPaused] = useState(false);
   const [playing, setPlaying] = useState(false);
   const normalizedTimelineOffset = Number.isFinite(timelineOffsetSeconds)
@@ -5029,25 +5083,35 @@ function WebviewPlayer({
     captionControllerRef.current?.updateDownloaded(subs.activeTrackId);
   }, [subs.activeTrackId, subs.tracks]);
 
-  const captionLayoutOptionsRef = useRef({ chromeVisible, videoZoom, subtitlePosition });
-  captionLayoutOptionsRef.current = { chromeVisible, videoZoom, subtitlePosition };
+  const captionChromeVisibleRef = useRef(chromeVisible);
+  captionChromeVisibleRef.current = chromeVisible;
   const refreshCaptionLayoutRef = useRef<(() => void) | null>(null);
   const scheduleCaptionLayoutRef = useRef<(() => void) | null>(null);
   useLayoutEffect(() => {
     const video = videoRef.current;
     if (video == null) return;
-    // Fit is a surface-only edit. Write it before the next paint without
-    // reconciling the media owner, streams, clock, or unrelated controls.
-    const applyFit = () => {
+    // Fit and adjustment changes belong to the surface, not the media owner
+    // or transport. Write them without reconciling the playback tree.
+    let previousTransform: string | undefined;
+    const applyPresentation = () => {
       if (!ownsSource(video)) return;
-      const fit = presentation.getFitSnapshot();
-      if (video.style.objectFit === fit) return;
-      video.style.objectFit = fit;
+      const { fit, zoom, panX, panY, subtitlePosition } = presentation.getSnapshot();
+      const transform = `translate(${panX}%, ${panY}%) scale(${zoom})`;
+      const position = subtitlePosition ?? savedSubtitlePosition;
+      const changed = video.style.objectFit !== fit || previousTransform !== transform ||
+        subtitlePositionRef.current !== position;
+      if (!changed) return;
+      if (video.style.objectFit !== fit) video.style.objectFit = fit;
+      if (previousTransform !== transform) {
+        video.style.transform = transform;
+        previousTransform = transform;
+      }
+      subtitlePositionRef.current = position;
       scheduleCaptionLayoutRef.current?.();
     };
-    applyFit();
-    return presentation.subscribe(applyFit);
-  }, [presentation, sourceIdentity]);
+    applyPresentation();
+    return presentation.subscribe(applyPresentation);
+  }, [presentation, savedSubtitlePosition, sourceIdentity]);
   useLayoutEffect(() => {
     const video = videoRef.current;
     const viewport = captionViewportRef.current;
@@ -5137,12 +5201,11 @@ function WebviewPlayer({
         setCaptionFont(oldFont);
         return;
       }
-      const options = captionLayoutOptionsRef.current;
       const rootStyle = getComputedStyle(document.documentElement);
       const fontScale = Number.parseFloat(rootStyle.getPropertyValue("--sub-font-scale"));
       const fullscreen = document.fullscreenElement ?? (document as WebKitDocument).webkitFullscreenElement;
       const box = (fullscreen?.contains(video) ? fullscreen : viewport).getBoundingClientRect();
-      const controlsVisible = options.chromeVisible &&
+      const controlsVisible = captionChromeVisibleRef.current &&
         (fullscreen == null || (controls != null && fullscreen.contains(controls)));
       const visual = window.visualViewport;
       let visible: CaptionRect = box;
@@ -5158,8 +5221,8 @@ function WebviewPlayer({
         video: video.getBoundingClientRect(), viewport: visible,
         controls: controlsVisible ? controls?.getBoundingClientRect() : null,
         mediaWidth: video.videoWidth, mediaHeight: video.videoHeight,
-        fit: presentation.getFitSnapshot(), position: options.subtitlePosition,
-        fontScale, zoom: options.videoZoom,
+        fit: presentation.getFitSnapshot(), position: subtitlePositionRef.current,
+        fontScale, zoom: presentation.getAdjustmentsSnapshot().zoom,
       };
       let fontSize = oldFont;
       for (const [cue, geometry] of currentCues) {
@@ -5240,7 +5303,7 @@ function WebviewPlayer({
     // A display tap can change the video and chrome at once. Let the
     // surface change first and measure the final caption bounds once.
     scheduleCaptionLayoutRef.current?.();
-  }, [chromeVisible, videoZoom, videoPanX, videoPanY, subtitlePosition]);
+  }, [chromeVisible]);
   useEffect(() => {
     const activeTrack = subs.tracks.find(
       (track) => track.id === subs.activeTrackId,
@@ -8914,9 +8977,6 @@ function WebviewPlayer({
         <video
           ref={setVideoElement}
           className="player-video"
-          style={{
-            transform: `translate(${videoPanX}%, ${videoPanY}%) scale(${videoZoom})`,
-          }}
           autoPlay={!requiresExactHandoff && !autoplayAttemptedRef.current &&
             pendingHandoffPlaybackIntentRef.current !== "pause" &&
             (!explicitPlaybackIntentRef.current || !ownedPlaybackPausedRef.current) &&
@@ -9642,52 +9702,7 @@ function WebviewPlayer({
                 )}
               </div>
             )}
-            <div className="player-options-section player-options-sliders">
-              <label>
-                <span className="t-secondary">Zoom</span>
-                <span className="player-options-output">{Math.round(videoZoom * 100)}%</span>
-                <AdjustmentRange
-                  min={1}
-                  max={2.5}
-                  step={0.05}
-                  value={videoZoom}
-                  onValueChange={(value) => onPresentationChange({ zoom: value })}
-                />
-              </label>
-              <label>
-                <span className="t-secondary">Pan horizontally</span>
-                <span className="player-options-output">{videoPanX}%</span>
-                <AdjustmentRange
-                  min={-50}
-                  max={50}
-                  step={1}
-                  value={videoPanX}
-                  onValueChange={(value) => onPresentationChange({ panX: value })}
-                />
-              </label>
-              <label>
-                <span className="t-secondary">Pan vertically</span>
-                <span className="player-options-output">{videoPanY}%</span>
-                <AdjustmentRange
-                  min={-50}
-                  max={50}
-                  step={1}
-                  value={videoPanY}
-                  onValueChange={(value) => onPresentationChange({ panY: value })}
-                />
-              </label>
-              <label>
-                <span className="t-secondary">Subtitle position</span>
-                <span className="player-options-output">{subtitlePosition}%</span>
-                <AdjustmentRange
-                  min={10}
-                  max={95}
-                  step={1}
-                  value={subtitlePosition}
-                  onValueChange={(value) => onPresentationChange({ subtitlePosition: value })}
-                />
-              </label>
-            </div>
+            <VideoAdjustmentOptions presentation={presentation} savedSubtitlePosition={savedSubtitlePosition} />
             {hlsLevels.length > 1 && (
               <div className="player-options-section">
                 <span className="t-secondary">Quality</span>
