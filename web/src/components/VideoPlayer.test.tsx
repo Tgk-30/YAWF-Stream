@@ -10403,6 +10403,9 @@ describe("WebviewPlayer", () => {
         const sheet = screen.getByRole("dialog", { name: "Playback settings" });
         const fill = within(sheet).getByRole("button", { name: "Fill screen" });
         const close = within(sheet).getByRole("button", { name: "Close playback settings" });
+        expect(fill).toHaveAttribute("data-player-fit-choice");
+        expect(within(sheet).getByRole("button", { name: "Fit" })).toHaveAttribute("data-player-fit-choice");
+        expect(close).not.toHaveAttribute("data-player-fit-choice");
         const touch = { identifier: 7, clientX: 40, clientY: 50 };
         const drive = (button: HTMLElement, type: string, touches: unknown[], changedTouches: unknown[] = []) => {
           const listener = add.mock.calls.find(([event], i) => event === type && add.mock.contexts[i] === button)?.[1];

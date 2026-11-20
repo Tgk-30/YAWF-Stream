@@ -107,6 +107,46 @@ describe("iPad settings quick vertical swipe", () => {
     q.cleanup();
   });
 
+  it("recovers an unclaimed vertical swipe from an opted-in fit button or its child", () => {
+    const q = fixture();
+    q.control.setAttribute("data-player-fit-choice", "");
+    const content = document.createElement("span");
+    q.control.append(content);
+    q.start({ target: content }); q.swipe();
+    vi.advanceTimersByTime(60);
+    expect(q.scroll).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(140);
+    expect(q.scroll.mock.calls).toEqual([[120]]);
+    q.cleanup();
+  });
+
+  it("keeps fit taps and inert or disabled fit buttons out of the swipe fallback", () => {
+    const q = fixture();
+    q.control.setAttribute("data-player-fit-choice", "");
+    q.start({ target: q.control }); q.emit("pointerup", 1010, 423);
+    q.control.disabled = true;
+    q.start({ target: q.control }); q.swipe();
+    q.control.disabled = false;
+    q.control.setAttribute("inert", "");
+    q.start({ target: q.control }); q.swipe();
+    vi.advanceTimersByTime(220);
+    expect(q.scroll).not.toHaveBeenCalled();
+    q.cleanup();
+  });
+
+  it("defers to native cancellation or actual movement even on a fit button", () => {
+    const q = fixture();
+    q.control.setAttribute("data-player-fit-choice", "");
+    q.start({ target: q.control }); q.emit("pointercancel", 1020, 330); q.swipe();
+    q.start({ target: q.control }); q.swipe();
+    q.setNativeTop(63);
+    q.body.dispatchEvent(new Event("scroll"));
+    vi.advanceTimersByTime(220);
+    expect(q.scroll).not.toHaveBeenCalled();
+    expect(q.body.scrollTop).toBe(63);
+    q.cleanup();
+  });
+
   it("retires a pending swipe when another finger lands or the settings close", () => {
     const q = fixture();
     q.start(); q.swipe();

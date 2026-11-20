@@ -606,6 +606,7 @@ function VideoFitChoice({ fit, selected, touch, changeFit }: {
       type="button"
       className={`chip${selected ? " is-active" : ""}`}
       aria-pressed={selected}
+      data-player-fit-choice={touch ? "" : undefined}
       onClick={changeFit}
     >
       {fit === "cover" ? "Fill screen" : VIDEO_FIT_LABELS[fit]}
