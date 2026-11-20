@@ -266,6 +266,32 @@ final class MacOTARuntimeTests: XCTestCase {
         guard ["Appearance", "Profiles"].contains(category) else {
             throw AdmissionError.refused("Unknown scoped Settings category.")
         }
+        let page = try uniqueExisting(named(app.groups, "Settings page"), label: "Settings page", timeout: 30)
+        let directButtons = named(page.buttons, category)
+        let popupButtons = named(app.popUpButtons, "SETTINGS CATEGORY")
+        func isUniqueVisible(_ elements: XCUIElementQuery) -> Bool {
+            elements.count == 1 && elements.firstMatch.isHittable
+        }
+        guard waitUntil(timeout: 30, condition: {
+            isUniqueVisible(directButtons) != isUniqueVisible(popupButtons)
+        }) else {
+            throw AdmissionError.refused("Expected exactly one visible Settings category layout.")
+        }
+        let useDirect = isUniqueVisible(directButtons)
+        guard useDirect != isUniqueVisible(popupButtons) else {
+            throw AdmissionError.refused("Settings category layout changed before selection.")
+        }
+        if useDirect {
+            let direct = try uniqueHittable(directButtons, label: "Settings sidebar category \(category)", timeout: 15)
+            direct.click()
+            if category == "Appearance" {
+                _ = try uniqueExisting(named(page.groups, "Appearance styles"), label: "Appearance styles after sidebar selection", timeout: 15)
+            } else {
+                _ = try uniqueExisting(named(page.textFields, "NAME"), label: "Profile name field after sidebar selection", timeout: 15)
+            }
+            capturePhase("settings-category-\(category)-sidebar", in: app)
+            return
+        }
         let picker = try uniqueHittable(named(app.popUpButtons, "SETTINGS CATEGORY"), label: "Settings category popup", timeout: 30)
         picker.click()
         capturePhase("settings-category-\(category)-menu", in: app)

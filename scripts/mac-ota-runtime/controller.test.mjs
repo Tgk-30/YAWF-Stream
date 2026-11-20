@@ -209,10 +209,18 @@ function assertSettingsCategoryContract(source) {
   }
   const select = swiftSection(source, "private func selectSettingsCategory(", "private func seedCompactDensity(");
   assert.match(select, /guard \["Appearance", "Profiles"\]\.contains\(category\) else/);
+  assert.match(select, /uniqueExisting\(named\(app\.groups, "Settings page"\)/);
+  assert.match(select, /let directButtons = named\(page\.buttons, category\)/);
+  assert.match(select, /isUniqueVisible\(directButtons\) != isUniqueVisible\(popupButtons\)/);
+  assert.match(select, /uniqueHittable\(directButtons, label: "Settings sidebar category/);
+  assert.match(select, /direct\.click\(\)/);
+  assert.match(select, /named\(page\.groups, "Appearance styles"\)/);
+  assert.match(select, /named\(page\.textFields, "NAME"\)/);
   assert.equal((select.match(/uniqueHittable\(named\(app\.popUpButtons, "SETTINGS CATEGORY"\)/g) ?? []).length, 2);
   assert.match(select, /uniqueHittable\(named\(app\.menuItems, category\)/);
-  assert.ok(select.indexOf("picker.click()") < select.indexOf('capturePhase("settings-category-'));
-  assert.ok(select.indexOf('capturePhase("settings-category-') < select.indexOf("let option ="));
+  const menuCapture = select.indexOf('capturePhase("settings-category-\\(category)-menu"');
+  assert.ok(menuCapture >= 0 && select.indexOf("picker.click()") < menuCapture);
+  assert.ok(menuCapture < select.indexOf("let option ="));
   assert.ok(select.indexOf("let option =") < select.indexOf("option.click()"));
   assert.match(select, /\(selected\.value as\? String\) == category/);
   assert.doesNotMatch(select, /setValue|typeText|evaluateJavaScript|app\.buttons/);
@@ -361,7 +369,7 @@ test("Swift source follows title-aware AX first-run queries with bounded phase e
   assert.match(source, /XCTAttachment\(screenshot:/);
 });
 
-test("Swift uses the observed responsive Settings category popup through normal menu UI", async () => {
+test("Swift uses either the observed Settings sidebar or responsive popup through normal UI", async () => {
   assertSettingsCategoryContract(await readFile(new URL("./MacOTARuntimeTests/MacOTARuntimeTests.swift", import.meta.url), "utf8"));
 });
 
@@ -423,6 +431,10 @@ test("Swift AX source contracts independently reject critical selector regressio
     ["clipboard defer clear", assertFreshHostedClipboardSeed, 'defer { _ = clipboard.clearContents() }', ''],
     ["clipboard no typing fallback", assertFreshHostedClipboardSeed, 'app.typeKey("v", modifierFlags: .command)', 'app.typeText(name)'],
     ["responsive category before and after", assertSettingsCategoryContract, 'try selectSettingsCategory("Appearance", in: app)', 'try clickUniqueButton("Appearance", in: app)'],
+    ["wide sidebar stays within Settings", assertSettingsCategoryContract, 'let directButtons = named(page.buttons, category)', 'let directButtons = named(app.buttons, category)'],
+    ["ambiguous responsive layouts", assertSettingsCategoryContract, 'isUniqueVisible(directButtons) != isUniqueVisible(popupButtons)', 'isUniqueVisible(directButtons) || isUniqueVisible(popupButtons)'],
+    ["sidebar activation", assertSettingsCategoryContract, 'direct.click()', 'noVisibleActivation()'],
+    ["sidebar selected content", assertSettingsCategoryContract, 'named(page.groups, "Appearance styles")', 'named(page.groups, "Unverified")'],
     ["exact popup role", assertSettingsCategoryContract, 'app.popUpButtons, "SETTINGS CATEGORY"', 'app.buttons, "SETTINGS CATEGORY"'],
     ["capture before option query", assertSettingsCategoryContract, 'capturePhase("settings-category-\\(category)-menu", in: app)', 'captureSettingsMenuAfterOptionQuery(in: app)'],
     ["category selected value", assertSettingsCategoryContract, '(selected.value as? String) == category', 'true'],

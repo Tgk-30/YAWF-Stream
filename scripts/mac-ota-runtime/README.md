@@ -5,6 +5,9 @@
 > and 2.3.103, binds the target attestation, and checks the downloaded executable
 > and actual Intel CPU identity. The notes below record the historical Apple
 > Silicon lane. That result is not Intel runtime evidence.
+> The first Intel run reached the published baseline Settings page but exposed
+> the wide sidebar, not the compact category selector. The test now accepts
+> one unambiguous visible layout and verifies the selected category content.
 
 This is a narrow, destructive XCUITest for a disposable GitHub-hosted `macos-15` arm64 runner. It launches an exact private copy of the signed public 2.3.96 app, uses only its visible UI and embedded public updater feed, installs 2.3.103, observes the updater-owned relaunch at the same private path, verifies ordinary user state survived, then quits through Command-Q.
 
