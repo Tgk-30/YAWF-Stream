@@ -65,12 +65,15 @@ test("is manual branch-only read-only supplementary coverage", () => {
 });
 
 test("pins one exact signed candidate without changing the public channel", () => {
-  assert.match(workflow, /CANDIDATE_RUN_ID: "39857024891"/);
-  assert.match(workflow, /CANDIDATE_SOURCE_SHA: e7e2b7796684bf437bb10fdc9fc51263a8ba016a/);
-  assert.match(workflow, /CANDIDATE_APK_SHA256: 23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3/);
-  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.31/);
-  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003031"/);
-  assert.match(workflow, /PUBLISHED_ANDROID_VERSION: 2\.3\.27/);
+  assert.match(workflow, /CANDIDATE_RUN_ID: "44775976446"/);
+  assert.match(workflow, /CANDIDATE_SOURCE_SHA: 13cdcaf21b886239c0e0c67afa710de95035a1ba/);
+  assert.match(workflow, /CANDIDATE_APK_SHA256: a07e3108e42e4f45caaabcc46d305903977205b966c7f09858d411d87db45e01/);
+  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.115/);
+  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003115"/);
+  assert.match(workflow, /PUBLISHED_ANDROID_VERSION: 2\.3\.105/);
+  assert.match(workflow, /CANDIDATE_APK: candidate\/YAWF\.Stream_Android_2\.3\.115\.apk/);
+  assert.ok(workflow.includes("candidateApkSha256=$CANDIDATE_APK_SHA256"));
+  assert.ok(workflow.includes("expectedPublishedAndroidVersion=$PUBLISHED_ANDROID_VERSION"));
   assert.match(workflow, /--certificate-pin candidate-source\/web\/src-tauri\/SIGNING_CERT_SHA256/);
   assert.match(workflow, /python3 candidate-source\/scripts\/verify_android_apk\.py/);
 });

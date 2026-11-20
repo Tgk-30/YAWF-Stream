@@ -30,14 +30,14 @@ jobs:
     timeout-minutes: 25
     env:
       # Replace this fixed block together when a later signed candidate is reviewed.
-      CANDIDATE_RUN_ID: "39857024891"
-      CANDIDATE_SOURCE_SHA: e7e2b7796684bf437bb10fdc9fc51263a8ba016a
-      CANDIDATE_APK_SHA256: 23587726b3ad4f2a82f4a89bd568f6c9680c1ea2a7680d41eb4b0a5475e614b3
-      CANDIDATE_VERSION: 2.3.31
-      CANDIDATE_VERSION_CODE: "2003031"
-      PUBLISHED_ANDROID_VERSION: 2.3.27
+      CANDIDATE_RUN_ID: "44775976446"
+      CANDIDATE_SOURCE_SHA: 13cdcaf21b886239c0e0c67afa710de95035a1ba
+      CANDIDATE_APK_SHA256: a07e3108e42e4f45caaabcc46d305903977205b966c7f09858d411d87db45e01
+      CANDIDATE_VERSION: 2.3.115
+      CANDIDATE_VERSION_CODE: "2003115"
+      PUBLISHED_ANDROID_VERSION: 2.3.105
       CANDIDATE_ARTIFACT: android-phone-verification-candidate
-      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.31.apk
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.115.apk
       SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
       AVD_NAME: yawf-phone-api36-current-runtime
       EMULATOR_SERIAL: emulator-5554
@@ -64,6 +64,8 @@ jobs:
           {
             echo "sourceRevision=$actual"
             echo "candidateRunId=$CANDIDATE_RUN_ID"
+            echo "candidateApkSha256=$CANDIDATE_APK_SHA256"
+            echo "expectedPublishedAndroidVersion=$PUBLISHED_ANDROID_VERSION"
             echo "acceptanceRuns=1-fresh-avd"
             echo "emulatorImage=$SYSTEM_IMAGE_PACKAGE"
             echo "gpuBackend=$EMULATOR_GPU"
