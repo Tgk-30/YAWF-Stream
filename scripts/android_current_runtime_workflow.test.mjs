@@ -74,6 +74,12 @@ test("pins one exact signed candidate without changing the public channel", () =
   assert.match(workflow, /CANDIDATE_APK: candidate\/YAWF\.Stream_Android_2\.3\.115\.apk/);
   assert.ok(workflow.includes("candidateApkSha256=$CANDIDATE_APK_SHA256"));
   assert.ok(workflow.includes("expectedPublishedAndroidVersion=$PUBLISHED_ANDROID_VERSION"));
+  const policy = readFileSync(join(root, "scripts/android-runtime-instrumentation/app/src/main/java/com/yawf/runtimeinstrumentation/FlowPolicy.java"), "utf8");
+  const candidate = workflow.match(/^      CANDIDATE_VERSION: ([\d.]+)$/m)?.[1];
+  const published = workflow.match(/^      PUBLISHED_ANDROID_VERSION: ([\d.]+)$/m)?.[1];
+  assert.ok(policy.includes(`SIGNED_115_CANDIDATE_VERSION = "${candidate}"`));
+  assert.ok(policy.includes(`SIGNED_115_BASELINE_VERSION = "${published}"`));
+  assert.match(policy, /SIGNED_115_CANDIDATE_VERSION\.equals\(candidateVersion\)\s+&& SIGNED_115_BASELINE_VERSION\.equals\(publishedVersion\)/);
   assert.match(workflow, /--certificate-pin candidate-source\/web\/src-tauri\/SIGNING_CERT_SHA256/);
   assert.match(workflow, /python3 candidate-source\/scripts\/verify_android_apk\.py/);
 });

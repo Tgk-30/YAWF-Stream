@@ -122,6 +122,14 @@ MUTANTS = {
         "(NEXT_CANDIDATE_VERSION.equals(candidateVersion)\n                        && NEXT_PUBLISHED_VERSION.equals(publishedVersion))",
         "false",
     ),
+    "versionPinsSigned115Missing": (
+        "(SIGNED_115_CANDIDATE_VERSION.equals(candidateVersion)\n                        && SIGNED_115_BASELINE_VERSION.equals(publishedVersion))",
+        "false",
+    ),
+    "versionPinsSigned115BroadBaseline": (
+        "(SIGNED_115_CANDIDATE_VERSION.equals(candidateVersion)\n                        && SIGNED_115_BASELINE_VERSION.equals(publishedVersion))",
+        "(SIGNED_115_CANDIDATE_VERSION.equals(candidateVersion))",
+    ),
 }
 
 
