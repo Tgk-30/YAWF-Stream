@@ -4,11 +4,13 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync, mkdirSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { runInNewContext } from "node:vm";
 import {
   KOTLIN_JAR_URL, KOTLIN_JAR_RELEASE_URL, KOTLIN_JAR_BYTES, KOTLIN_JAR_SHA256, KOTLIN_JAR_SHA1,
-  kotlinDownloadInvocation, kotlinReleaseDownloadInvocation, retryWithKotlinRelease,
+  kotlinDownloadInvocation, kotlinReleaseDownloadInvocation, retryWithKotlinAlternateSource,
   kotlinTransferStatus, kotlinCompilerArtifactPath, verifyKotlinCompilerJar, stageVerifiedKotlinCompiler, fetchAndroidKotlinCompiler,
-  KOTLIN_POM_URL, KOTLIN_POM_BYTES, KOTLIN_POM_SHA256, kotlinPomDownloadInvocation, kotlinCompilerPomPath, verifyKotlinCompilerPom, stageVerifiedKotlinCompilerPom,
+  KOTLIN_POM_URL, KOTLIN_POM_MIRROR_URL, KOTLIN_POM_BYTES, KOTLIN_POM_SHA256, kotlinPomDownloadInvocation,
+  kotlinPomMirrorDownloadInvocation, kotlinCompilerPomPath, verifyKotlinCompilerPom, stageVerifiedKotlinCompilerPom,
 } from "./fetch_android_kotlin_compiler.mjs";
 const cached = process.env.DS_TEST_KOTLIN_JAR;
 const cachedPom = process.env.DS_TEST_KOTLIN_POM;
@@ -26,12 +28,39 @@ test("anonymous curl is fixed-origin, TLS-only, curlrc-free and finitely bounded
   assert.equal(KOTLIN_JAR_SHA256, "d3e70fb011675e77ef00f1a68918d3cd91eed26058977d1e3ea2a37a293233af");
   assert.equal(KOTLIN_JAR_SHA1, "c4b47f8e33cdbeedd8c1415ab9f9ade870388162");
 });
-test("only transient transport failures can select the pinned JetBrains release", () => {
-  for (const [status, stdout] of [[22,"429"],[22,"503"],[28,"000"],[18,"200"]]) {
-    assert.equal(retryWithKotlinRelease({ status, stdout }), true);
+test("only fixed-source unavailability can select the verified alternate", () => {
+  for (const [status, stdout] of [[22,"404"],[22,"429"],[22,"503"],[28,"000"],[18,"200"]]) {
+    assert.equal(retryWithKotlinAlternateSource({ status, stdout }), true);
   }
-  for (const [status, stdout] of [[0,"200"],[22,"403"],[22,"404"],[60,"000"],[63,"200"],[null,"200"]]) {
-    assert.equal(retryWithKotlinRelease({ status, stdout }), false);
+  for (const [status, stdout] of [[0,"200"],[22,"403"],[22,"410"],[60,"000"],[63,"200"],[null,"200"]]) {
+    assert.equal(retryWithKotlinAlternateSource({ status, stdout }), false);
+  }
+});
+test("the alternate POM has the same bounds but only its own fixed Maven URL", () => {
+  const primary = kotlinPomDownloadInvocation("/owned/artifact.pom");
+  const alternate = kotlinPomMirrorDownloadInvocation("/owned/artifact.pom");
+  assert.deepEqual(alternate, primary.map(arg => arg === KOTLIN_POM_URL ? KOTLIN_POM_MIRROR_URL : arg));
+  assert.equal(alternate.filter(arg => arg.startsWith("https://")).length, 1);
+  assert.equal(new URL(KOTLIN_POM_MIRROR_URL).hostname, "repo1.maven.org");
+});
+test("a missing artifact uses the exact alternate but invalid successful bytes do not", () => {
+  const source = readFileSync(new URL("./fetch_android_kotlin_compiler.mjs", import.meta.url), "utf8");
+  const body = source.slice(source.indexOf("function fetchArtifact("), source.indexOf("export function fetchAndroidKotlinCompiler("));
+  for (const [first, verified, expected] of [
+    [{ status: 22, stdout: "404" }, true, ["primary", "alternate", "verify"]],
+    [{ status: 0, stdout: "200" }, false, ["primary", "verify"]],
+  ]) {
+    const events = [];
+    const run = () => runInNewContext(body + "\nfetchArtifact('/qa', 'jar', verify, primary, alternate)", {
+      prepare() {}, join, dirname: value => value, PARTS: [], exists: () => null, mkdtempSync: () => "/qa/stage",
+      process: { env: {} }, retryWithKotlinAlternateSource, kotlinTransferStatus, rmSync() {},
+      primary: () => ["primary"], alternate: () => ["alternate"],
+      spawnSync(_curl, [who]) { events.push(who); return who === "primary" ? first : { status: 0, stdout: "200" }; },
+      publish(file, _root, _stage, _name, verify) { return verify(file); },
+      verify() { events.push("verify"); if (!verified) throw new Error("pin refused"); },
+    }, { timeout: 1000 });
+    if (verified) run(); else assert.throws(run, /pin refused/);
+    assert.deepEqual(events, expected);
   }
 });
 test("transport failure summaries cannot expose response text", () => {
