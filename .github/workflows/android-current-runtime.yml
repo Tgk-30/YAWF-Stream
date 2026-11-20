@@ -258,6 +258,37 @@ jobs:
           run_evidence="$EVIDENCE/run-1"
           emulator_pid=""
 
+          collect_update_transport() {
+            # Keep the signed product and credential-free instrumentation unchanged.
+            # Accept only the exact native dialog from this run on this owned AVD.
+            local hierarchy="$run_evidence/persistent-instrumentation/10-failure.xml"
+            if [ ! -f "$hierarchy" ] || ! grep -Fq 'text="Update check unavailable"' "$hierarchy"; then
+              return 0
+            fi
+            if [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" emu avd name 2>/dev/null | tr -d '\r' | head -1)" != "$AVD_NAME" ]; then
+              return 0
+            fi
+            local probe="$ANDROID_USER_HOME/update-transport"
+            local dex="/data/local/tmp/yawf-diagnostic-update-transport.dex"
+            mkdir -p "$probe"
+            if javac --release 8 -d "$probe" scripts/android/AndroidUpdateTransportProbe.java \
+                && d8 --min-api 24 --output "$probe" "$probe"/AndroidUpdateTransportProbe*.class; then
+              timeout 50s java -cp "$probe" AndroidUpdateTransportProbe "$PUBLISHED_ANDROID_VERSION" \
+                > "$run_evidence/update-transport-runner.txt" 2>/dev/null
+              printf 'runnerExit=%s\n' "$?" >> "$run_evidence/update-transport-runner.txt"
+              if timeout 10s adb -s "$EMULATOR_SERIAL" push "$probe/classes.dex" "$dex" >/dev/null 2>&1; then
+                timeout 50s adb -s "$EMULATOR_SERIAL" shell -T \
+                  "CLASSPATH=$dex app_process /system/bin AndroidUpdateTransportProbe $PUBLISHED_ANDROID_VERSION" 2>/dev/null \
+                  | grep -E '^(phone-refs|release-metadata|canonical-manifest) (hop=[0-5] host=(api\.github\.com|github\.com|release-assets\.githubusercontent\.com|objects\.githubusercontent\.com) http=[0-9]{3} remaining=(unknown|[0-9]{1,4}) link=(true|false)|bytes=[0-9]{1,6} sha256=[0-9a-f]{64}|failure=[a-z-]{1,32})$' \
+                  > "$run_evidence/update-transport-android-shell.txt"
+                local statuses=( "${PIPESTATUS[@]}" )
+                printf 'guestExit=%s\nfilterExit=%s\n' "${statuses[0]}" "${statuses[1]}" \
+                  >> "$run_evidence/update-transport-android-shell.txt"
+                timeout 10s adb -s "$EMULATOR_SERIAL" shell rm -f "$dex" >/dev/null 2>&1
+              fi
+            fi
+          }
+
           collect_failure() {
             set +e
             if [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" get-state 2>/dev/null)" != "device" ]; then
@@ -275,6 +306,7 @@ jobs:
             timeout 20s adb -s "$EMULATOR_SERIAL" shell dumpsys dropbox --print data_app_anr \
               | sed -E 's#https?://[^ ]+#<redacted-url>#g' \
               > "$run_evidence/workflow-failure-anr.txt" || true
+            collect_update_transport
             echo "evidenceCollection=attempted" > "$run_evidence/workflow-failure-receipt.txt"
           }
 

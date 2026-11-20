@@ -170,3 +170,59 @@ test("external player outer timeout guard rejects the previous 30-minute cutoff"
   assert.notEqual(mutant, workflow);
   assert.throws(() => assertExternalPlayerOuterTimeout(mutant));
 });
+
+test("collects update transport only after the exact dialog on the owned guest without changing acceptance", () => {
+  const probe = workflow.slice(workflow.indexOf("          collect_update_transport() {"),
+    workflow.indexOf("          collect_failure() {"));
+  const actualDialog = probe.indexOf("grep -Fq 'text=\"Update check unavailable\"'");
+  const expectedDevice = probe.indexOf('!= "$AVD_NAME"');
+  const push = probe.indexOf('adb -s "$EMULATOR_SERIAL" push "$probe/classes.dex" "$dex"');
+  assert.ok(actualDialog >= 0 && expectedDevice > actualDialog && push > expectedDevice);
+  assert.match(probe, /timeout 50s adb -s "\$EMULATOR_SERIAL" shell -T/);
+  assert.match(probe, /app_process \/system\/bin AndroidUpdateTransportProbe \$PUBLISHED_ANDROID_VERSION/);
+  assert.match(probe, /2>\/dev\/null \s*\\\n\s*\| grep -E/);
+  assert.match(probe, /guestExit=%s\\nfilterExit=%s/);
+  assert.match(probe, /timeout 10s adb -s "\$EMULATOR_SERIAL" shell rm -f "\$dex"/);
+  assert.match(workflow, /if \[ "\$status" -ne 0 \]; then\s+collect_failure\s+fi\s+stop_owned_emulator\s+exit "\$status"/);
+});
+
+test("transport probe admits only fixed HTTPS asset hosts and numeric rate budget", (t) => {
+  const jdk = process.env.JAVA_HOME ? join(process.env.JAVA_HOME, "bin") : null;
+  const command = (name) => jdk ? join(jdk, name) : name;
+  if (spawnSync(command("javac"), ["-version"]).status !== 0) return t.skip("JDK unavailable");
+  const directory = mkdtempSync(join(tmpdir(), "yawf-transport-policy-"));
+  const probePath = join(root, "scripts/android/AndroidUpdateTransportProbe.java");
+  const testPath = join(directory, "ProbePolicyTest.java");
+  writeFileSync(testPath, `import java.net.URI;
+class ProbePolicyTest {
+  public static void main(String[] args) {
+    for (String url : new String[]{
+      "https://release-assets.githubusercontent.com/object?opaque=fixture",
+      "https://objects.githubusercontent.com:443/item",
+      "https://github.com/asset"}) {
+      if (!AndroidUpdateTransportProbe.allowedAssetRedirect(URI.create(url))) throw new AssertionError("host");
+    }
+    for (String url : new String[]{
+      "https://release-assets.githubusercontent.com.example.invalid/object",
+      "https://github.com@other.invalid/asset",
+      "http://objects.githubusercontent.com/asset",
+      "https://github.com:8443/asset",
+      "https://github.com/asset#fragment"}) {
+      if (AndroidUpdateTransportProbe.allowedAssetRedirect(URI.create(url))) throw new AssertionError("redirect");
+    }
+    if (!"0".equals(AndroidUpdateTransportProbe.boundedRemaining("0"))) throw new AssertionError("zero");
+    if (!"59".equals(AndroidUpdateTransportProbe.boundedRemaining("59"))) throw new AssertionError("budget");
+    if (!"unknown".equals(AndroidUpdateTransportProbe.boundedRemaining("unexpected-header"))) throw new AssertionError("redaction");
+  }
+}`);
+  let result = spawnSync(command("javac"), ["--release", "8", "-d", directory, probePath, testPath],
+    { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  result = spawnSync(command("java"), ["-cp", directory, "ProbePolicyTest"], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  result = spawnSync(command("java"), ["-cp", directory, "AndroidUpdateTransportProbe", "2.3.105?other.invalid"],
+    { encoding: "utf8" });
+  assert.equal(result.status, 64);
+  assert.match(result.stdout, /^probe=invalid-version-argument\s*$/);
+  assert.equal(result.stderr, "");
+});
