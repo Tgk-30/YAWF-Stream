@@ -155,10 +155,41 @@ describe("ServerHealthPanel", () => {
     expect(screen.getByText("Server automatic updates")).toBeInTheDocument();
     expect(screen.getByText(/Active playback is in progress/)).toBeInTheDocument();
     expect(screen.getByText(/sudo yawf-server-update status/)).toBeInTheDocument();
-    expect(screen.getByText(/Last checked/)).toBeInTheDocument();
+    expect(screen.getByText(/Server health checked/)).toBeInTheDocument();
+    expect(screen.getByText(/Last host update check/).querySelector("time"))
+      .toHaveAttribute("dateTime", health.updater?.lastCheckedAt);
+
+    rerender(<ServerHealthPanel health={{
+      ...health,
+      serverTime: "2026-11-20T17:50:00.000Z",
+      update: {
+        available: true,
+        currentVersion: "2.3.114",
+        latestVersion: "2.3.115",
+        state: "available",
+        url: "https://github.com/Tgk-30/YAWF-Stream/releases/tag/v2.3.115",
+      },
+      updater: {
+        ...health.updater!,
+        state: "idle",
+        lastCheckedAt: "2026-11-20T17:00:00.000Z",
+        detail: "The server is up to date.",
+      },
+    }} />);
+    expect(screen.getByText(/Server 2\.3\.115 is available\. Running 2\.3\.114\./)).toBeInTheDocument();
+    expect(screen.queryByText("The server is up to date.")).not.toBeInTheDocument();
+    expect(screen.getByText(/No newer release was found at the last host check/)).toBeInTheDocument();
+    expect(screen.getByText(/Last host update check/).querySelector("time"))
+      .toHaveAttribute("dateTime", "2026-11-20T17:00:00.000Z");
+    expect(screen.getByText(/Server health checked/).querySelector("time"))
+      .toHaveAttribute("dateTime", "2026-11-20T17:50:00.000Z");
+
+    rerender(<ServerHealthPanel health={{ ...health, updater: { ...health.updater!, lastCheckedAt: null } }} />);
+    expect(screen.getByText("Last host update check: Not reported")).toBeInTheDocument();
 
     rerender(<ServerHealthPanel health={{ ...health, updater: undefined }} />);
     expect(screen.getByText(/Automatic installation is unavailable/)).toBeInTheDocument();
+    expect(screen.queryByText(/Last host update check/)).not.toBeInTheDocument();
   });
 });
 

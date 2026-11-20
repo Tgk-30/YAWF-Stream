@@ -335,6 +335,7 @@ export function ServerAuditPanel({ events }: ServerAuditPanelProps) {
 }
 
 export function ServerHealthPanel({ health }: ServerHealthPanelProps) {
+  const updater = health.updater;
   const flags = [
     `Cookies ${health.config.cookieSecure ? "secure" : "not secure"}`,
     `SameSite ${health.config.cookieSameSite}`,
@@ -496,12 +497,22 @@ export function ServerHealthPanel({ health }: ServerHealthPanelProps) {
 
       <div className="settings-status">
         <strong>Server automatic updates</strong>{" "}
-        {health.updater?.supported ? (
+        {updater?.supported ? (
           <>
-            <span className={`chip${health.updater.enabled ? " is-active" : ""}`}>
-              {health.updater.enabled ? "Enabled" : "Off"}
+            <span className={`chip${updater.enabled ? " is-active" : ""}`}>
+              {updater.enabled ? "Enabled" : "Off"}
             </span>
-            <p className="settings-hint t-secondary">{health.updater.detail}</p>
+            <p className="settings-hint t-secondary">
+              {updater.state === "idle" && updater.detail === "The server is up to date."
+                ? "No newer release was found at the last host check."
+                : updater.detail}
+            </p>
+            <p className="settings-hint t-secondary">
+              Last host update check:{" "}
+              {updater.lastCheckedAt == null
+                ? "Not reported"
+                : <time dateTime={updater.lastCheckedAt}>{formatShortDate(updater.lastCheckedAt)}</time>}
+            </p>
             <p className="settings-hint t-secondary">
               Host policy is root-owned. Use <code>sudo yawf-server-update status</code>, <code>enable</code>, or <code>disable</code> on the Docker host.
             </p>
@@ -514,7 +525,7 @@ export function ServerHealthPanel({ health }: ServerHealthPanelProps) {
       </div>
 
       <p className="settings-hint t-secondary">
-        Last checked {formatShortDate(health.serverTime)}
+        Server health checked: <time dateTime={health.serverTime}>{formatShortDate(health.serverTime)}</time>
       </p>
     </div>
   );
