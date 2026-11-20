@@ -10384,6 +10384,69 @@ describe("WebviewPlayer", () => {
     }
   });
 
+  it.each(["installed iPad", "Android app"] as const)(
+    "handles settings Fit and Close on a stationary touch release on %s",
+    async (platform) => {
+      deviceKindMock.mockReturnValue(platform === "installed iPad" ? "ios" : "android");
+      const restorePlatform = platform === "installed iPad"
+        ? replaceProperty(navigator, "standalone", true)
+        : replaceProperty(window, "__YAWF_NATIVE_SAFE_AREA__", { getInsets: vi.fn() });
+      const add = vi.spyOn(HTMLButtonElement.prototype, "addEventListener");
+      const restoreHit = replaceProperty(document, "elementFromPoint", vi.fn(() => hit));
+      let hit: Element | null = null;
+      try {
+        render(<VideoPlayer url="https://x/test.mp4" title="Touch settings" onClose={() => {}} />);
+        const video = document.querySelector("video.player-video") as HTMLVideoElement;
+        await waitFor(() => expect(video.src).toBe("https://x/test.mp4"));
+        const trigger = screen.getByRole("button", { name: "Playback settings" });
+        fireEvent.click(trigger);
+        const sheet = screen.getByRole("dialog", { name: "Playback settings" });
+        const fill = within(sheet).getByRole("button", { name: "Fill screen" });
+        const close = within(sheet).getByRole("button", { name: "Close playback settings" });
+        const touch = { identifier: 7, clientX: 40, clientY: 50 };
+        const drive = (button: HTMLElement, type: string, touches: unknown[], changedTouches: unknown[] = []) => {
+          const listener = add.mock.calls.find(([event], i) => event === type && add.mock.contexts[i] === button)?.[1];
+          const preventDefault = vi.fn();
+          act(() => {
+            if (typeof listener === "function") listener.call(button, {
+              touches, changedTouches, isTrusted: true, cancelable: true, defaultPrevented: false, preventDefault,
+            } as unknown as TouchEvent);
+          });
+          return preventDefault;
+        };
+        hit = fill;
+        drive(fill, "touchstart", [touch]);
+        drive(fill, "touchmove", [{ ...touch, clientY: 100 }]);
+        expect(drive(fill, "touchend", [], [touch])).not.toHaveBeenCalled();
+        expect(video.style.objectFit).toBe("contain");
+
+        drive(fill, "touchstart", [touch]);
+        hit = close;
+        expect(drive(fill, "touchend", [], [touch])).not.toHaveBeenCalled();
+        expect(video.style.objectFit).toBe("contain");
+
+        hit = fill;
+        drive(fill, "touchstart", [touch]);
+        expect(drive(fill, "touchend", [], [touch])).toHaveBeenCalledTimes(1);
+        expect(video.style.objectFit).toBe("cover");
+        expect(fill).toHaveAttribute("aria-pressed", "true");
+        expect(document.querySelector("video.player-video")).toBe(video);
+        fireEvent.click(within(sheet).getByRole("button", { name: "Fit" }), { detail: 0 });
+        expect(video.style.objectFit).toBe("contain");
+
+        hit = close.querySelector("svg") ?? close;
+        drive(close, "touchstart", [touch]);
+        expect(drive(close, "touchend", [], [touch])).toHaveBeenCalledTimes(1);
+        expect(sheet).not.toBeInTheDocument();
+        expect(trigger).toHaveFocus();
+      } finally {
+        restoreHit();
+        add.mockRestore();
+        restorePlatform();
+      }
+    },
+  );
+
   it("does not rerender the playback controller or scrubber for inline Fill or Fit", async () => {
     deviceKindMock.mockReturnValue("ios");
     const restorePlatform = replaceProperty(navigator, "standalone", true);
