@@ -438,6 +438,7 @@ const ACTUAL_UPDATER_STEP = "Verify actual published image upgrade and rollback"
 function addActualUpdaterEvidence(fixture) {
   const run = fixture.runs.debian;
   run.run_attempt = 2;
+  run.workflow_id = 305501296;
   run.display_title = `Verify server ${IMAGE_DIGEST} ${SOURCE}`;
   fixture.debianAttemptJobs = {
     total_count: 2,
@@ -462,6 +463,19 @@ test("2.3.115 and newer require both Ubuntu updater jobs to run the actual-image
     addActualUpdaterEvidence(fixture);
     assert.equal(qualifyReleaseEvidence(fixture).version, version);
   }
+});
+
+test("accepts the exact run-name representation only for the canonical bound Debian workflow", () => {
+  const fixture = qualificationFixture(ACTUAL_UPDATER_VERSION);
+  addActualUpdaterEvidence(fixture);
+  const run = fixture.runs.debian;
+  run.name = run.display_title;
+  assert.equal(qualifyReleaseEvidence(fixture).workflowRuns.debian.id, run.id);
+  run.workflow_id += 1;
+  assert.throws(() => qualifyReleaseEvidence(fixture), /Debian workflow ID/);
+  run.workflow_id -= 1;
+  run.name += " extra";
+  assert.throws(() => qualifyReleaseEvidence(fixture), /Debian workflow name/);
 });
 
 test("historical 2.3.114 evidence remains readable without a digest-bound run title", () => {
