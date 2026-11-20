@@ -118,11 +118,10 @@ public final class RuntimeFlowTest {
         click(By.text("Continue with Quick setup"), "Continue with Quick setup", SHORT_WAIT_MS, true);
 
         waitFor(By.text("Discover"), UI_WAIT_MS, "Discover after setup");
-        dismissOrdinaryTours();
+        boolean tourDismissed = dismissOrdinaryTours();
         capture("discover-after-setup");
 
-        clickWebButton(FlowPolicy.MORE_NAVIGATION_BUTTON, "More navigation", UI_WAIT_MS);
-        click(By.text("Settings"), "Settings", SHORT_WAIT_MS, false);
+        openSettingsFromDiscover(tourDismissed);
         waitForSettingsRoute();
         capture("settings");
         openHelpAndUpdates();
@@ -192,7 +191,7 @@ public final class RuntimeFlowTest {
         fail("Timed out reaching the FirstRunWizard through native consent and tier welcome");
     }
 
-    private void dismissOrdinaryTours() throws IOException {
+    private boolean dismissOrdinaryTours() throws IOException {
         FlowPolicy.LabeledWebButtonSpec[] controls = new FlowPolicy.LabeledWebButtonSpec[] {
                 FlowPolicy.SKIP_THE_TOUR_BUTTON,
                 FlowPolicy.SKIP_TOUR_BUTTON
@@ -208,7 +207,7 @@ public final class RuntimeFlowTest {
         }
         if (object == null) {
             log("No ordinary tour appeared during the bounded mount wait");
-            return;
+            return false;
         }
         capture("tour-ready");
         assertNoBindingTerms();
@@ -225,6 +224,34 @@ public final class RuntimeFlowTest {
         } finally {
             configurator.setWaitForIdleTimeout(previousIdleTimeout);
         }
+        return true;
+    }
+
+    private void openSettingsFromDiscover(boolean tourDismissed) throws IOException {
+        clickWebButton(FlowPolicy.MORE_NAVIGATION_BUTTON, "More navigation", UI_WAIT_MS);
+        BySelector lateTour = By.text(FlowPolicy.WELCOME_TOUR_DIALOG.label())
+                .clazz(FlowPolicy.WELCOME_TOUR_DIALOG.className())
+                .pkg(PRODUCT_PACKAGE);
+        BySelector settings = By.text("Settings").pkg(PRODUCT_PACKAGE);
+        long deadline = SystemClock.uptimeMillis() + UI_WAIT_MS;
+        while (SystemClock.uptimeMillis() < deadline) {
+            assertNoBindingTerms();
+            if (device.hasObject(lateTour)) {
+                assertTrue("Ordinary tour returned after the one allowed Skip", !tourDismissed);
+                log("Observed the exact ordinary tour mounting during Settings navigation");
+                assertTrue("Late ordinary tour did not expose its exact labeled Skip", dismissOrdinaryTours());
+                tourDismissed = true;
+                if (!device.hasObject(settings) && !device.hasObject(By.res("mobile-nav-more"))) {
+                    clickWebButton(FlowPolicy.MORE_NAVIGATION_BUTTON, "More navigation after late tour", SHORT_WAIT_MS);
+                }
+            } else if (device.hasObject(settings)) {
+                click(settings, "Settings", SHORT_WAIT_MS, false);
+                return;
+            } else {
+                SystemClock.sleep(250);
+            }
+        }
+        fail("Timed out waiting for Settings after the bounded ordinary-tour check");
     }
 
     private void observeOrdinaryTourDismissal() {

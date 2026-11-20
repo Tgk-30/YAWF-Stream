@@ -234,3 +234,16 @@ class ProbePolicyTest {
   assert.match(result.stdout, /^probe=invalid-version-argument\s*$/);
   assert.equal(result.stderr, "");
 });
+
+test("handles only the observed late Welcome tour while preserving native update acceptance", () => {
+  const flow = readFileSync(join(root,
+    "scripts/android-runtime-instrumentation/app/src/androidTest/java/com/yawf/runtimeinstrumentation/RuntimeFlowTest.java"), "utf8");
+  const part = flow.slice(flow.indexOf("    private void openSettingsFromDiscover("),
+    flow.indexOf("    private void observeOrdinaryTourDismissal("));
+  assert.match(part, /By\.text\(FlowPolicy\.WELCOME_TOUR_DIALOG\.label\(\)\)\s+\.clazz\(FlowPolicy\.WELCOME_TOUR_DIALOG\.className\(\)\)\s+\.pkg\(PRODUCT_PACKAGE\)/);
+  assert.match(part, /assertNoBindingTerms\(\);\s+if \(device\.hasObject\(lateTour\)\)/);
+  assert.match(part, /"Ordinary tour returned after the one allowed Skip", !tourDismissed\);[\s\S]*?dismissOrdinaryTours\(\)\);\s+tourDismissed = true;/);
+  assert.match(part, /if \(!device\.hasObject\(settings\) && !device\.hasObject\(By\.res\("mobile-nav-more"\)\)\) \{/);
+  assert.match(flow, /openSettingsFromDiscover\(tourDismissed\);\s+waitForSettingsRoute\(\);/);
+  assert.match(flow, /FlowPolicy\.isExactUpToDateResult\(title.getText\(\), message.getText\(\)\)/);
+});
