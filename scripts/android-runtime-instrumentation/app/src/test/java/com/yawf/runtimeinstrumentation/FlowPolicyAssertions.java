@@ -187,13 +187,13 @@ final class FlowPolicyAssertions {
                 "The independently pinned next candidate and stable versions must pass");
         check(FlowPolicy.isExpectedVersionPair("2.3.61", "2.3.61"),
                 "The exact current public candidate and channel versions must pass");
-        check(FlowPolicy.isExpectedVersionPair("2.3.115", "2.3.105"),
-                "The exact signed 115 candidate and public 105 channel must pass");
-        check(!FlowPolicy.isExpectedVersionPair("2.3.115", "2.3.114"),
+        check(FlowPolicy.isExpectedVersionPair("2.3.116", "2.3.105"),
+                "The exact signed 116 candidate and public 105 channel must pass");
+        check(!FlowPolicy.isExpectedVersionPair("2.3.116", "2.3.114"),
                 "A server version cannot substitute for the public Android phone channel");
-        check(!FlowPolicy.isExpectedVersionPair("2.3.115", "2.3.115"),
-                "A published 115 release cannot substitute for the 105 baseline in this test");
-        check(!FlowPolicy.isExpectedVersionPair("2.3.116", "2.3.105"),
+        check(!FlowPolicy.isExpectedVersionPair("2.3.116", "2.3.116"),
+                "A published 116 release cannot substitute for the 105 baseline in this test");
+        check(!FlowPolicy.isExpectedVersionPair("2.3.117", "2.3.105"),
                 "An unqualified APK cannot substitute for the signed candidate");
         check(!FlowPolicy.isExpectedVersionPair("2.3.25", "2.3.25"),
                 "A changed candidate version must fail closed");

@@ -65,21 +65,21 @@ test("is manual branch-only read-only supplementary coverage", () => {
 });
 
 test("pins one exact signed candidate without changing the public channel", () => {
-  assert.match(workflow, /CANDIDATE_RUN_ID: "44775976446"/);
-  assert.match(workflow, /CANDIDATE_SOURCE_SHA: 13cdcaf21b886239c0e0c67afa710de95035a1ba/);
-  assert.match(workflow, /CANDIDATE_APK_SHA256: a07e3108e42e4f45caaabcc46d305903977205b966c7f09858d411d87db45e01/);
-  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.115/);
-  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003115"/);
+  assert.match(workflow, /CANDIDATE_RUN_ID: "44788719546"/);
+  assert.match(workflow, /CANDIDATE_SOURCE_SHA: 1682df46286ecbc6c9c74eb881769ad2aae3a90c/);
+  assert.match(workflow, /CANDIDATE_APK_SHA256: e77522f759e8051fb20d4bddfb20a1ac3d2755a8ac1caf97ef87db531c95bfcf/);
+  assert.match(workflow, /CANDIDATE_VERSION: 2\.3\.116/);
+  assert.match(workflow, /CANDIDATE_VERSION_CODE: "2003116"/);
   assert.match(workflow, /PUBLISHED_ANDROID_VERSION: 2\.3\.105/);
-  assert.match(workflow, /CANDIDATE_APK: candidate\/YAWF\.Stream_Android_2\.3\.115\.apk/);
+  assert.match(workflow, /CANDIDATE_APK: candidate\/YAWF\.Stream_Android_2\.3\.116\.apk/);
   assert.ok(workflow.includes("candidateApkSha256=$CANDIDATE_APK_SHA256"));
   assert.ok(workflow.includes("expectedPublishedAndroidVersion=$PUBLISHED_ANDROID_VERSION"));
   const policy = readFileSync(join(root, "scripts/android-runtime-instrumentation/app/src/main/java/com/yawf/runtimeinstrumentation/FlowPolicy.java"), "utf8");
   const candidate = workflow.match(/^      CANDIDATE_VERSION: ([\d.]+)$/m)?.[1];
   const published = workflow.match(/^      PUBLISHED_ANDROID_VERSION: ([\d.]+)$/m)?.[1];
-  assert.ok(policy.includes(`SIGNED_115_CANDIDATE_VERSION = "${candidate}"`));
-  assert.ok(policy.includes(`SIGNED_115_BASELINE_VERSION = "${published}"`));
-  assert.match(policy, /SIGNED_115_CANDIDATE_VERSION\.equals\(candidateVersion\)\s+&& SIGNED_115_BASELINE_VERSION\.equals\(publishedVersion\)/);
+  assert.ok(policy.includes(`SIGNED_116_CANDIDATE_VERSION = "${candidate}"`));
+  assert.ok(policy.includes(`SIGNED_116_BASELINE_VERSION = "${published}"`));
+  assert.match(policy, /SIGNED_116_CANDIDATE_VERSION\.equals\(candidateVersion\)\s+&& SIGNED_116_BASELINE_VERSION\.equals\(publishedVersion\)/);
   assert.match(workflow, /--certificate-pin candidate-source\/web\/src-tauri\/SIGNING_CERT_SHA256/);
   assert.match(workflow, /python3 candidate-source\/scripts\/verify_android_apk\.py/);
 });

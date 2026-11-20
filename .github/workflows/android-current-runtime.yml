@@ -30,14 +30,14 @@ jobs:
     timeout-minutes: 25
     env:
       # Replace this fixed block together when a later signed candidate is reviewed.
-      CANDIDATE_RUN_ID: "44775976446"
-      CANDIDATE_SOURCE_SHA: 13cdcaf21b886239c0e0c67afa710de95035a1ba
-      CANDIDATE_APK_SHA256: a07e3108e42e4f45caaabcc46d305903977205b966c7f09858d411d87db45e01
-      CANDIDATE_VERSION: 2.3.115
-      CANDIDATE_VERSION_CODE: "2003115"
+      CANDIDATE_RUN_ID: "44788719546"
+      CANDIDATE_SOURCE_SHA: 1682df46286ecbc6c9c74eb881769ad2aae3a90c
+      CANDIDATE_APK_SHA256: e77522f759e8051fb20d4bddfb20a1ac3d2755a8ac1caf97ef87db531c95bfcf
+      CANDIDATE_VERSION: 2.3.116
+      CANDIDATE_VERSION_CODE: "2003116"
       PUBLISHED_ANDROID_VERSION: 2.3.105
       CANDIDATE_ARTIFACT: android-phone-verification-candidate
-      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.115.apk
+      CANDIDATE_APK: candidate/YAWF.Stream_Android_2.3.116.apk
       SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
       AVD_NAME: yawf-phone-api36-current-runtime
       EMULATOR_SERIAL: emulator-5554
