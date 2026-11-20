@@ -126,10 +126,11 @@ class YawfAndroidUpdater private constructor(
 
     private const val REPOSITORY_OWNER = "Tgk-30"
     private const val REPOSITORY_NAME = "YAWF-Stream"
-    private const val RELEASES_PER_PAGE = 20
-    private const val MAX_RELEASE_PAGES = 10
-    private const val MAX_RELEASE_PAGE_BYTES = 1024 * 1024
-    private const val MAX_RELEASE_TOTAL_BYTES = 8 * 1024 * 1024
+    private const val PHONE_REF_PREFIX = "refs/tags/android-v"
+    private const val MAX_PHONE_REF_BYTES = 512 * 1024
+    private const val PHONE_REF_COUNT_LIMIT = 1024
+    private const val MAX_PHONE_RELEASE_LOOKUPS = 12
+    private const val MAX_RELEASE_METADATA_BYTES = 256 * 1024
     private const val MAX_MANIFEST_BYTES = 16 * 1024
     private const val MAX_APK_BYTES = 160L * 1024L * 1024L
     private const val CHECK_DEADLINE_MS = 45_000L
@@ -541,45 +542,67 @@ class YawfAndroidUpdater private constructor(
   private fun discoverCandidate(): Candidate? {
     val installed = installedIdentity()
     val deadline = SystemClock.elapsedRealtime() + CHECK_DEADLINE_MS
-    val releases = mutableListOf<ReleaseAssets>()
-    var releaseBytesRead = 0
-    var reachedReleaseHistoryEnd = false
-
-    for (page in 1..MAX_RELEASE_PAGES) {
-      ensureWorkerActive(deadline)
-      val url =
-        "https://api.github.com/repos/$REPOSITORY_OWNER/$REPOSITORY_NAME/releases" +
-          "?per_page=$RELEASES_PER_PAGE&page=$page"
-      val bytes = readBounded(url, MAX_RELEASE_PAGE_BYTES, deadline, RedirectMode.NONE)
-      releaseBytesRead = checkedReleaseHistoryBytes(releaseBytesRead, bytes.size)
-      val pageArray = parseJsonArray(bytes)
-      if (pageArray.length() > RELEASES_PER_PAGE) throw UpdaterFailure("Release page is oversized")
-      for (index in 0 until pageArray.length()) {
-        releaseAssets(pageArray.optJSONObject(index) ?: continue)?.let(releases::add)
-      }
-      if (releaseHistoryEnded(pageArray.length())) {
-        reachedReleaseHistoryEnd = true
-        break
-      }
-    }
-    return selectCandidateFromReleaseWindow(releases, installed.versionCode, reachedReleaseHistoryEnd) { release ->
-      readBounded(release.manifestUrl, MAX_MANIFEST_BYTES, deadline, RedirectMode.ASSET)
-    }
+    val api = "https://api.github.com/repos/$REPOSITORY_OWNER/$REPOSITORY_NAME"
+    val refs = readBounded(
+      "$api/git/matching-refs/tags/android-v",
+      MAX_PHONE_REF_BYTES,
+      deadline,
+      RedirectMode.NONE,
+      rejectPagination = true,
+    )
+    return resolvePhoneRelease(
+      refs,
+      installed.versionCode,
+      loadRelease = { tag ->
+        try {
+          readBounded("$api/releases/tags/$tag", MAX_RELEASE_METADATA_BYTES, deadline, RedirectMode.NONE)
+        } catch (failure: UpdaterFailure) {
+          // An existing Git tag need not have a public release. Other failures are inconclusive.
+          if (failure.httpStatus == HttpURLConnection.HTTP_NOT_FOUND) null else throw failure
+        }
+      },
+      loadManifest = { release ->
+        readBounded(release.manifestUrl, MAX_MANIFEST_BYTES, deadline, RedirectMode.ASSET)
+      },
+    )
   }
 
-  private fun selectCandidateFromReleaseWindow(
-    releases: List<ReleaseAssets>,
+  private fun resolvePhoneRelease(
+    refsBytes: ByteArray,
     installedVersionCode: Long,
-    reachedReleaseHistoryEnd: Boolean,
+    loadRelease: (String) -> ByteArray?,
     loadManifest: (ReleaseAssets) -> ByteArray,
   ): Candidate? {
-    // The fixed window need not exhaust all history to prove an upgrade. It
-    // cannot prove "up to date" unless the release history actually ended.
-    val newest = releases.maxByOrNull { it.semanticVersion }
-    val candidate = newest?.let { parseManifest(loadManifest(it), it) }
-    if (candidate != null && isVersionCodeUpgrade(candidate.versionCode, installedVersionCode)) return candidate
-    if (!reachedReleaseHistoryEnd) throw UpdaterFailure("No verified newer release in the bounded search window")
-    return null
+    val refs = parseJsonArray(refsBytes)
+    if (refs.length() !in 1 until PHONE_REF_COUNT_LIMIT) {
+      throw UpdaterFailure("Android tag index is empty or incomplete")
+    }
+    val versions = mutableMapOf<String, SemanticVersion>()
+    for (index in 0 until refs.length()) {
+      val ref = refs.optJSONObject(index)?.opt("ref") as? String
+        ?: throw UpdaterFailure("Android tag index is invalid")
+      if (!ref.startsWith(PHONE_REF_PREFIX)) throw UpdaterFailure("Unexpected Android tag namespace")
+      val tag = ref.removePrefix("refs/tags/")
+      val version = phoneTagVersion(tag) ?: continue
+      if (versions.put(tag, version) != null) throw UpdaterFailure("Duplicate Android tag")
+    }
+    for ((tag, _) in versions.entries.sortedByDescending { it.value }.take(MAX_PHONE_RELEASE_LOOKUPS)) {
+      val body = loadRelease(tag) ?: continue
+      val metadata = parseJsonObject(body)
+      if (metadata.opt("tag_name") != tag) throw UpdaterFailure("Android release tag does not match")
+      val draft = metadata.opt("draft") as? Boolean ?: throw UpdaterFailure("Invalid Android release state")
+      val prerelease = metadata.opt("prerelease") as? Boolean ?: throw UpdaterFailure("Invalid Android release state")
+      if (draft || prerelease) continue
+      val release = releaseAssets(metadata) ?: throw UpdaterFailure("Public Android release is missing update assets")
+      val candidate = parseManifest(loadManifest(release), release)
+      return candidate.takeIf { isVersionCodeUpgrade(it.versionCode, installedVersionCode) }
+    }
+    throw UpdaterFailure("No verified public Android release in the bounded tag lookups")
+  }
+
+  private fun phoneTagVersion(tag: String): SemanticVersion? {
+    val match = TAG_PATTERN.matchEntire(tag) ?: return null
+    return SemanticVersion(match.groupValues[1].toInt(), match.groupValues[2].toInt(), match.groupValues[3].toInt())
   }
 
   private fun releaseAssets(release: JSONObject): ReleaseAssets? {
@@ -587,14 +610,8 @@ class YawfAndroidUpdater private constructor(
     val prerelease = release.opt("prerelease") as? Boolean ?: return null
     if (draft || prerelease) return null
     val tag = release.opt("tag_name") as? String ?: return null
-    val tagMatch = TAG_PATTERN.matchEntire(tag) ?: return null
+    val semantic = phoneTagVersion(tag) ?: return null
     val version = tag.removePrefix("android-v")
-    val semantic =
-      SemanticVersion(
-        tagMatch.groupValues[1].toInt(),
-        tagMatch.groupValues[2].toInt(),
-        tagMatch.groupValues[3].toInt(),
-      )
     val expectedApkName = "YAWF.Stream_Android_$version.apk"
     val assets = release.optJSONArray("assets") ?: return null
     if (assets.length() > MAX_ASSETS_PER_RELEASE) throw UpdaterFailure("Release has too many assets")
@@ -1987,6 +2004,7 @@ class YawfAndroidUpdater private constructor(
     limit: Int,
     deadline: Long,
     redirectMode: RedirectMode,
+    rejectPagination: Boolean = false,
   ): ByteArray {
     var current = initialUrl
     for (redirect in 0..MAX_REDIRECTS) {
@@ -2005,7 +2023,12 @@ class YawfAndroidUpdater private constructor(
           current = resolvedRedirect(current, connection.getHeaderField("Location"))
           continue
         }
-        if (status != HttpURLConnection.HTTP_OK) throw UpdaterFailure("Update channel is unavailable")
+        if (status != HttpURLConnection.HTTP_OK) {
+          throw UpdaterFailure("Update channel is unavailable", httpStatus = status)
+        }
+        if (rejectPagination && !connection.getHeaderField("Link").isNullOrBlank()) {
+          throw UpdaterFailure("Android tag index is unexpectedly paginated")
+        }
         val declared = connection.contentLengthLong
         if (declared > limit) throw UpdaterFailure("Update response is oversized")
         val output = ByteArrayOutputStream(minOf(limit, 32 * 1024))
@@ -2118,18 +2141,6 @@ class YawfAndroidUpdater private constructor(
 
   private fun isVersionCodeUpgrade(candidateVersionCode: Long, installedVersionCode: Long): Boolean =
     candidateVersionCode in 1L..Int.MAX_VALUE.toLong() && candidateVersionCode > installedVersionCode
-
-  private fun checkedReleaseHistoryBytes(current: Int, next: Int): Int {
-    if (current < 0 || next !in 0..MAX_RELEASE_PAGE_BYTES || current > MAX_RELEASE_TOTAL_BYTES - next) {
-      throw UpdaterFailure("Release history is oversized")
-    }
-    return current + next
-  }
-
-  private fun releaseHistoryEnded(itemCount: Int): Boolean {
-    if (itemCount !in 0..RELEASES_PER_PAGE) throw UpdaterFailure("Release page is oversized")
-    return itemCount < RELEASES_PER_PAGE
-  }
 
   private fun expectedVersionCode(version: SemanticVersion): Long {
     if (version.minor !in 0..999 || version.patch !in 0..999) {
@@ -2597,7 +2608,7 @@ class YawfAndroidUpdater private constructor(
     private fun fail(): Nothing = throw UpdaterFailure("Update JSON is invalid")
   }
 
-  private class UpdaterFailure(message: String) : Exception(message)
+  private class UpdaterFailure(message: String, val httpStatus: Int? = null) : Exception(message)
 
   private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(Locale.US, it.toInt() and 0xff) }
 
