@@ -77,6 +77,12 @@ function rejectMutation(body, original, replacement, contract) {
   assert.throws(() => contract(body.replace(original, replacement)));
 }
 
+function replaceLast(body, original, replacement) {
+  const index = body.lastIndexOf(original);
+  assert.notEqual(index, -1, `mutation anchor is missing: ${original}`);
+  return body.slice(0, index) + replacement + body.slice(index + original.length);
+}
+
 function initialEnableContract(body) {
   for (const token of [
     "Configurator.getInstance()",
@@ -902,19 +908,20 @@ test("fixed critical interval enters zero-idle before Enable and captures only a
   assert.notEqual(genericClickMutant, source, "generic click mutant anchor was absent");
   assert.throws(() => fixedCriticalIntervalContract(genericClickMutant));
 
-  const movedZeroIdleMutant = source
-    .replace(
+  const movedZeroIdleMutant = replaceLast(
+    replaceLast(
+      source,
       "configurator.setWaitForIdleTimeout(0L);\n        try {",
       "try {",
-    )
-    .replace(
+    ),
       "freshEnables.get(0).click();",
       "freshEnables.get(0).click();\n            configurator.setWaitForIdleTimeout(0L);",
-    );
+  );
   assert.notEqual(movedZeroIdleMutant, source, "late zero-idle mutant anchor was absent");
   assert.throws(() => fixedCriticalIntervalContract(movedZeroIdleMutant));
 
-  const preCancelCaptureMutant = source.replace(
+  const preCancelCaptureMutant = replaceLast(
+    source,
     "freshEnables.get(0).click();",
     'freshEnables.get(0).click();\n            capture("mutant-before-cancel");',
   );
@@ -925,7 +932,8 @@ test("fixed critical interval enters zero-idle before Enable and captures only a
 test("fixed42 critical observer uses exact grouped progress and terminal queries before fresh Cancel", () => {
   fixed42CriticalQueryGroupContract(source);
 
-  const splitTerminalQuery = source.replace(
+  const splitTerminalQuery = replaceLast(
+    source,
     "BySelector terminalSelector = nativeDialogTextGroup(terminalTexts);",
     'BySelector terminalSelector = nativeDialogText("YAWF Stream is up to date");',
   );
@@ -1711,12 +1719,25 @@ public final class Fixed42LauncherDiagnosticsHarness {
 function fixed42MainProofDiagnosticContract(java) {
   const observe = methodBody(java, "observeFixed42SeedSnapshot");
   const mainStart = observe.indexOf('int mainIndex = fixed42UniqueResource(nodes, "main-content");');
-  const discoverStart = observe.indexOf(
-    'int discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);',
-    mainStart,
-  );
+  const discoverStart = observe.indexOf("int discoverIndex;", mainStart);
   assert.ok(mainStart >= 0 && discoverStart > mainStart,
     "fixed42 main-content proof block is not bounded before Discover observation");
+  const to61Gate = observe.indexOf("if (isFixed42To61AutomaticMode()) {", discoverStart);
+  const to61Classifier = observe.indexOf(
+    "discoverIndex = fixed42UniqueTo61DiscoverRoute(nodes, mainIndex);",
+    to61Gate,
+  );
+  const legacyElse = observe.indexOf("} else {", to61Classifier);
+  const legacyUnique = observe.indexOf(
+    'discoverIndex = fixed42UniqueSemantic(nodes, "Discover page", true);',
+    legacyElse,
+  );
+  assert.ok(to61Gate > discoverStart && to61Classifier > to61Gate
+      && legacyElse > to61Classifier && legacyUnique > legacyElse,
+  "fixed42-to61 classifier no longer retains the unchanged non-to61 uniqueness branch");
+  assert.equal((observe.match(
+    /discoverIndex = fixed42UniqueSemantic\(nodes, "Discover page", true\);/g,
+  ) ?? []).length, 1, "non-to61 must use original Discover uniqueness exactly once");
   const block = observe.slice(mainStart, discoverStart);
 
   for (const token of [
@@ -2020,8 +2041,11 @@ test("fixed42 launcher waits through one bounded public transition before one fr
       "if (false) {\n            launchFixed42ProductFromVisibleLauncher(phase);",
     )],
     ["deadline-reset", source.replace(
-      "observeFixed42LauncherReadiness(\n                appLabel, launcherPackage);\n        assertEquals(\"Fixed42 launcher icon was not freshly ready before click\"",
-      "observeFixed42LauncherReadiness(\n                appLabel, launcherPackage);\n        startedAt = SystemClock.uptimeMillis();\n        assertEquals(\"Fixed42 launcher icon was not freshly ready before click\"",
+      `Fixed42LauncherObservation fresh = observeFixed42LauncherReadiness(
+                appLabel, launcherPackage);`,
+      `Fixed42LauncherObservation fresh = observeFixed42LauncherReadiness(
+                appLabel, launcherPackage);
+        startedAt = SystemClock.uptimeMillis();`,
     )],
     ["second-drawer", source.replace(
       "drawerGestureSent = true;",
