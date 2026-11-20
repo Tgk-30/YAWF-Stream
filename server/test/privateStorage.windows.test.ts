@@ -12,6 +12,7 @@ import { acquireDatabaseLease, AppDatabase, createPreUpgradeSnapshotIfNeeded, da
 import { assertPrivateWindowsStorage, PrivateStorageError } from "../src/privateStorage.js";
 import { createDatabaseBackup, restoreDatabaseBackup } from "../src/recovery.js";
 import { createLegacyServerFixture } from "./fixtures/migrationFixtures.js";
+import { storageEquivalenceStep } from "./fixtures/storageEquivalenceDiagnostics.js";
 
 const fixtureScript = fileURLToPath(new URL("../../scripts/windows_storage_acl_test_fixture.ps1", import.meta.url));
 
@@ -60,30 +61,42 @@ describe.skipIf(process.platform !== "win32")("native Windows private storage", 
   }, 30_000);
 
   it("compares native descriptor and synthetic raw-ACL projections only after a real admission", () => {
-    try {
-      const path = join(root, "equivalence.sqlite"); writeFileSync(path, "disposable equivalence fixture");
-      // No helper/compiler/version probe precedes this actual admission.
+    const path = join(root, "equivalence.sqlite");
+    // No helper/compiler/version probe precedes this actual admission.
+    storageEquivalenceStep("admission", () => {
+      writeFileSync(path, "disposable equivalence fixture");
       assertPrivateWindowsStorage([path]);
+    });
+    const { binding, helper } = storageEquivalenceStep("observer-identity", () => {
       const directory = fileURLToPath(new URL("../.build/windows-storage-observer/runtime/", import.meta.url));
       const binding = JSON.parse(readFileSync(join(directory, "binding.json"), "utf8"));
       const helper = join(directory, "StorageDescriptorObserver.exe");
       const admitted = createHash("sha256").update(readFileSync(helper)).digest("hex") === binding.helperSha256;
       if (!admitted) throw new Error("Observer identity unavailable.");
-      const entries = [{ path, kind: "file", id: 0 }, { path: root, kind: "directory", id: 1 }];
-      const options = { encoding: "utf8" as const, timeout: 7000, maxBuffer: 256_000, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"] };
-      const current = JSON.parse(execFileSync(helper, [], { ...options, input: JSON.stringify({ protocol: binding.protocol, entries }) }));
-      const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+      return { binding, helper };
+    });
+    const entries = [{ path, kind: "file", id: 0 }, { path: root, kind: "directory", id: 1 }];
+    const options = { encoding: "utf8" as const, timeout: 7000, maxBuffer: 256_000, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"] };
+    const current = storageEquivalenceStep("native-descriptor", () => JSON.parse(execFileSync(helper, [], {
+      ...options, input: JSON.stringify({ protocol: binding.protocol, entries }),
+    })));
+    const powershell = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    const previous = storageEquivalenceStep("reference-descriptor", () => {
       const oldScript = fileURLToPath(new URL("./fixtures/windowsStorageOriginalObserver.ps1", import.meta.url));
-      const previous = JSON.parse(execFileSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", oldScript],
+      return JSON.parse(execFileSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", oldScript],
         { ...options, timeout: 20_000, input: JSON.stringify(entries) }).replace(/^\uFEFF/, "").trim());
+    });
+    storageEquivalenceStep("descriptor-comparison", () => {
       expect(isDeepStrictEqual(current.descriptors, previous)).toBe(true);
+    });
+    const scalar = storageEquivalenceStep("projection-observation", () => {
       const projectionScript = fileURLToPath(new URL("./fixtures/windowsStorageProjectionEquivalence.ps1", import.meta.url));
-      const scalar = JSON.parse(execFileSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", projectionScript],
+      return JSON.parse(execFileSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", projectionScript],
         { ...options, timeout: 20_000, input: JSON.stringify({ helper, sha256: binding.helperSha256 }) }).replace(/^\uFEFF/, "").trim());
+    });
+    storageEquivalenceStep("projection-comparison", () => {
       expect(scalar).toEqual({ equivalent: true, cases: 8 });
-    } catch {
-      throw new Error("Native descriptor equivalence failed. Raw observations were not retained.");
-    }
+    });
   }, 60_000);
 
   it("rejects a same-process permission change on a previously admitted file without changing its bytes", () => {
