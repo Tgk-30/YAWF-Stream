@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import test from "node:test";
 import vm from "node:vm";
 import { DEFAULT_NODE_RUNTIME_VERSION, MACOS_NODE_RUNTIME_VERSION } from "./desktop_node_runtime_policy.mjs";
@@ -51,6 +51,28 @@ test("downloader keeps nullish defaults and validated explicit overrides before 
       assert.ok(selected.errors.includes("Expected a plain semver version such as 24.22.2."));
     }
   }
+});
+
+test("Windows extraction invokes inbox tar with literal path arguments", () => {
+  const start = downloader.indexOf("function extract(archive, platform)");
+  const end = downloader.indexOf("const expectedDirectory", start);
+  assert.ok(start >= 0 && end > start);
+  const commands = [];
+  const cacheDir = "C:\\work [QA]\\node cache";
+  const archive = win32.join(cacheDir, "node runtime.zip");
+  vm.runInNewContext(
+    downloader.slice(start, end) + '}\nextract(archive, "win-x64");',
+    {
+      archive, cacheDir, join: win32.join,
+      process: { platform: "win32", env: { SystemRoot: "D:\\Windows" } },
+      rmSync() {}, mkdirSync() {},
+      execFileSync(file, args) { commands.push([file, [...args]]); },
+    },
+    { timeout: 1000 },
+  );
+  assert.deepEqual(commands, [[
+    "D:\\Windows\\System32\\tar.exe", ["-xf", archive, "-C", win32.join(cacheDir, "extract-win-x64")],
+  ]]);
 });
 
 test("standard macOS Bundle Node runtime step pins the shared Mac policy explicitly", () => {

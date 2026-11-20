@@ -99,7 +99,15 @@ test("revalidates owned remote root for both actions and fixes Local Mode to bun
 
 test("preserves all existing server-player security updater client and permissions code",()=>{
   for(const name of ["attachServerPlayerBridge","handleServerPlayerMessage","showServerPlayerConfirmation","beginServerPlayerChallenge","completeServerPlayerChallenge","ownsServerPlayerRequest","finishServerPlayerRequest","clearServerPlayerRequest","replyServerPlayer","recordServerPlayerAttempt","canonicalServerPlayerUrl","currentTopOrigin"]){
-    assert.equal(method(activity,name),method(previous,name),name);
+    const expected=method(previous,name);
+    if(name==="completeServerPlayerChallenge"){
+      const intent='      setDataAndType(Uri.parse(pending.url), "video/*")\n';
+      assert.equal(expected.split(intent).length,2);
+      assert.equal(method(activity,name),expected.replace(intent,intent+`      // Some players otherwise show the capability as the title and wait at
+      // a saved position instead of starting on a new handoff.
+      putExtra("title", "YAWF Stream")
+`),name);
+    }else assert.equal(method(activity,name),expected,name);
   }
   const beforeHttp=previous.slice(previous.indexOf("  private fun httpOrigin("),previous.indexOf("  fun showWebFullscreen("));
   assert.ok(activity.includes(beforeHttp));

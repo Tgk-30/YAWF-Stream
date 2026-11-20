@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
-  KOTLIN_ASSET_API, KOTLIN_JAR_BYTES, KOTLIN_JAR_SHA256, KOTLIN_JAR_SHA1, kotlinDownloadInvocation,
+  KOTLIN_JAR_URL, KOTLIN_JAR_RELEASE_URL, KOTLIN_JAR_BYTES, KOTLIN_JAR_SHA256, KOTLIN_JAR_SHA1,
+  kotlinDownloadInvocation, kotlinReleaseDownloadInvocation, retryWithKotlinRelease,
   kotlinTransferStatus, kotlinCompilerArtifactPath, verifyKotlinCompilerJar, stageVerifiedKotlinCompiler, fetchAndroidKotlinCompiler,
   KOTLIN_POM_URL, KOTLIN_POM_BYTES, KOTLIN_POM_SHA256, kotlinPomDownloadInvocation, kotlinCompilerPomPath, verifyKotlinCompilerPom, stageVerifiedKotlinCompilerPom,
 } from "./fetch_android_kotlin_compiler.mjs";
@@ -13,15 +14,25 @@ const cached = process.env.DS_TEST_KOTLIN_JAR;
 const cachedPom = process.env.DS_TEST_KOTLIN_POM;
 const fixture = () => realpathSync(mkdtempSync(join(tmpdir(), "kotlin-pin-")));
 test("anonymous curl is fixed-origin, TLS-only, curlrc-free and finitely bounded", () => {
-  const args = kotlinDownloadInvocation("/owned/artifact.jar");
-  assert.equal(args[0], "--disable"); assert.equal(args[args.indexOf("--config") + 1], "-");
-  assert.equal(args[args.indexOf("--proto") + 1], "=https"); assert.equal(args[args.indexOf("--proto-redir") + 1], "=https");
-  assert.equal(args.filter(s => s.startsWith("https://")).length, 1); assert.ok(args.includes(KOTLIN_ASSET_API));
-  assert.equal(args[args.indexOf("--max-filesize") + 1], String(KOTLIN_JAR_BYTES));
-  assert.equal(args[args.indexOf("--max-time") + 1], "60"); assert.equal(args[args.indexOf("--retry") + 1], "2");
-  for (const flag of ["--location-trusted", "--netrc", "--insecure", "--user", "Authorization"]) assert.equal(args.some(x => x.includes(flag)), false);
+  for (const [make, source] of [[kotlinDownloadInvocation, KOTLIN_JAR_URL], [kotlinReleaseDownloadInvocation, KOTLIN_JAR_RELEASE_URL]]) {
+    const args = make("/owned/artifact.jar");
+    assert.equal(args[0], "--disable"); assert.equal(args[args.indexOf("--config") + 1], "-");
+    assert.equal(args[args.indexOf("--proto") + 1], "=https"); assert.equal(args[args.indexOf("--proto-redir") + 1], "=https");
+    assert.equal(args.filter(s => s.startsWith("https://")).length, 1); assert.ok(args.includes(source));
+    assert.equal(args[args.indexOf("--max-filesize") + 1], String(KOTLIN_JAR_BYTES));
+    assert.equal(args[args.indexOf("--max-time") + 1], "60"); assert.equal(args[args.indexOf("--retry") + 1], "2");
+    for (const flag of ["--location-trusted", "--netrc", "--insecure", "--user", "Authorization"]) assert.equal(args.some(x => x.includes(flag)), false);
+  }
   assert.equal(KOTLIN_JAR_SHA256, "d3e70fb011675e77ef00f1a68918d3cd91eed26058977d1e3ea2a37a293233af");
   assert.equal(KOTLIN_JAR_SHA1, "c4b47f8e33cdbeedd8c1415ab9f9ade870388162");
+});
+test("only transient transport failures can select the pinned JetBrains release", () => {
+  for (const [status, stdout] of [[22,"429"],[22,"503"],[28,"000"],[18,"200"]]) {
+    assert.equal(retryWithKotlinRelease({ status, stdout }), true);
+  }
+  for (const [status, stdout] of [[0,"200"],[22,"403"],[22,"404"],[60,"000"],[63,"200"],[null,"200"]]) {
+    assert.equal(retryWithKotlinRelease({ status, stdout }), false);
+  }
 });
 test("transport failure summaries cannot expose response text", () => {
   assert.equal(kotlinTransferStatus({ status: 22, stdout: "504", stderr: "private fixture response" }), "curl=22, HTTP=504");
