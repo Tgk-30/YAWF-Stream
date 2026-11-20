@@ -9,8 +9,8 @@ import {
   KOTLIN_JAR_URL, KOTLIN_JAR_RELEASE_URL, KOTLIN_JAR_BYTES, KOTLIN_JAR_SHA256, KOTLIN_JAR_SHA1,
   kotlinDownloadInvocation, kotlinReleaseDownloadInvocation, retryWithKotlinAlternateSource,
   kotlinTransferStatus, kotlinCompilerArtifactPath, verifyKotlinCompilerJar, stageVerifiedKotlinCompiler, fetchAndroidKotlinCompiler,
-  KOTLIN_POM_URL, KOTLIN_POM_MIRROR_URL, KOTLIN_POM_BYTES, KOTLIN_POM_SHA256, kotlinPomDownloadInvocation,
-  kotlinPomMirrorDownloadInvocation, kotlinCompilerPomPath, verifyKotlinCompilerPom, stageVerifiedKotlinCompilerPom,
+  KOTLIN_POM_SOURCE_PATH, KOTLIN_POM_BYTES, KOTLIN_POM_SHA256, kotlinCompilerPomPath, verifyKotlinCompilerPom,
+  stageVerifiedKotlinCompilerPom,
 } from "./fetch_android_kotlin_compiler.mjs";
 const cached = process.env.DS_TEST_KOTLIN_JAR;
 const cachedPom = process.env.DS_TEST_KOTLIN_POM;
@@ -35,13 +35,6 @@ test("only fixed-source unavailability can select the verified alternate", () =>
   for (const [status, stdout] of [[0,"200"],[22,"403"],[22,"410"],[60,"000"],[63,"200"],[null,"200"]]) {
     assert.equal(retryWithKotlinAlternateSource({ status, stdout }), false);
   }
-});
-test("the alternate POM has the same bounds but only its own fixed Maven URL", () => {
-  const primary = kotlinPomDownloadInvocation("/owned/artifact.pom");
-  const alternate = kotlinPomMirrorDownloadInvocation("/owned/artifact.pom");
-  assert.deepEqual(alternate, primary.map(arg => arg === KOTLIN_POM_URL ? KOTLIN_POM_MIRROR_URL : arg));
-  assert.equal(alternate.filter(arg => arg.startsWith("https://")).length, 1);
-  assert.equal(new URL(KOTLIN_POM_MIRROR_URL).hostname, "repo1.maven.org");
 });
 test("a missing artifact uses the exact alternate but invalid successful bytes do not", () => {
   const source = readFileSync(new URL("./fetch_android_kotlin_compiler.mjs", import.meta.url), "utf8");
@@ -104,16 +97,35 @@ test("verified cached release stages exact JAR and POM and is inode-idempotent",
     assert.deepEqual(readdirSync(join(jar, "..")), ["kotlin-compiler-embeddable-2.3.21.jar", "kotlin-compiler-embeddable-2.3.21.pom"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+test("the exact cached JAR can complete the compiler repository without POM network access", { skip: !cached }, () => {
+  const root = fixture();
+  try {
+    stageVerifiedKotlinCompiler(cached, root);
+    const offline = "http://127.0.0.1:1";
+    const result = spawnSync(process.execPath, [
+      new URL("./fetch_android_kotlin_compiler.mjs", import.meta.url).pathname, root,
+    ], {
+      encoding: "utf8", timeout: 25_000,
+      env: {
+        ...process.env, HTTPS_PROXY: offline, https_proxy: offline,
+        ALL_PROXY: offline, all_proxy: offline, NO_PROXY: "", no_proxy: "",
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), root);
+    verifyKotlinCompilerPom(kotlinCompilerPomPath(root));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 test("corrupted cached source never publishes a destination", { skip: !cached }, () => {
   const root = fixture(); try { const source = join(root, "source.jar"); copyFileSync(cached, source); const bytes = readFileSync(source); bytes[0] ^= 1; writeFileSync(source, bytes); const maven = join(root, "m2"); assert.throws(() => stageVerifiedKotlinCompiler(source, maven), /hashes/); assert.equal(readdirSync(root).includes("m2"), false); } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("POM transfer has a fixed official URL, exact bounds and immutable hash", () => {
-  const args = kotlinPomDownloadInvocation("/owned/compiler.pom");
-  assert.equal(KOTLIN_POM_URL, "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-compiler-embeddable/2.3.21/kotlin-compiler-embeddable-2.3.21.pom");
-  assert.equal(args.filter(x => x.startsWith("https://")).length, 1);
-  assert.ok(args.includes(KOTLIN_POM_URL)); assert.equal(args[args.indexOf("--max-filesize") + 1], String(KOTLIN_POM_BYTES));
+test("the bundled upstream POM passes the unchanged length and hash pins", () => {
+  assert.equal(lstatSync(KOTLIN_POM_SOURCE_PATH).size, KOTLIN_POM_BYTES);
   assert.equal(KOTLIN_POM_SHA256, "9523c8feadcb17f42d04ffa97fe2a9c08e5db18f090f6db903dca5c36c7ae5c4");
+  assert.equal(verifyKotlinCompilerPom(KOTLIN_POM_SOURCE_PATH), KOTLIN_POM_SOURCE_PATH);
+  assert.match(readFileSync(KOTLIN_POM_SOURCE_PATH, "utf8"),
+    /<groupId>org\.jetbrains\.kotlin<\/groupId>\s+<artifactId>kotlin-compiler-embeddable<\/artifactId>\s+<version>2\.3\.21<\/version>/);
 });
 test("POM corruption and symlinks fail closed without overwriting the target", { skip: !cachedPom }, () => {
   const root = fixture(); try {
