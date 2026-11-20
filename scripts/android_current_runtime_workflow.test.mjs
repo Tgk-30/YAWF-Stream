@@ -171,13 +171,21 @@ test("external player outer timeout guard rejects the previous 30-minute cutoff"
   assert.throws(() => assertExternalPlayerOuterTimeout(mutant));
 });
 
-test("collects update transport only after the exact dialog on the owned guest without changing acceptance", () => {
+test("collects update transport only after verified installation on the owned guest without changing acceptance", () => {
   const probe = workflow.slice(workflow.indexOf("          collect_update_transport() {"),
     workflow.indexOf("          collect_failure() {"));
-  const actualDialog = probe.indexOf("grep -Fq 'text=\"Update check unavailable\"'");
   const expectedDevice = probe.indexOf('!= "$AVD_NAME"');
   const push = probe.indexOf('adb -s "$EMULATOR_SERIAL" push "$probe/classes.dex" "$dex"');
-  assert.ok(actualDialog >= 0 && expectedDevice > actualDialog && push > expectedDevice);
+  assert.match(probe, /installed-identity\.txt/);
+  for (const term of [
+    "'package=com.tgk30.debridstreamer'",
+    '"versionName=$CANDIDATE_VERSION"',
+    '"versionCode=$CANDIDATE_VERSION_CODE"',
+    '"sha256=$CANDIDATE_APK_SHA256"',
+  ]) {
+    const identity = probe.indexOf(`grep -Fxq ${term} "$identity"`);
+    assert.ok(identity >= 0 && expectedDevice > identity && push > expectedDevice);
+  }
   assert.match(probe, /timeout 50s adb -s "\$EMULATOR_SERIAL" shell -T/);
   assert.match(probe, /app_process \/system\/bin AndroidUpdateTransportProbe \$PUBLISHED_ANDROID_VERSION/);
   assert.match(probe, /2>\/dev\/null \s*\\\n\s*\| grep -E/);

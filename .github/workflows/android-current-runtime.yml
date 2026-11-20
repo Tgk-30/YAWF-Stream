@@ -259,10 +259,13 @@ jobs:
           emulator_pid=""
 
           collect_update_transport() {
-            # Keep the signed product and credential-free instrumentation unchanged.
-            # Accept only the exact native dialog from this run on this owned AVD.
-            local hierarchy="$run_evidence/persistent-instrumentation/10-failure.xml"
-            if [ ! -f "$hierarchy" ] || ! grep -Fq 'text="Update check unavailable"' "$hierarchy"; then
+            # Diagnose network transport even if a post-install UI failure stops
+            # the test before its updater dialog. This is never product acceptance.
+            local identity="$run_evidence/installed-identity.txt"
+            if [ ! -f "$identity" ] || ! grep -Fxq 'package=com.tgk30.debridstreamer' "$identity" \
+                || ! grep -Fxq "versionName=$CANDIDATE_VERSION" "$identity" \
+                || ! grep -Fxq "versionCode=$CANDIDATE_VERSION_CODE" "$identity" \
+                || ! grep -Fxq "sha256=$CANDIDATE_APK_SHA256" "$identity"; then
               return 0
             fi
             if [ "$(timeout 5s adb -s "$EMULATOR_SERIAL" emu avd name 2>/dev/null | tr -d '\r' | head -1)" != "$AVD_NAME" ]; then
