@@ -351,6 +351,17 @@ function driverContract(
   assert.match(resolver, /ANDROID_INTENT_RESOLVER, handler\.getApplicationPackage\(\)/);
   const choice = methodBody(d, 'private UiObject2 waitForOptionalResolverChoice(');
   assert.match(choice, /findLabeledClickableInPackage\(label, ANDROID_INTENT_RESOLVER, description\)/);
+  assert.match(choice, /if \(!ANDROID_INTENT_RESOLVER\.equals\(currentPackage\(\)\)\) return null/);
+  const files = methodBody(d, 'private boolean backFromExactVlcAllFilesScreenWithoutGrant(');
+  assert.match(files, /if \(!ANDROID_SETTINGS_PACKAGE\.equals\(currentPackage\(\)\)\) return false/);
+  assert.match(files, /assertNoBindingTermsVisible/);
+  assert.match(files, /if \(alreadyDeclined\) return false/);
+  assert.match(files, /By\.text\(exactLabel\(ALL_FILES_ACCESS_SCREEN\)\)\.pkg\(ANDROID_SETTINGS_PACKAGE\)/);
+  assert.match(files, /By\.text\(exactLabel\(handlerLabel\)\)\.pkg\(ANDROID_SETTINGS_PACKAGE\)/);
+  assert.match(files, /By\.text\(exactLabel\(ALL_FILES_ACCESS_SWITCH\)\)\.pkg\(ANDROID_SETTINGS_PACKAGE\)/);
+  assert.match(files, /control\.isChecked\(\) \|\| !hasVisibleBounds\(control\)/);
+  assert.equal((files.match(/device\.pressBack\(\)/g) ?? []).length, 1);
+  assert.doesNotMatch(files, /\.click\(|guardedClick|pressKeyCode|setChecked|settings put|grantRuntimePermission/);
   assert.match(resolver, /long remaining = deadline - SystemClock\.uptimeMillis\(\)/);
   assert.match(resolver, /Math\.min\(2_000, remaining\)/);
   assert.doesNotMatch(resolver, /soleHandlerDirectLaunchObserved = true|accept-sole-handler-direct-launch/);
@@ -364,6 +375,8 @@ function driverContract(
   assert.match(onboarding, /!fullscreenTipDismissed/);
   assert.equal((onboarding.match(/fullscreenTip\.click\(\)/g) ?? []).length, 1);
   assert.match(onboarding, /denyExactOptionalVlcPermissionIfPresent\(\)/);
+  assert.match(onboarding, /backFromExactVlcAllFilesScreenWithoutGrant\(systemAllFilesDeclined\)/);
+  assert.match(onboarding, /systemAllFilesDeclined = true/);
   assert.match(onboarding, /VLC_PACKAGE\.equals\(currentPackage\(\)\)/);
   assert.match(onboarding, /By\.res\(VLC_PACKAGE, "player_root"\)\.pkg\(VLC_PACKAGE\)/);
   assert.match(onboarding, /clickVlcOnboardingControl\(VLC_NO_FILE_ACCESS/);
@@ -446,6 +459,10 @@ for (const [name, original, mutate, contract] of [
   ['chooser reverts to requiring visible title', driver, s => s.replace('chooser = findSystemExternalResolver();', 'chooser = findTextOrDescription("Open external player");'), driverContract],
   ['destination accepted outside the system list', driver, s => s.replace('findLabeledClickableWithin(chooser, handlerLabel, "native resolver handler")', 'findLabeledClickable(handlerLabel)'), driverContract],
   ['single-use control from another process', driver, s => s.replace('findLabeledClickableInPackage(label, ANDROID_INTENT_RESOLVER, description)', 'findLabeledClickable(label)'), driverContract],
+  ['all-files denial can be repeated', driver, s => s.replace('if (alreadyDeclined) return false;', ''), driverContract],
+  ['all-files scope label unbound', driver, s => s.replace('By.text(exactLabel(handlerLabel)).pkg(ANDROID_SETTINGS_PACKAGE)', 'By.text(exactLabel(handlerLabel))'), driverContract],
+  ['all-files control can be enabled', driver, s => s.replace(' || control.isChecked() || !hasVisibleBounds(control)', ' || !hasVisibleBounds(control)'), driverContract],
+  ['all-files control touched', driver, s => s.replace('assertTrue("Back did not leave the exact VLC all-files request", device.pressBack());', 'control.click(); device.pressBack();'), driverContract],
   ['partial playback metadata', driver, s => s.replace('                && !playbackActivity.isEmpty()\n', ''), driverContract],
   ['multiple handler count weakened', driver, s => s.replace('handlerActivityCount >= 2', 'handlerActivityCount >= 1'), driverContract],
   ['settings transaction callsite bypass', driver, s => s.replace(

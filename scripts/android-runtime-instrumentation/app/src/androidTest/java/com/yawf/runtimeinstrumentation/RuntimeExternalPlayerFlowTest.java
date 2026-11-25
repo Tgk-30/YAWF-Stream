@@ -1,6 +1,7 @@
 package com.yawf.runtimeinstrumentation;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -56,6 +57,9 @@ public final class RuntimeExternalPlayerFlowTest {
             "Open in external player Choose VLC or another installed video app";
     private static final String SYSTEM_UI_PACKAGE = "com.android.systemui";
     private static final String ANDROID_INTENT_RESOLVER = "com.android.intentresolver";
+    private static final String ANDROID_SETTINGS_PACKAGE = "com.android.settings";
+    private static final String ALL_FILES_ACCESS_SCREEN = "All files access";
+    private static final String ALL_FILES_ACCESS_SWITCH = "Allow access to manage all files";
     private static final String FULLSCREEN_TIP_TITLE = "Viewing full screen";
     private static final String FULLSCREEN_TIP_DESCRIPTION =
             "To exit, swipe down from the top of your screen";
@@ -174,6 +178,7 @@ public final class RuntimeExternalPlayerFlowTest {
         checks.put("nonbindingFullscreenTipDismissed", false);
         checks.put("vlcOnboardingObserved", false);
         checks.put("vlcStorageAccessDenied", false);
+        checks.put("vlcSystemAllFilesBackWithoutGrant", false);
         checks.put("vlcOptionalPermissionDenied", false);
 
         String outcome = "failed";
@@ -411,6 +416,7 @@ public final class RuntimeExternalPlayerFlowTest {
         requireHandlerAdmission();
         long deadline = SystemClock.uptimeMillis() + MEDIA_WAIT_MS;
         boolean fullscreenTipDismissed = false;
+        boolean systemAllFilesDeclined = false;
         boolean welcomeAdvanced = false;
         boolean noFileAccessSelected = false;
         boolean noFileAccessAdvanced = false;
@@ -418,6 +424,12 @@ public final class RuntimeExternalPlayerFlowTest {
         boolean notificationSkipped = false;
         boolean allSetStarted = false;
         while (SystemClock.uptimeMillis() < deadline) {
+            if (backFromExactVlcAllFilesScreenWithoutGrant(systemAllFilesDeclined)) {
+                systemAllFilesDeclined = true;
+                checks.put("vlcSystemAllFilesBackWithoutGrant", true);
+                SystemClock.sleep(250);
+                continue;
+            }
             UiObject2 fullscreenTip = findExactFullscreenTipButton();
             if (fullscreenTip != null) {
                 assertTrue("The exact fullscreen tip reappeared after its one allowed dismissal",
@@ -896,10 +908,45 @@ public final class RuntimeExternalPlayerFlowTest {
         return dialog;
     }
 
+    private boolean backFromExactVlcAllFilesScreenWithoutGrant(boolean alreadyDeclined)
+            throws Exception {
+        if (!ANDROID_SETTINGS_PACKAGE.equals(currentPackage())) return false;
+        RuntimeExternalLegalSnapshot.assertNoBindingTermsVisible(
+                instrumentation.getUiAutomation(), BINDING_TERMS);
+        if (alreadyDeclined) return false;
+        List<UiObject2> titles = device.findObjects(
+                By.text(exactLabel(ALL_FILES_ACCESS_SCREEN)).pkg(ANDROID_SETTINGS_PACKAGE));
+        List<UiObject2> appNames = device.findObjects(
+                By.text(exactLabel(handlerLabel)).pkg(ANDROID_SETTINGS_PACKAGE));
+        List<UiObject2> labels = device.findObjects(
+                By.text(exactLabel(ALL_FILES_ACCESS_SWITCH)).pkg(ANDROID_SETTINGS_PACKAGE));
+        if (titles.size() != 1 || appNames.size() != 1 || labels.size() != 1
+                || !hasVisibleBounds(titles.get(0)) || !hasVisibleBounds(appNames.get(0))
+                || !hasVisibleBounds(labels.get(0))) return false;
+        UiObject2 control = labels.get(0).getParent();
+        for (int depth = 0; depth < 5 && control != null
+                && ANDROID_SETTINGS_PACKAGE.equals(control.getApplicationPackage())
+                && !control.isCheckable(); depth++) {
+            control = control.getParent();
+        }
+        if (control == null || !ANDROID_SETTINGS_PACKAGE.equals(control.getApplicationPackage())
+                || !control.isCheckable() || control.isChecked() || !hasVisibleBounds(control)) {
+            return false;
+        }
+        capture("vlc-system-all-files-left-off");
+        assertEquals("Settings changed before the single Back action",
+                ANDROID_SETTINGS_PACKAGE, currentPackage());
+        assertFalse("All files access became enabled", control.isChecked());
+        assertTrue("Back did not leave the exact VLC all-files request", device.pressBack());
+        log("Left the exact VLC all-files request off and pressed Back once");
+        return true;
+    }
+
     private UiObject2 waitForOptionalResolverChoice(
             String label, long timeoutMs, String description) {
         long deadline = SystemClock.uptimeMillis() + timeoutMs;
         while (SystemClock.uptimeMillis() < deadline) {
+            if (!ANDROID_INTENT_RESOLVER.equals(currentPackage())) return null;
             assertNoOutOfScopeApproval();
             UiObject2 found = findLabeledClickableInPackage(label, ANDROID_INTENT_RESOLVER, description);
             if (found != null) return found;
