@@ -340,9 +340,17 @@ function driverContract(
   const resolver = methodBody(d, 'private void resolveExternalDestination()');
   assert.match(resolver, /long deadline = SystemClock\.uptimeMillis\(\) \+ SHORT_WAIT_MS/);
   assert.match(resolver, /while \(SystemClock\.uptimeMillis\(\) < deadline\)/);
-  assert.match(resolver, /findTextOrDescription\("Open external player"\)/);
+  assert.match(d, /ANDROID_INTENT_RESOLVER = "com\.android\.intentresolver"/);
+  assert.match(resolver, /findSystemExternalResolver\(\)/);
+  const systemResolver = methodBody(d, 'private UiObject2 findSystemExternalResolver()');
+  assert.match(systemResolver, /By\.res\("android", "resolver_list"\)\.pkg\(ANDROID_INTENT_RESOLVER\)/);
+  assert.match(systemResolver, /resolvers\.size\(\) <= 1/);
+  assert.match(systemResolver, /hasVisibleBounds\(resolver\) \? resolver : null/);
   assert.match(resolver, /realAndroidChooserObserved = true/);
-  assert.match(resolver, /chooser == null \? null : findLabeledClickable\(handlerLabel\)/);
+  assert.match(resolver, /chooser == null \? null\s*:\s*findLabeledClickableWithin\(chooser, handlerLabel, "native resolver handler"\)/);
+  assert.match(resolver, /ANDROID_INTENT_RESOLVER, handler\.getApplicationPackage\(\)/);
+  const choice = methodBody(d, 'private UiObject2 waitForOptionalResolverChoice(');
+  assert.match(choice, /findLabeledClickableInPackage\(label, ANDROID_INTENT_RESOLVER, description\)/);
   assert.match(resolver, /long remaining = deadline - SystemClock\.uptimeMillis\(\)/);
   assert.match(resolver, /Math\.min\(2_000, remaining\)/);
   assert.doesNotMatch(resolver, /soleHandlerDirectLaunchObserved = true|accept-sole-handler-direct-launch/);
@@ -434,6 +442,10 @@ for (const [name, original, mutate, contract] of [
   ['wrong fullscreen overlay title', driver, s => s.replace('FULLSCREEN_TIP_TITLE = "Viewing full screen"', 'FULLSCREEN_TIP_TITLE = "Full screen"'), driverContract],
   ['direct launch bypass', driver, s => s.replace('return "wait";', 'return "accept-sole-handler-direct-launch";'), driverContract],
   ['unbounded chooser resolver', driver, s => s.replace('while (SystemClock.uptimeMillis() < deadline)', 'while (true)'), driverContract],
+  ['chooser accepted from another process', driver, s => s.replace('.pkg(ANDROID_INTENT_RESOLVER));', ');'), driverContract],
+  ['chooser reverts to requiring visible title', driver, s => s.replace('chooser = findSystemExternalResolver();', 'chooser = findTextOrDescription("Open external player");'), driverContract],
+  ['destination accepted outside the system list', driver, s => s.replace('findLabeledClickableWithin(chooser, handlerLabel, "native resolver handler")', 'findLabeledClickable(handlerLabel)'), driverContract],
+  ['single-use control from another process', driver, s => s.replace('findLabeledClickableInPackage(label, ANDROID_INTENT_RESOLVER, description)', 'findLabeledClickable(label)'), driverContract],
   ['partial playback metadata', driver, s => s.replace('                && !playbackActivity.isEmpty()\n', ''), driverContract],
   ['multiple handler count weakened', driver, s => s.replace('handlerActivityCount >= 2', 'handlerActivityCount >= 1'), driverContract],
   ['settings transaction callsite bypass', driver, s => s.replace(

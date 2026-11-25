@@ -55,6 +55,7 @@ public final class RuntimeExternalPlayerFlowTest {
     private static final String EXTERNAL_PLAYER_LABEL =
             "Open in external player Choose VLC or another installed video app";
     private static final String SYSTEM_UI_PACKAGE = "com.android.systemui";
+    private static final String ANDROID_INTENT_RESOLVER = "com.android.intentresolver";
     private static final String FULLSCREEN_TIP_TITLE = "Viewing full screen";
     private static final String FULLSCREEN_TIP_DESCRIPTION =
             "To exit, swipe down from the top of your screen";
@@ -318,7 +319,7 @@ public final class RuntimeExternalPlayerFlowTest {
         while (SystemClock.uptimeMillis() < deadline) {
             assertNoOutOfScopeApproval();
 
-            UiObject2 chooser = findTextOrDescription("Open external player");
+            UiObject2 chooser = findSystemExternalResolver();
             if (chooser != null) {
                 if (!realAndroidChooserObserved) {
                     realAndroidChooserObserved = true;
@@ -327,19 +328,22 @@ public final class RuntimeExternalPlayerFlowTest {
                 }
                 requireHandlerAdmission();
             }
-            UiObject2 handler = chooser == null ? null : findLabeledClickable(handlerLabel);
+            UiObject2 handler = chooser == null ? null
+                    : findLabeledClickableWithin(chooser, handlerLabel, "native resolver handler");
             String action = chooseExternalDestinationAction(
                     chooser != null,
                     handler != null);
 
             if ("select-chooser-handler".equals(action)) {
+                assertEquals("Chooser row escaped the system resolver",
+                        ANDROID_INTENT_RESOLVER, handler.getApplicationPackage());
                 capture("chooser-handler-observed");
                 guardedClick(handler, "admitted external handler");
 
                 long remaining = deadline - SystemClock.uptimeMillis();
                 if (remaining > 0) {
-                    UiObject2 justOnce = waitForOptionalLabeledClickable(
-                            exactCaseInsensitiveLabel("Just once"),
+                    UiObject2 justOnce = waitForOptionalResolverChoice(
+                            "Just once",
                             Math.min(2_000, remaining),
                             "single-use chooser choice");
                     if (justOnce != null && !handlerPackage.equals(currentPackage())) {
@@ -352,6 +356,16 @@ public final class RuntimeExternalPlayerFlowTest {
             SystemClock.sleep(250);
         }
         fail("Timed out waiting for the exact Android chooser and admitted VLC destination");
+    }
+
+    private UiObject2 findSystemExternalResolver() {
+        // Stock API 36 can omit the chooser title from its accessibility tree.
+        List<UiObject2> resolvers = device.findObjects(
+                By.res("android", "resolver_list").pkg(ANDROID_INTENT_RESOLVER));
+        assertTrue("Ambiguous Android resolver list", resolvers.size() <= 1);
+        if (resolvers.isEmpty()) return null;
+        UiObject2 resolver = resolvers.get(0);
+        return hasVisibleBounds(resolver) ? resolver : null;
     }
 
     private static String chooseExternalDestinationAction(
@@ -882,12 +896,12 @@ public final class RuntimeExternalPlayerFlowTest {
         return dialog;
     }
 
-    private UiObject2 waitForOptionalLabeledClickable(
-            Pattern labelPattern, long timeoutMs, String description) {
+    private UiObject2 waitForOptionalResolverChoice(
+            String label, long timeoutMs, String description) {
         long deadline = SystemClock.uptimeMillis() + timeoutMs;
         while (SystemClock.uptimeMillis() < deadline) {
             assertNoOutOfScopeApproval();
-            UiObject2 found = findLabeledClickable(labelPattern, description);
+            UiObject2 found = findLabeledClickableInPackage(label, ANDROID_INTENT_RESOLVER, description);
             if (found != null) return found;
             SystemClock.sleep(250);
         }
