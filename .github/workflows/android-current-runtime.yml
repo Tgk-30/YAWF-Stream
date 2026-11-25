@@ -9,7 +9,7 @@ on:
         required: true
         default: false
       external_player_fixture:
-        description: Test the unchanged public phone42 remote external-player flow on a fresh supported API36 emulator
+        description: Test the exact signed phone 2.3.116 remote external-player flow on fresh API 36
         type: boolean
         required: true
         default: false
@@ -504,17 +504,19 @@ jobs:
       contents: read
 
   external-player-fixture:
-    if: github.ref_type == 'branch' && inputs.external_player_fixture == true && inputs.permission_fixture != true
-    name: Public phone42 remote external player on fresh API36
+    if: github.ref_type == 'branch' && inputs.external_player_fixture == true && inputs.permission_fixture != true && github.ref_name == 'codex/android116-vlc-runtime'
+    name: Tagged signed phone116 remote external player on fresh API36
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       EVIDENCE: android-external-player-evidence
-      PRODUCT_APK: public-phone42.apk
-      PRODUCT_SHA256: 3e1f72c2d1214b491fb505b5ea85ccc507d2478288066ff9cf846c5924d1805c
-      PRODUCT_SOURCE: ae9b35f8513c9f7e203508f2c95f1f99d77ddcf5
-      PRODUCT_VERSION: 2.3.42
-      PRODUCT_VERSION_CODE: "2003042"
+      PRODUCT_APK: signed-candidate/YAWF.Stream_Android_2.3.116.apk
+      PRODUCT_RUN_ID: "45619341814"
+      PRODUCT_ARTIFACT_ID: "15025525850"
+      PRODUCT_SHA256: 88d3277d1acb771e9c1663a7345ddcaba1cf1c7d630c901a9867a96ce6d0d6e8
+      PRODUCT_SOURCE: cf8ee3e7f55f518ced59e9f43ed136f9724fce5e
+      PRODUCT_VERSION: 2.3.116
+      PRODUCT_VERSION_CODE: "2003116"
       VLC_APK: VLC-Android-3.7.1-x86_64.apk
       VLC_URL: https://download.videolan.org/pub/videolan/vlc-android/3.7.1/VLC-Android-3.7.1-x86_64.apk
       VLC_CHECKSUM_URL: https://download.videolan.org/pub/videolan/vlc-android/3.7.1/VLC-Android-3.7.1-x86_64.apk.sha256
@@ -528,30 +530,56 @@ jobs:
       VLC_PLAYBACK_ACTIVITY: org.videolan.vlc.gui.video.VideoPlayerActivity
       SYSTEM_IMAGE_PACKAGE: system-images;android-36;google_apis;x86_64
       EMULATOR_SERIAL: emulator-5554
-      AVD_NAME: yawf-external-phone42-api36
+      AVD_NAME: yawf-external-phone116-api36
     steps:
       - name: Checkout runtime fixture and driver
         uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Checkout immutable public APK verification source
+      - name: Checkout exact tagged APK and fixture product source
         uses: actions/checkout@v4
         with:
           ref: ${{ env.PRODUCT_SOURCE }}
-          path: public-phone-source
+          path: candidate-source
           persist-credentials: false
-      - name: Bind exact public APK and source
+      - name: Admit the numbered Android signing artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$PRODUCT_ARTIFACT_ID" | jq -e \
+            --arg source "$PRODUCT_SOURCE" --argjson run "$PRODUCT_RUN_ID" \
+            '.name=="android-phone-release-candidate" and .expired==false and .workflow_run.id==$run and
+             .workflow_run.head_sha==$source and .workflow_run.head_branch=="android-v2.3.116" and
+             .size_in_bytes==39457733 and .digest=="sha256:21e0d89627d3cd699b2ec3db7316d8ddb77e9bd43c5cb97f4146df931dd86f85"'
+      - name: Download exact tagged signing artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-phone-release-candidate
+          path: signed-candidate
+          run-id: ${{ env.PRODUCT_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Bind exact tagged APK and source
         shell: bash
         run: |
           set -euo pipefail
           umask 077
           mkdir -p "$EVIDENCE"
-          test "$(git -C public-phone-source rev-parse HEAD)" = "$PRODUCT_SOURCE"
-          curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 180 \
-            'https://github.com/Tgk-30/YAWF-Stream/releases/download/android-v2.3.42/YAWF.Stream_Android_2.3.42.apk' \
-            --output "$PRODUCT_APK"
+          test "$(git -C candidate-source rev-parse HEAD)" = "$PRODUCT_SOURCE"
+          python3 - <<'PYAPK'
+          import json, os
+          from pathlib import Path
+          apk=Path(os.environ['PRODUCT_APK'])
+          assert {p.name for p in apk.parent.iterdir()}=={apk.name,'android-update.json','SHA256SUMS'}
+          manifest=json.loads((apk.parent/'android-update.json').read_text())
+          assert manifest['version']==os.environ['PRODUCT_VERSION'] and manifest['sourceRevision']==os.environ['PRODUCT_SOURCE']
+          assert str(manifest['versionCode'])==os.environ['PRODUCT_VERSION_CODE'] and manifest['packageName']=='com.tgk30.debridstreamer'
+          assert manifest['apk']['sha256']==os.environ['PRODUCT_SHA256'] and manifest['apk']['name']==apk.name
+          assert manifest['apk']['size']==apk.stat().st_size
+          PYAPK
           printf '%s  %s\n' "$PRODUCT_SHA256" "$PRODUCT_APK" | sha256sum --check -
-          test "$(wc -c < "$PRODUCT_APK" | tr -d ' ')" = 88583041
+          test "$(wc -c < "$PRODUCT_APK" | tr -d ' ')" = 88832897
           curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 180 \
             "$VLC_URL" --output "$VLC_APK"
           curl --fail --location --proto '=https' --proto-redir '=https' --retry 2 --max-time 30 \
@@ -564,7 +592,7 @@ jobs:
             echo "publicApkSource=$PRODUCT_SOURCE"
             echo "publicApkSha256=$PRODUCT_SHA256"
             echo "publicApkVersion=$PRODUCT_VERSION"
-            echo "interoperability=original-signed-phone42-with-current-fixture-server-and-compiled-web"
+            echo "interoperability=official-tagged-signed-phone116-with-identical-server-and-compiled-web-revision"
             echo "productionServerOrProviderProof=false"
             echo "publicOtaProof=false"
             echo "arm16KiBProof=false"
@@ -622,9 +650,9 @@ jobs:
           test "$(apkanalyzer manifest application-id "$PRODUCT_APK")" = com.tgk30.debridstreamer
           test "$(apkanalyzer manifest version-name "$PRODUCT_APK")" = "$PRODUCT_VERSION"
           test "$(apkanalyzer manifest version-code "$PRODUCT_APK")" = "$PRODUCT_VERSION_CODE"
-          python3 public-phone-source/scripts/verify_android_apk.py \
+          python3 candidate-source/scripts/verify_android_apk.py \
             --apk "$PRODUCT_APK" --version "$PRODUCT_VERSION" \
-            --certificate-pin public-phone-source/web/src-tauri/SIGNING_CERT_SHA256 \
+            --certificate-pin candidate-source/web/src-tauri/SIGNING_CERT_SHA256 \
             --sdk "${ANDROID_SDK_ROOT:-$ANDROID_HOME}" | tee "$EVIDENCE/apk-verification.txt"
       - name: Verify exact official VLC external-handler APK
         shell: bash
@@ -674,8 +702,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          (cd web && npm ci && npm run build)
-          (cd server && npm ci)
+          (cd candidate-source/web && npm ci && npm run build)
+          (cd candidate-source/server && npm ci)
           gradle --project-dir scripts/android-runtime-instrumentation --no-daemon --max-workers=2 \
             :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
           app=scripts/android-runtime-instrumentation/app/build/outputs/apk/debug/app-debug.apk
@@ -786,8 +814,8 @@ jobs:
           ffmpeg -hide_banner -filters > "$EVIDENCE/ffmpeg-filters.txt" 2>&1
           grep -E '\bdrawtext\b' "$EVIDENCE/ffmpeg-filters.txt"
           test -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
-          node server/node_modules/tsx/dist/cli.mjs scripts/android_external_player_server_fixture.mts \
-            --repo "$GITHUB_WORKSPACE" --output "$fixture_output" > "$EVIDENCE/fixture.log" 2>&1 &
+          node candidate-source/server/node_modules/tsx/dist/cli.mjs scripts/android_external_player_server_fixture.mts \
+            --repo "$GITHUB_WORKSPACE/candidate-source" --output "$fixture_output" > "$EVIDENCE/fixture.log" 2>&1 &
           fixture_pid=$!
           deadline=$((SECONDS + 180))
           until grep -Fq '[fixture] READY server-mode-ui loopback' "$EVIDENCE/fixture.log"; do
@@ -1060,7 +1088,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-phone42-external-player-runtime-evidence
+          name: android-phone116-external-player-runtime-evidence
           path: ${{ env.EVIDENCE }}
           if-no-files-found: error
           retention-days: 14
