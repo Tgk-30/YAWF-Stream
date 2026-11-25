@@ -642,9 +642,11 @@ test("pending installer is one shot and cleared by pause, cancellation, cleanup,
 test("release discovery and manifest contracts are fixed and bounded", () => {
   assert.match(source, /REPOSITORY_OWNER = "Tgk-30"/);
   assert.match(source, /REPOSITORY_NAME = "YAWF-Stream"/);
-  assert.match(source, /RELEASES_PER_PAGE = 20/);
-  assert.match(source, /MAX_RELEASE_PAGES = 10/);
-  assert.match(source, /MAX_RELEASE_PAGE_BYTES = 1024 \* 1024/);
+  assert.match(source, /PHONE_REF_PREFIX = "refs\/tags\/android-v"/);
+  assert.match(source, /MAX_PHONE_REF_BYTES = 512 \* 1024/);
+  assert.match(source, /PHONE_REF_COUNT_LIMIT = 1024/);
+  assert.match(source, /MAX_PHONE_RELEASE_LOOKUPS = 12/);
+  assert.match(source, /MAX_RELEASE_METADATA_BYTES = 256 \* 1024/);
   assert.match(source, /MAX_MANIFEST_BYTES = 16 \* 1024/);
   assert.match(source, /MAX_APK_BYTES = 160L \* 1024L \* 1024L/);
   assert.match(source, /CHECK_DEADLINE_MS = 45_000L/);
@@ -661,27 +663,30 @@ test("release discovery and manifest contracts are fixed and bounded", () => {
   assert.match(source, /release\.apkDigest != null && release\.apkDigest != sha256/);
   assert.match(source, /size != release\.apkSize/);
   assert.match(source, /versionCode != expectedVersionCode\(release\.semanticVersion\)/);
-  assert.match(source, /MAX_RELEASE_TOTAL_BYTES = 8 \* 1024 \* 1024/);
-  assert.match(source, /if \(!reachedReleaseHistoryEnd\)/);
 });
 
-test("bounded release selection validates the greatest window candidate before upgrade or incomplete-history decisions", () => {
-  const discover = section("private fun discoverCandidate()", "private fun selectCandidateFromReleaseWindow(");
-  const select = section("private fun selectCandidateFromReleaseWindow(", "private fun releaseAssets(");
-  assert.match(discover, /selectCandidateFromReleaseWindow\(releases, installed\.versionCode, reachedReleaseHistoryEnd\)/);
-  assert.ok(discover.indexOf("for (page in 1..MAX_RELEASE_PAGES)") < discover.indexOf("return selectCandidateFromReleaseWindow"));
-  assert.doesNotMatch(discover, /if \(!reachedReleaseHistoryEnd\) throw/);
-  assert.match(select, /maxByOrNull \{ it\.semanticVersion \}/);
-  assert.ok(select.indexOf("parseManifest(loadManifest(it), it)") < select.indexOf("isVersionCodeUpgrade"));
-  assert.ok(select.indexOf("isVersionCodeUpgrade") < select.indexOf("if (!reachedReleaseHistoryEnd) throw"));
-  assert.ok(select.indexOf("if (!reachedReleaseHistoryEnd) throw") < select.lastIndexOf("return null"));
-  assert.doesNotMatch(select, /catch|firstOrNull|find \{/);
+test("Android phone discovery uses a complete bounded tag index and only public release metadata", () => {
+  const discover = section("private fun discoverCandidate()", "private fun resolvePhoneRelease(");
+  const resolve = section("private fun resolvePhoneRelease(", "private fun phoneTagVersion(");
+  const transport = section("private fun readBounded(", "private fun openConnection(");
+  assert.match(discover, /"\$api\/git\/matching-refs\/tags\/android-v",[\s\S]*?MAX_PHONE_REF_BYTES,[\s\S]*?RedirectMode\.NONE,[\s\S]*?rejectPagination = true/);
+  assert.match(discover, /readBounded\("\$api\/releases\/tags\/\$tag", MAX_RELEASE_METADATA_BYTES, deadline, RedirectMode\.NONE\)/);
+  assert.match(discover, /failure\.httpStatus == HttpURLConnection\.HTTP_NOT_FOUND\) null else throw failure/);
+  assert.match(transport, /rejectPagination && !connection\.getHeaderField\("Link"\)\.isNullOrBlank\(\)/);
+  assert.match(transport, /httpStatus = status/);
+  assert.doesNotMatch(discover, /latest|per_page|page=/i);
+  assert.match(resolve, /refs\.length\(\) !in 1 until PHONE_REF_COUNT_LIMIT/);
+  assert.match(resolve, /sortedByDescending \{ it\.value \}\.take\(MAX_PHONE_RELEASE_LOOKUPS\)/);
+  assert.match(resolve, /metadata\.opt\("tag_name"\) != tag/);
+  assert.match(resolve, /if \(draft \|\| prerelease\) continue/);
+  assert.ok(resolve.indexOf("parseManifest(loadManifest(release), release)") < resolve.indexOf("return candidate.takeIf"));
+  assert.match(resolve, /throw UpdaterFailure\("No verified public Android release in the bounded tag lookups"\)/);
 });
 
 test("source and redirect policy cannot be supplied by a caller", () => {
   assert.match(
     source,
-    /https:\/\/api\.github\.com\/repos\/\$REPOSITORY_OWNER\/\$REPOSITORY_NAME\/releases/,
+    /https:\/\/api\.github\.com\/repos\/\$REPOSITORY_OWNER\/\$REPOSITORY_NAME"/,
   );
   assert.match(
     source,
@@ -961,7 +966,7 @@ test("actual Kotlin parser, redirect, replay, state, and cancellation behavior",
       { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 },
     );
     assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
-    assert.match(run.stdout, /YawfAndroidUpdater behavior assertions passed: 108/);
+    assert.match(run.stdout, /YawfAndroidUpdater behavior assertions passed: 113/);
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
