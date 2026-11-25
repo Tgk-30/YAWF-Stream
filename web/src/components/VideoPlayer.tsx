@@ -2544,7 +2544,10 @@ export function VideoPlayer({
           if (purpose === "automatic-starvation" && snapshot === "legacy" && automaticHandoffState == null) return false;
           activationPosition = positionIntent === "fixed" ? position : latestAbsolutePositionRef.current;
           if (purpose === "automatic-starvation" && activationPosition < next.timelineOffsetSeconds) return false;
-          if (snapshot !== "legacy" && (purpose === "ordinary" || purpose === "automatic-starvation")) {
+          // Restoring a saved audio track also replaces a usable reader. A
+          // first segment by itself can run out before the next reload.
+          if (snapshot !== "legacy" && (purpose === "ordinary" || purpose === "remembered-audio" ||
+              purpose === "automatic-starvation")) {
             const state = currentWebviewHandoffState(sampledHandoffState);
             // A caller without any handoff state keeps compatibility behavior;
             // it is not eligible for a readiness-qualified claim. A temporarily
