@@ -3546,9 +3546,12 @@ export function VideoPlayer({
             : webRecoveryPending
               ? "Preparing a compatible stream"
               : mode === "webview"
-                ? webviewPaused
-                  ? "Playback paused"
-                  : "Playback playing"
+                ? webviewPending && !castSuspended
+                  // The webview announces its specific pending state below.
+                  ? null
+                  : webviewPaused
+                    ? "Playback paused"
+                    : "Playback playing"
                 : "Opening native playback"}
         </span>
         {automaticReduction?.owner === playbackOwner && (

@@ -11144,7 +11144,7 @@ describe("WebviewPlayer", () => {
         expect(screen.getByRole("status")).toHaveTextContent("Starting playback");
         expect(bar).toHaveClass("is-visible");
         expect(screen.getByRole("button", { name: "Close player" })).toBeInTheDocument();
-        expect(screen.getByText("Playback playing")).toBeInTheDocument();
+        expect(screen.queryByText("Playback playing")).not.toBeInTheDocument();
         expect(video.pause).not.toHaveBeenCalled();
         fireEvent.pause(video);
         fireEvent.canPlay(video);
@@ -11181,7 +11181,7 @@ describe("WebviewPlayer", () => {
         act(() => vi.advanceTimersByTime(4_000));
         expect(screen.getByRole("status")).toHaveTextContent("Synchronizing playback");
         expect(document.querySelector(".player-touch-transport")).toHaveClass("is-visible");
-        expect(screen.getByText("Playback playing")).toBeInTheDocument();
+        expect(screen.queryByText("Playback playing")).not.toBeInTheDocument();
         markCurrentMediaDataReady(video);
         video.currentTime = 0;
         fireEvent.timeUpdate(video);
@@ -11213,9 +11213,11 @@ describe("WebviewPlayer", () => {
         act(() => vi.advanceTimersByTime(4_000));
         expect(screen.getByRole("status")).toHaveTextContent("Buffering");
         expect(document.querySelector(".player-touch-transport")).toHaveClass("is-visible");
-        expect(screen.getByText("Playback playing")).toBeInTheDocument();
+        expect(screen.queryByText("Playback playing")).not.toBeInTheDocument();
+        expect(screen.queryByText("Playback paused")).not.toBeInTheDocument();
         expect(video.pause).not.toHaveBeenCalled();
         fireEvent.playing(video);
+        expect(screen.getByText("Playback playing")).toBeInTheDocument();
         act(() => vi.advanceTimersByTime(3_199));
         expect(document.querySelector(".player-touch-transport")).toHaveClass("is-visible");
         act(() => vi.advanceTimersByTime(1));
