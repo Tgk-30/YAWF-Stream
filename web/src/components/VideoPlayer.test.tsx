@@ -6254,6 +6254,84 @@ describe("WebviewPlayer", () => {
     });
   });
 
+  it.each(["playing", "paused", "seek before prepared start"] as const)(
+    "keeps the original playback while a remembered audio rendition has one segment: %s", async (scenario) => {
+      vi.useFakeTimers();
+      try {
+        globalThis.__DEBRIDSTREAMER_SERVER_URL__ = "https://server.example";
+        const inventory = deferred<{ durationSeconds: number; tracks: ServerAudioTrack[] }>();
+        const request = vi.fn(async (quality: ServerTranscodeQuality, start: number, audio?: number) => ({
+          url: `https://server.example/api/stream/resume/index.m3u8?quality=${quality}&start=${start}&audio=${audio}`,
+          timelineOffsetSeconds: start, startPositionSeconds: 0, quality, audioTrack: audio,
+        }));
+        const frontier = [6, 18];
+        const fetchMaster = vi.fn(async (source: string) => new Response(
+          "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\n480p.m3u8?generation=transcode-remembered\n",
+          { headers: {
+            "x-yawf-hls-snapshot-version": "1", "x-yawf-hls-snapshot-generation": "transcode-remembered",
+            "x-yawf-hls-snapshot-frontier": String(frontier.shift() ?? 18), "x-yawf-hls-snapshot-target": "6",
+            "x-yawf-hls-snapshot-endlist": "0", "x-yawf-transcode-quality": "480p",
+            "x-yawf-transcode-start": new URL(source).searchParams.get("start")!, "x-yawf-transcode-audio": "1",
+          } },
+        ));
+        vi.stubGlobal("fetch", fetchMaster);
+        const settleAudio = async () => {
+          await act(async () => { for (let i = 0; i < 16; i++) await Promise.resolve(); });
+        };
+        render(<VideoPlayer url="https://server.example/api/stream/resume/movie.mp4" title="Restored Audio"
+          startPositionSeconds={35}
+          savedPrefs={{ preferredAudioId: "1", preferredAudioLang: "fra" }}
+          serverOptimized={{ qualities: ["480p"], loadSourceInfo: () => inventory.promise, request }}
+          onClose={() => {}} />);
+        const original = document.querySelector("video.player-video") as HTMLVideoElement;
+        Object.defineProperties(original, {
+          duration: { configurable: true, value: 180 },
+          readyState: { configurable: true, value: HTMLMediaElement.HAVE_ENOUGH_DATA },
+          currentSrc: { configurable: true, get: () => original.src },
+          paused: { configurable: true, value: scenario === "paused" },
+          seekable: { configurable: true, value: { length: 1, start: () => 0, end: () => 180 } },
+        });
+        fireEvent.loadedMetadata(original);
+        fireEvent.canPlay(original);
+        original.currentTime = 35;
+        fireEvent.seeked(original);
+        if (scenario !== "paused") fireEvent.playing(original);
+        fireEvent.timeUpdate(original);
+        await act(async () => inventory.resolve({ durationSeconds: 180, tracks: [
+          { index: 0, language: "eng", label: "English", default: true },
+          { index: 1, language: "fra", label: "French", default: false },
+        ] }));
+        await settleAudio();
+        expect(request).toHaveBeenCalledExactlyOnceWith("480p", 35, 1);
+        expect(document.querySelector("video.player-video")).toBe(original);
+        expect(hlsInstances).toHaveLength(0);
+        expect(fetchMaster).toHaveBeenCalledTimes(1);
+
+        if (scenario === "seek before prepared start") {
+          const scrub = scrubBarMock.mock.calls.at(-1)?.[0];
+          if (scrub == null) throw new Error("Scrub bar props were not captured");
+          act(() => scrub.onSeek(29));
+          fireEvent.seeked(original);
+          fireEvent.timeUpdate(original);
+        } else if (scenario === "playing") {
+          original.currentTime = 37;
+          fireEvent.timeUpdate(original);
+        }
+        await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+        await settleAudio();
+        if (scenario === "seek before prepared start") {
+          expect(document.querySelector("video.player-video")).toBe(original);
+          expect(original.currentTime).toBe(29);
+          expect(hlsInstances).toHaveLength(0);
+        } else {
+          expect(hlsInstances.at(-1)?.loadSource).toHaveBeenCalledWith(expect.stringContaining("start=35&audio=1"));
+          expect(hlsInstances.at(-1)?.config.startPosition).toBe(scenario === "paused" ? 0 : 2);
+        }
+        expect(request).toHaveBeenCalledTimes(1);
+      } finally { vi.useRealTimers(); }
+    },
+  );
+
   describe("failed optimized audio recovery intent fence", () => {
     const resumePosition = 54.817215;
     const originalUrl = "https://server.example/api/stream/recovery-original";
